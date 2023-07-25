@@ -179,6 +179,16 @@ extern "C" void mgpuMemFree(void *ptr, CUstream /*stream*/) {
   CUDA_REPORT_IF_ERROR(cuMemFree(reinterpret_cast<CUdeviceptr>(ptr)));
 }
 
+extern "C" void *mgpuMemAllocManaged(uint64_t sizeBytes, unsigned int flags) {
+  ScopedContext scopedContext;
+  if (flags != CU_MEM_ATTACH_GLOBAL && flags != CU_MEM_ATTACH_HOST) {
+    fprintf(stderr, "Error: flags must be one of %d or %d, but received %d \n",
+            CU_MEM_ATTACH_GLOBAL, CU_MEM_ATTACH_HOST, flags);
+  }
+  CUdeviceptr sharedPtr;
+  CUDA_REPORT_IF_ERROR(cuMemAllocManaged(&sharedPtr, sizeBytes, flags));
+  return reinterpret_cast<void *>(sharedPtr);
+}
 extern "C" void mgpuMemcpy(void *dst, void *src, size_t sizeBytes,
                            CUstream stream) {
   CUDA_REPORT_IF_ERROR(cuMemcpyAsync(reinterpret_cast<CUdeviceptr>(dst),

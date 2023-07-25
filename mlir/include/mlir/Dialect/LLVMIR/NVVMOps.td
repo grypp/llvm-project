@@ -1472,4 +1472,74 @@ def NVVM_WgmmaWaitGroupSyncOp : NVVM_Op<"wgmma.wait.group.sync.aligned",
   }];
 }
 
+def NVVM_Wgmmam64n128k8f32tf32tf32eOp : NVVM_Op<"wgmma.mma_async.sync.aligned.m64n128k8.f32.tf32.tf32", 
+                    [DeclareOpInterfaceMethods<BasicPtxBuilderOpInterface>]>{
+  let results = (outs LLVM_AnyStruct:$result);
+  let arguments = (ins 
+    I64:$lhsDescriptor, 
+    I64:$rhsDescriptor, 
+    I32:$scaleD, 
+    DefaultValuedAttr<I32Attr, "1">:$scaleA, 
+    DefaultValuedAttr<I32Attr, "1">:$scaleB);  
+  let hasVerifier = 1;
+  let assemblyFormat = "$lhsDescriptor `,` $rhsDescriptor `,` $scaleD `,` $scaleA `,` $scaleB attr-dict `->` type($result)";
+  let extraClassDefinition = [{
+    std::string $cppClass::getPtx() { 
+      return  std::string(
+      "{\n"
+        ".reg .pred p;\n"
+        "setp.ne.b32 p, %66, 0;\n"
+        "wgmma.mma_async.sync.aligned.m64n128k8.f32.tf32.tf32 "
+        "{%0,   %1,   %2,   %3,   %4,   %5,   %6,   %7,   "
+        " %8,   %9,   %10,  %11,  %12,  %13,  %14,  %15,  "
+        " %16,  %17,  %18,  %19,  %20,  %21,  %22,  %23,  "
+        " %24,  %25,  %26,  %27,  %28,  %29,  %30,  %31,  "
+        " %32,  %33,  %34,  %35,  %36,  %37,  %38,  %39,  "
+        " %40,  %41,  %42,  %43,  %44,  %45,  %46,  %47,  "
+        " %48,  %49,  %50,  %51,  %52,  %53,  %54,  %55,  "
+        " %56,  %57,  %58,  %59,  %60,  %61,  %62,  %63},"
+        " %64,"
+        " %65,"
+        " p,    %67,  %68;\n"
+      "}\n"
+      );
+    }
+  }];
+}
+
+
+def NVVM_Wgmmam64n128k16f32f16f16eOp : NVVM_Op<"wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16", 
+                    [DeclareOpInterfaceMethods<BasicPtxBuilderOpInterface>]>{
+  let results = (outs LLVM_AnyAggregate:$result);
+  let arguments = (ins 
+    I64:$lhsDescriptor, 
+    I64:$rhsDescriptor, 
+    I32:$scaleD,     
+    DefaultValuedAttr<I32Attr, "1">:$scaleA, 
+    DefaultValuedAttr<I32Attr, "1">:$scaleB,
+    DefaultValuedAttr<I32Attr, "0">:$transA,
+    DefaultValuedAttr<I32Attr, "0">:$transB);  
+  let assemblyFormat = "$lhsDescriptor `,` $rhsDescriptor `,` $scaleD `,` $scaleA `,` $scaleB attr-dict `->` type($result)";
+  let extraClassDefinition = [{
+    std::string $cppClass::getPtx() { 
+      return  std::string("{\n"
+      ".reg .pred p;\n"
+      "setp.ne.b32 p, %66, 0;\n"
+      "wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16 "
+      "{%0,   %1,   %2,   %3,   %4,   %5,   %6,   %7,   "
+      " %8,   %9,   %10,  %11,  %12,  %13,  %14,  %15,  "
+      " %16,  %17,  %18,  %19,  %20,  %21,  %22,  %23,  "
+      " %24,  %25,  %26,  %27,  %28,  %29,  %30,  %31,  "
+      " %32,  %33,  %34,  %35,  %36,  %37,  %38,  %39,  "
+      " %40,  %41,  %42,  %43,  %44,  %45,  %46,  %47,  "
+      " %48,  %49,  %50,  %51,  %52,  %53,  %54,  %55,  "
+      " %56,  %57,  %58,  %59,  %60,  %61,  %62,  %63},"
+      " %64,"
+      " %65,"
+      " p,    %67,  %68,  %69,  %70;\n"
+      "}\n");
+    }
+  }];
+}
+
 #endif // NVVMIR_OPS

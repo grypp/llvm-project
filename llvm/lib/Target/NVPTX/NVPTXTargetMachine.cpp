@@ -61,7 +61,7 @@ static cl::opt<bool> UseShortPointersOpt(
     "nvptx-short-ptr",
     cl::desc(
         "Use 32-bit pointers for accessing const/local/shared address spaces."),
-    cl::init(false), cl::Hidden);
+    cl::init(true), cl::Hidden);
 
 // FIXME: intended as a temporary debugging aid. Should be removed before it
 // makes it into the LLVM-17 release.

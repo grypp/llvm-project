@@ -759,6 +759,17 @@ LogicalResult NVVMDialect::verifyOperationAttribute(Operation *op,
   return success();
 }
 
+LogicalResult Wgmmam64n128k8f32tf32tf32eOp::verify() {
+  auto stype = dyn_cast<LLVM::LLVMStructType>(getResult().getType());
+  if (!stype || stype.getBody().empty() || stype.getBody().size() != 64)
+    return emitError() << "Results must be LLVMStructType with 64xf32";
+  if (stype.getBody().size() != 64)
+    return emitError()
+           << "Results must be LLVMStructType with 64xf32. But current one has "
+           << stype.getBody().size() << " elements";
+  return success();
+}
+
 #define GET_OP_CLASSES
 #include "mlir/Dialect/LLVMIR/NVVMOps.cpp.inc"
 

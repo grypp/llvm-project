@@ -367,6 +367,29 @@ LogicalResult TmaCreateDescriptorOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// NVGPU_GenerateGmmaDescriptorOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult GenerateGmmaDescriptorOp::verify() {
+  MemRefType memrefType = getTensor().getType();
+  MemRefType tensorMapType = getTensorMap().getType().getTensor();
+
+  if (memrefType != tensorMapType)
+    return emitError() << "memref and tensor map type mismatch";
+
+  if (!memrefType.hasStaticShape() || !tensorMapType.hasStaticShape())
+    return emitError() << "non-static tensor";
+
+  if (memrefType.getRank() != 2)
+    return emitError() << "only 2d tensor is supported for the time being";
+
+  if (getTensorMap().getType().getSwizzle() ==
+      nvgpu::TensorMapSwizzleKind::SWIZZLE_NONE)
+    return emitError() << "None swizzle is not supported yet";
+
+  return success();
+}
+//===----------------------------------------------------------------------===//
 // TableGen'd dialect, type, and op definitions
 //===----------------------------------------------------------------------===//
 
