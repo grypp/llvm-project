@@ -113,9 +113,6 @@ func.func @main() {
       %phase = arith.constant 0 : index
       %ticks = arith.constant 10000000 : index
       nvgpu.mbarrier.try_wait.parity %barrier, %phase, %ticks : !barrierType
-      
-      %descA = nvgpu.wgmma.generate.descriptor %lhsShmem, %lhsTensorMap : !shmemlhs, !lhsTensorMap
-      %descB = nvgpu.wgmma.generate.descriptor %rhsShmem, %rhsTensorMap : !shmemrhs, !rhsTensorMap
 
       // Step 4 Sanity check of TMA
       scf.if %cnd {
@@ -129,16 +126,6 @@ func.func @main() {
         gpu.printf "WGMMA DescB : 0x%llx\n" %descB : i64
       }
 
-      gpu.barrier
-
-      // Step 6. Single GEMM 64x128x16
-      // Step 6.2 Step.6 needs to be pipelined
-      %scaleD = arith.constant 1 : i32 // D = A*B (no accumulate itself)
-      nvvm.wgmma.fence.aligned
-      nvvm.wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16 %descA, %descB, %scaleD, 1, 1 -> !accMatrix
-      nvvm.wgmma.commit.group.sync.aligned
-      nvvm.wgmma.wait.group.sync.aligned 1
-  
       gpu.terminator
   }
 
