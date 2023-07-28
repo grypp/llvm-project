@@ -277,6 +277,11 @@ protected:
       "mgpuDestroyCuSparseLtDnMat",
       llvmVoidType,
       {llvmPointerType, llvmPointerType /* void *stream */}};
+  FunctionCallBuilder allocManagedCallBuilder = {
+      "mgpuMemAllocManaged",
+      llvmPointerType /* void * */,
+      {llvmIntPtrType /* intptr_t sizeBytes */,
+       llvmInt32Type /* unsigned flags */}};
   FunctionCallBuilder create2To4SpMatCallBuilder = {
       "mgpuCusparseLtCreate2To4SpMat",
       llvmVoidType,
@@ -320,6 +325,20 @@ public:
 private:
   LogicalResult
   matchAndRewrite(gpu::HostUnregisterOp hostUnregisterOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override;
+};
+
+/// A rewrite pattern to convert gpu.alloc_managed operations into a GPU
+/// runtime call. Currently it supports CUDA and ROCm (HIP).
+class ConvertAllocManagedOpToGpuRuntimeCallPattern
+    : public ConvertOpToGpuRuntimeCallPattern<gpu::AllocManagedOp> {
+public:
+  ConvertAllocManagedOpToGpuRuntimeCallPattern(LLVMTypeConverter &typeConverter)
+      : ConvertOpToGpuRuntimeCallPattern<gpu::AllocManagedOp>(typeConverter) {}
+
+private:
+  LogicalResult
+  matchAndRewrite(gpu::AllocManagedOp allocOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override;
 };
 
@@ -1332,7 +1351,48 @@ static Value genConstInt32From(OpBuilder &builder, Location loc, T TValue) {
   return builder.create<LLVM::ConstantOp>(loc, llvmInt32Type,
                                           static_cast<int32_t>(TValue));
 }
+LogicalResult ConvertAllocManagedOpToGpuRuntimeCallPattern::matchAndRewrite(
+    gpu::AllocManagedOp allocOp, OpAdaptor adaptor,
+    ConversionPatternRewriter &rewriter) const {
+  MemRefType memRefType = allocOp.getType();
 
+  if (failed(areAllLLVMTypes(allocOp, adaptor.getOperands(), rewriter)) ||
+      !isConvertibleAndHasIdentityMaps(memRefType))
+    return failure();
+
+  auto loc = allocOp.getLoc();
+
+  // Get shape of the memref as values: static sizes are constant
+  // values and dynamic sizes are passed to 'alloc' as operands.
+  SmallVector<Value, 4> shape;
+  SmallVector<Value, 4> strides;
+  Value sizeBytes;
+  getMemRefDescriptorSizes(loc, memRefType, adaptor.getDynamicSizes(), rewriter,
+                           shape, strides, sizeBytes);
+
+  // Allocate the underlying buffer and store a pointer to it in the MemRef
+  // descriptor.
+  Type elementPtrType = this->getElementPtrType(memRefType);
+  Value flags = rewriter.create<LLVM::ConstantOp>(
+      loc, llvmInt32Type, allocOp.getAttachHost() ? 2 : 1);
+  Value allocatedPtr =
+      allocManagedCallBuilder.create(loc, rewriter, {sizeBytes, flags})
+          .getResult();
+  if (!getTypeConverter()->useOpaquePointers())
+    allocatedPtr =
+        rewriter.create<LLVM::BitcastOp>(loc, elementPtrType, allocatedPtr);
+
+  // No alignment.
+  Value alignedPtr = allocatedPtr;
+
+  // Create the MemRef descriptor.
+  auto memRefDescriptor = this->createMemRefDescriptor(
+      loc, memRefType, allocatedPtr, alignedPtr, shape, strides, rewriter);
+
+  rewriter.replaceOp(allocOp, {memRefDescriptor});
+
+  return success();
+}
 LogicalResult ConvertCreateDnTensorOpToGpuRuntimeCallPattern::matchAndRewrite(
     gpu::CreateDnTensorOp op, OpAdaptor adaptor,
     ConversionPatternRewriter &rewriter) const {
@@ -1795,6 +1855,7 @@ void mlir::populateGpuToLLVMConversionPatterns(LLVMTypeConverter &converter,
                ConvertSpMMBufferSizeOpToGpuRuntimeCallPattern,
                ConvertSpMMOpToGpuRuntimeCallPattern,
                ConvertSDDMMBufferSizeOpToGpuRuntimeCallPattern,
+               ConvertAllocManagedOpToGpuRuntimeCallPattern,
                ConvertSDDMMOpToGpuRuntimeCallPattern>(converter);
   patterns.add<ConvertLaunchFuncOpToGpuRuntimeCallPattern>(
       converter, gpuBinaryAnnotation, kernelBarePtrCallConv);

@@ -55,6 +55,24 @@
 
 thread_local static int32_t defaultDevice = 0;
 
+const char *kDebugEnvironmentVariable = "MLIR_CUDA_DEBUG";
+
+/// Helper method that checks environment value for debugging.
+bool isDebugEnabled() {
+  static bool isInitialized = false;
+  static bool isEnabled = false;
+  if (!isInitialized)
+    isEnabled = getenv(kDebugEnvironmentVariable) != nullptr;
+  return isEnabled;
+}
+
+#define debug_print(fmt, ...)                                                  \
+  do {                                                                         \
+    if (isDebugEnabled())                                                      \
+      fprintf(stderr, "%s:%d:%s(): " fmt, "CudaRuntimeWrappers.cpp", __LINE__, \
+              __func__, __VA_ARGS__);                                          \
+  } while (0)
+
 // Make the primary context of the current default device current for the
 // duration
 //  of the instance and restore the previous context on destruction.
@@ -179,6 +197,16 @@ extern "C" void mgpuMemFree(void *ptr, CUstream /*stream*/) {
   CUDA_REPORT_IF_ERROR(cuMemFree(reinterpret_cast<CUdeviceptr>(ptr)));
 }
 
+extern "C" void *mgpuMemAllocManaged(uint64_t sizeBytes, unsigned int flags) {
+  ScopedContext scopedContext;
+  if (flags != CU_MEM_ATTACH_GLOBAL && flags != CU_MEM_ATTACH_HOST) {
+    fprintf(stderr, "Error: flags must be one of %d or %d, but received %d \n",
+            CU_MEM_ATTACH_GLOBAL, CU_MEM_ATTACH_HOST, flags);
+  }
+  CUdeviceptr sharedPtr;
+  CUDA_REPORT_IF_ERROR(cuMemAllocManaged(&sharedPtr, sizeBytes, flags));
+  return reinterpret_cast<void *>(sharedPtr);
+}
 extern "C" void mgpuMemcpy(void *dst, void *src, size_t sizeBytes,
                            CUstream stream) {
   CUDA_REPORT_IF_ERROR(cuMemcpyAsync(reinterpret_cast<CUdeviceptr>(dst),
@@ -273,6 +301,24 @@ extern "C" MLIR_CUDA_WRAPPERS_EXPORT void mgpuTensorMapEncodeTiled(
       tensorMap, tensorDataType, tensorRank, globalAddress, globalDim,
       globalStrides, boxDim, elementStrides, interleave, swizzle, l2Promotion,
       oobFill));
+  debug_print("Created TMA descriptor\n TMA Desc Addr: %p\n"
+              "data type : %d\n"
+              "rank : %d\n"
+              "globalDim[5]: (%zu, %zu, %zu, %zu, %zu)\n"
+              "globalStrides[5]: (%zu, %zu, %zu, %zu, %zu)\n"
+              "boxDim[5]: (%u, %u, %u, %u, %u)\n"
+              "elementStrides[5]: (%u, %u, %u, %u, %u)\n"
+              "interleave: %u \n"
+              "swizzle: %u \n"
+              "l2Promotion: %u \n"
+              "oobFill: %u \n",
+              (void *)&tensorMap, tensorDataType, tensorRank, globalDim[0],
+              globalDim[1], globalDim[2], globalDim[3], globalDim[4],
+              globalStrides[0], globalStrides[1], globalStrides[2],
+              globalStrides[3], globalStrides[4], boxDim[0], boxDim[1],
+              boxDim[2], boxDim[3], boxDim[4], elementStrides[0],
+              elementStrides[1], elementStrides[2], elementStrides[3],
+              elementStrides[4], interleave, swizzle, l2Promotion, oobFill);
 }
 
 extern "C" MLIR_CUDA_WRAPPERS_EXPORT void *mgpuTensorMapEncodeTiledMemref(

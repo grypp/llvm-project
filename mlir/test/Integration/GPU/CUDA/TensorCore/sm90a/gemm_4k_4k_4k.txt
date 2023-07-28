@@ -1,0 +1,45 @@
+# GEMM Sequential
+------------------------------------------
+loop-i(128)
+  loop-j(128)
+    loop-k(64)
+      D = A * B
+
+# Parallel H100 GEMM (1 CTA, 128 threads)
+------------------------------------------
+kernel(f16 lhs[128][64], f16 rhs[64][128], f32 acc[128][128]) 
+  mbarriers[1] = mbarriers.init
+
+  shared_lhs = shmem_alloc(f16[1][128][64])
+  shared_rhs = shmem_alloc(f16[1][64][128])
+  res = shmem_alloc(f16[128][128])
+
+  shared_lhs[tmaCnt][0][0] = tma_load(lhs_cta[i][tmaCnt*64])
+  shared_rhs[tmaCnt][0][0] = tma_load(rhs_cta[tmaCnt*64][0])
+  mbarrier.expect_tx mbarriers[tmaCnt] 
+
+  // Step 5. Wait TMA
+  mbarrier.wait mbarriers[i]
+
+  // Step 6. Get Pointers of the Ready data
+  tiled_lhs = shared_lhs[i%8];
+  tiled_rhs = shared_lhs[i%8];
+
+  // Step 7. GEMM 128x128x64
+  res = alloc_stack(f32[128][128])
+  wgmma_fence()
+  res[tidx][0:64]  = wgmma_m64n128k16(tiled_lhs[0][0],   tiled_lhs[0][0]) 
+  res[tidx][0:64]  = wgmma_m64n128k16(tiled_lhs[0][16],  tiled_lhs[16][0]) 
+  res[tidx][0:64]  = wgmma_m64n128k16(tiled_lhs[0][32],  tiled_lhs[32][0]) 
+  res[tidx][0:64]  = wgmma_m64n128k16(tiled_lhs[0][48],  tiled_lhs[48][0]) 
+  res[tidx][64:64] = wgmma_m64n128k16(tiled_lhs[64][0],  tiled_lhs[16][0]) 
+  res[tidx][64:64] = wgmma_m64n128k16(tiled_lhs[64][16], tiled_lhs[32][0]) 
+  res[tidx][64:64] = wgmma_m64n128k16(tiled_lhs[64][32], tiled_lhs[48][0]) 
+  res[tidx][64:64] = wgmma_m64n128k16(tiled_lhs[64][48], tiled_lhs[0][0]) 
+  wgmma_commit()
+  wgmma_wait(1)
+
+  // Step 8. End of mainloop
+  wgmma_wait(0) 
+
+  

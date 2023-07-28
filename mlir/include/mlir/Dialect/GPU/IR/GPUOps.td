@@ -1414,6 +1414,39 @@ def GPU_SubgroupMmaComputeOp
   let hasVerifier = 1;
 }
 
+def GPU_AllocManagedOp : GPU_Op<"alloc_managed", []> {
+
+  let summary = "Managed memory allocation operation.";
+  let description = [{
+    The `gpu.alloc_managed` operation allocates a region of memory that is 
+    visible to GPU and CPU. It is similar to the `memref.alloc` op, but 
+    allocated data automatically migrated between the memory spaces by driver
+    via page faults or software.
+
+    `attachHost` memory cannot be accessed by any stream on any device.
+
+    Example:
+
+    ```mlir
+    %memref = gpu.alloc_managed (%width) : memref<64x?xf32, 1>
+    ```
+  }];
+
+  let arguments = (ins  Variadic<Index>:$dynamicSizes, 
+                        OptionalAttr<UnitAttr>:$attachHost);
+  let results = (outs Res<AnyMemRef, "", [MemAlloc]>:$memref);
+
+  let extraClassDeclaration = [{
+    MemRefType getType() { return ::llvm::cast<MemRefType>(getMemref().getType()); }
+  }];
+
+  let assemblyFormat = [{
+    `(` $dynamicSizes `)` attr-dict `:` type($memref)
+  }];
+  let hasCanonicalizer = 1;
+  let hasVerifier = 1;
+}
+
 def GPU_SubgroupMmaConstantMatrixOp : GPU_Op<"subgroup_mma_constant_matrix",
     [Pure,
      TypesMatchWith<"value type matches element type of mma_matrix",

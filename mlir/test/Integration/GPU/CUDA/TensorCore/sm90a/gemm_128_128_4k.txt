@@ -1,0 +1,60 @@
+# GEMM Sequential
+------------------------------------------
+loop-i(128)
+  loop-j(128)
+    loop-k(4096)
+      D = A * B
+------------------------------------------
+
+# Parallel H100 GEMM (1 CTA, 128 threads)
+CUDA kernel(f16 lhs[128][4096], f16 rhs[4096][128], f32 acc[128][128]) 
+-----------------------------------------------
+loop-i(1)        ---> blockIdx.x
+  loop-j(1)      ---> blockIdx.y
+-------- Mainloop (1 CTA, 128 threads) --------
+  // Step 1. Get Tiled Pointers. We have 1 CTA for sake of simplicity
+  lhs_cta = lhs(0)
+  rhs_cta = rhs(0)
+
+  // Step 2. Init mbarriers x 8 
+  mbarriers[8] = mbarriers.init
+
+  // Step 3. Shared memory for LHS/RHS. Need 7 tiles
+  shared_lhs = shmem_alloc(f16[8][128][64])
+  shared_rhs = shmem_alloc(f16[8][64][128])
+
+  // Step 4. TMA LOAD, 6 stages
+  tmaCnt = 0
+  do tmaCnt, 7
+    shared_lhs[tmaCnt][0][0] = tma_load(lhs_cta[i][tmaCnt*64])
+    shared_rhs[tmaCnt][0][0] = tma_load(rhs_cta[tmaCnt*64][0])
+    mbarrier.expect_tx mbarriers[tmaCnt] 
+  end
+-------------------- GEMM --------------------
+  do i = 0, 64
+    // Step 5. Wait TMA
+    mbarrier.wait mbarriers[i]
+    
+    // Step 6. Get Pointers of the Ready data
+    tiled_lhs = shared_lhs[i%8];
+    tiled_rhs = shared_lhs[i%8];
+
+    // Step 6. GEMM
+    wgmma_fence()
+    wgmma_m64n128k16(tiled_lhs[0][0],   tiled_lhs[0][0]) 
+    wgmma_m64n128k16(tiled_lhs[0][16],  tiled_lhs[16][0]) 
+    wgmma_m64n128k16(tiled_lhs[0][32],  tiled_lhs[32][0]) 
+    wgmma_m64n128k16(tiled_lhs[0][48],  tiled_lhs[48][0]) 
+    wgmma_m64n128k16(tiled_lhs[64][0],  tiled_lhs[16][0]) 
+    wgmma_m64n128k16(tiled_lhs[64][16], tiled_lhs[32][0]) 
+    wgmma_m64n128k16(tiled_lhs[64][32], tiled_lhs[48][0]) 
+    wgmma_m64n128k16(tiled_lhs[64][48], tiled_lhs[0][0]) 
+    wgmma_commit()
+    wgmma_wait(1)
+    
+    // Step 7. TMA LOAD
+    tmaCnt = (tmaCnt + 1) % 8
+    shared_lhs[tmaCnt][0][0] = tma_load(lhs_cta[i][tmaCnt*64])
+    shared_rhs[tmaCnt][0][0] = tma_load(rhs_cta[tmaCnt*64][0])
+    mbarrier.expect_tx mbarriers[tmaCnt] 
+  end

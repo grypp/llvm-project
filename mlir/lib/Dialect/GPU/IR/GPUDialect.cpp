@@ -906,6 +906,16 @@ BlockArgument LaunchOp::addPrivateAttribution(Type type, Location loc) {
   return getBody().addArgument(type, loc);
 }
 
+LogicalResult AllocManagedOp::verify() {
+  auto memRefType = llvm::cast<MemRefType>(getMemref().getType());
+
+  if (static_cast<int64_t>(getDynamicSizes().size()) !=
+      memRefType.getNumDynamicDims())
+    return emitOpError("dimension operand count does not equal memref "
+                       "dynamic dimension count");
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // LaunchFuncOp
 //===----------------------------------------------------------------------===//
@@ -1751,6 +1761,11 @@ struct SimplifyDimOfAllocOp : public OpRewritePattern<memref::DimOp> {
 
 void AllocOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                           MLIRContext *context) {
+  results.add<SimplifyDimOfAllocOp>(context);
+}
+
+void AllocManagedOp::getCanonicalizationPatterns(RewritePatternSet &results,
+                                                 MLIRContext *context) {
   results.add<SimplifyDimOfAllocOp>(context);
 }
 
