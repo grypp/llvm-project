@@ -1,3 +1,11 @@
+// RUN: mlir-opt %s \
+// RUN:  -test-lower-to-nvvm="cubin-chip=sm_90 cubin-features=+ptx80 opt-level=3" \
+// RUN:  | mlir-cpu-runner \
+// RUN:   --shared-libs=%mlir_cuda_runtime \
+// RUN:   --shared-libs=%mlir_runner_utils \
+// RUN:   --shared-libs=%mlir_c_runner_utils \
+// RUN:   --entry-point-result=void 
+
 module @mymod {
   func.func @main() {
     %c1 = arith.constant 1 : index
@@ -16,3 +24,22 @@ module @mymod {
   }
 }
 
+// Runtime:
+
+// CudaRuntimeWrappers.cpp:216:mgpuLaunchKernel(): Launching kernel, grid=4,1,1, threads: 4, 1, 1, cluster: 2, 1, 1, smem: 0kb
+// ===----------------=== blockDim: 4 threadIdx: 0 clusterIdx 0 clusterDimX 2 
+// ===----------------=== blockDim: 4 threadIdx: 1 clusterIdx 0 clusterDimX 2 
+// ===----------------=== blockDim: 4 threadIdx: 2 clusterIdx 0 clusterDimX 2 
+// ===----------------=== blockDim: 4 threadIdx: 3 clusterIdx 0 clusterDimX 2 
+// ===----------------=== blockDim: 4 threadIdx: 0 clusterIdx 0 clusterDimX 2 
+// ===----------------=== blockDim: 4 threadIdx: 1 clusterIdx 0 clusterDimX 2 
+// ===----------------=== blockDim: 4 threadIdx: 2 clusterIdx 0 clusterDimX 2 
+// ===----------------=== blockDim: 4 threadIdx: 3 clusterIdx 0 clusterDimX 2 
+// ===----------------=== blockDim: 4 threadIdx: 0 clusterIdx 1 clusterDimX 2 
+// ===----------------=== blockDim: 4 threadIdx: 1 clusterIdx 1 clusterDimX 2 
+// ===----------------=== blockDim: 4 threadIdx: 2 clusterIdx 1 clusterDimX 2 
+// ===----------------=== blockDim: 4 threadIdx: 3 clusterIdx 1 clusterDimX 2 
+// ===----------------=== blockDim: 4 threadIdx: 0 clusterIdx 1 clusterDimX 2 
+// ===----------------=== blockDim: 4 threadIdx: 1 clusterIdx 1 clusterDimX 2 
+// ===----------------=== blockDim: 4 threadIdx: 2 clusterIdx 1 clusterDimX 2 
+// ===----------------=== blockDim: 4 threadIdx: 3 clusterIdx 1 clusterDimX 2 
