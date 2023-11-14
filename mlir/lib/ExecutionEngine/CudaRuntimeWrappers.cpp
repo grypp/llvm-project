@@ -185,13 +185,37 @@ mgpuLaunchKernel(CUfunction function, intptr_t gridX, intptr_t gridY,
     CUDA_REPORT_IF_ERROR(cuFuncSetAttribute(
         function, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem));
   }
+  // todo read this from gpu.launch
+  intptr_t clusterX = 2, clusterY = 1, clusterZ = 1;
+
+  CUlaunchConfig config;
+  config.gridDimX = gridX;
+  config.gridDimY = gridY;
+  config.gridDimZ = gridZ;
+  config.blockDimX = blockX;
+  config.blockDimY = blockY;
+  config.blockDimZ = blockZ;
+  config.sharedMemBytes = smem;
+  config.hStream = stream;
+  CUlaunchAttribute launchAttr[2];
+  launchAttr[0].id = CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION;
+  launchAttr[0].value.clusterDim.x = clusterX;
+  launchAttr[0].value.clusterDim.y = clusterY;
+  launchAttr[0].value.clusterDim.z = clusterZ;
+  launchAttr[1].id = CU_LAUNCH_ATTRIBUTE_CLUSTER_SCHEDULING_POLICY_PREFERENCE;
+  launchAttr[1].value.clusterSchedulingPolicyPreference =
+      CU_CLUSTER_SCHEDULING_POLICY_SPREAD;
+  config.numAttrs = 2;
+  config.attrs = launchAttr;
+
   debug_print("Launching kernel, grid=%ld,%ld,%ld, "
               "threads: %ld, %ld, %ld, "
+              "cluster: %ld, %ld, %ld, "
               "smem: %dkb\n",
-              gridX, gridY, gridZ, blockX, blockY, blockZ, smem);
-  CUDA_REPORT_IF_ERROR(cuLaunchKernel(function, gridX, gridY, gridZ, blockX,
-                                      blockY, blockZ, smem, stream, params,
-                                      extra));
+              gridX, gridY, gridZ, blockX, blockY, blockZ, clusterX, clusterY,
+              clusterZ, smem);
+
+  CUDA_REPORT_IF_ERROR(cuLaunchKernelEx(&config, function, params, extra));
 }
 
 extern "C" MLIR_CUDA_WRAPPERS_EXPORT CUstream mgpuStreamCreate() {
