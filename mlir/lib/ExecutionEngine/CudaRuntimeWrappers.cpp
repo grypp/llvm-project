@@ -185,13 +185,17 @@ mgpuLaunchKernel(CUfunction function, intptr_t gridX, intptr_t gridY,
     CUDA_REPORT_IF_ERROR(cuFuncSetAttribute(
         function, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem));
   }
-  debug_print("Launching kernel, grid=%ld,%ld,%ld, "
+  debug_print("Launching kernel=%p, grid=%ld,%ld,%ld, "
               "threads: %ld, %ld, %ld, "
               "smem: %dkb\n",
-              gridX, gridY, gridZ, blockX, blockY, blockZ, smem);
+              function, gridX, gridY, gridZ, blockX, blockY, blockZ, smem);
   CUDA_REPORT_IF_ERROR(cuLaunchKernel(function, gridX, gridY, gridZ, blockX,
                                       blockY, blockZ, smem, stream, params,
                                       extra));
+
+  debug_print("Launched kernel=%p\n", function);
+  CUDA_REPORT_IF_ERROR(cuStreamSynchronize(stream));
+  debug_print("Done kernel=%p\n", function);
 }
 
 extern "C" MLIR_CUDA_WRAPPERS_EXPORT CUstream mgpuStreamCreate() {

@@ -310,6 +310,22 @@ def NVVM_MBarrierArriveExpectTxSharedOp : NVVM_PTXBuilder_Op<"mbarrier.arrive.ex
   }];
 }
 
+def NVVM_MBarrierArriveMapaOp : NVVM_PTXBuilder_Op<"mbarrier.arrive.mapa.shared">,  
+  Arguments<(ins LLVM_PointerShared:$addr, I32:$remoteCtaId, I32:$pred)> {
+  let assemblyFormat = "$addr `,` $remoteCtaId `,` $pred attr-dict `:` type(operands)";
+  let extraClassDefinition = [{
+    std::string $cppClass::getPtx() { return std::string(
+      "{\n\t"
+        ".reg .pred p;\n\t"
+        ".reg .b32 remAddr32;\n\t"
+        "setp.eq.u32 p, %2, 1;\n\t"
+        "@p mapa.shared::cluster.u32  remAddr32, %0, %1;\n\t"
+        "@p mbarrier.arrive.shared::cluster.b64  _, [remAddr32];\n\t"
+        "}"); 
+      }
+  }];
+}
+        
 def NVVM_MBarrierTryWaitParityOp : NVVM_PTXBuilder_Op<"mbarrier.try_wait.parity">,  
   Arguments<(ins LLVM_AnyPointer:$addr, I32:$phase, I32:$ticks)> {  
   let assemblyFormat = "$addr `,` $phase `,` $ticks attr-dict `:` type(operands)";
@@ -375,6 +391,26 @@ def NVVM_Barrier0Op : NVVM_Op<"barrier0"> {
       createIntrinsicCall(builder, llvm::Intrinsic::nvvm_barrier0);
   }];
   let assemblyFormat = "attr-dict";
+}
+
+def NVVM_BarrierOp : NVVM_Op<"barrier"> {
+  let arguments = (ins     
+    DefaultValuedAttr<ConfinedAttr<I32Attr, [IntMinValue<0>, IntMaxValue<15>]>, "0">:$barrierResource,
+    Optional<I32>:$numberOfThreads);
+  string llvmBuilder = [{
+    auto syncThreads = builder.getInt32($barrierResource);
+    if ($numberOfThreads) {
+      createIntrinsicCall(builder, llvm::Intrinsic::nvvm_barrier,
+                  { syncThreads, $numberOfThreads});
+    } else 
+    if ($barrierResource) {      
+      createIntrinsicCall(builder, llvm::Intrinsic::nvvm_barrier_n,
+                  { syncThreads});
+    } else {
+      createIntrinsicCall(builder, llvm::Intrinsic::nvvm_barrier0);
+    }
+  }];
+  let assemblyFormat = "(`number_of_threads` `=` $numberOfThreads^)? attr-dict";
 }
 
 def NVVM_ClusterArriveOp : NVVM_Op<"cluster.arrive"> {

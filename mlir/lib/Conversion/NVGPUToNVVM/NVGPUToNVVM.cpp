@@ -869,6 +869,25 @@ struct NVGPUMBarrierArriveLowering
   }
 };
 
+struct NVGPUMBarrierArriveMapaLowering
+    : public MBarrierBasePattern<nvgpu::MBarrierArriveMapaOp> {
+  using MBarrierBasePattern<nvgpu::MBarrierArriveMapaOp>::MBarrierBasePattern;
+  LogicalResult
+  matchAndRewrite(nvgpu::MBarrierArriveMapaOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    ImplicitLocOpBuilder b(op->getLoc(), rewriter);
+    Value barrier =
+        getMbarrierPtr(b, op.getBarriers().getType(), adaptor.getBarriers(),
+                       adaptor.getMbarId(), rewriter);    
+    Value casted = truncToI32(b, adaptor.getCtaId());
+    Value pred = b.create<LLVM::ZExtOp>(b.getI32Type(), adaptor.getPredicate());
+    if (isMbarrierShared(op.getBarriers().getType())) {
+      rewriter.replaceOpWithNewOp<NVVM::MBarrierArriveMapaOp>(op, barrier, casted, pred);
+    } 
+    return success();
+  }
+};
+
 /// Lowers `nvgpu.mbarrier.arrive.nocomplete` to
 /// `nvvm.mbarrier.arrive.nocomplete`
 struct NVGPUMBarrierArriveNoCompleteLowering
@@ -955,8 +974,8 @@ struct NVGPUMBarrierTryWaitParityLowering
     Value barrier =
         getMbarrierPtr(b, op.getBarriers().getType(), adaptor.getBarriers(),
                        adaptor.getMbarId(), rewriter);
-    Value ticks = truncToI32(b, adaptor.getTicks());
-    Value phase = truncToI32(b, adaptor.getPhase());
+    Value ticks = truncToI32(b, adaptor.getTicks());    
+    Value phase = b.create<LLVM::ZExtOp>(b.getI32Type(), adaptor.getPhaseParity());
 
     if (isMbarrierShared(op.getBarriers().getType())) {
       rewriter.replaceOpWithNewOp<NVVM::MBarrierTryWaitParitySharedOp>(
@@ -1689,6 +1708,7 @@ void mlir::populateNVGPUToNVVMConversionPatterns(LLVMTypeConverter &converter,
       NVGPUWarpgroupMmaOpLowering,              // nvgpu.warpgroup.mma
       NVGPUWarpgroupMmaStoreOpLowering,         // nvgpu.warpgroup.mma.store
       NVGPUWarpgroupMmaInitAccumulatorOpLowering, // nvgpu.warpgroup.mma.init.accumulator
+      NVGPUMBarrierArriveMapaLowering,
       MmaSyncOptoNVVM, MmaLdMatrixOpToNVVM, NVGPUAsyncCopyLowering,
       NVGPUAsyncCreateGroupLowering, NVGPUAsyncWaitLowering,
       NVGPUMmaSparseSyncLowering>(converter);
