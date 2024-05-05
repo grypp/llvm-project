@@ -3,7 +3,7 @@ import functools, sys, ctypes, os, errno
 import numpy as np
 from functools import partialmethod
 from mlir import ir
-from mlir.dialects import arith, func, gpu, memref, nvgpu, scf, nvvm
+from mlir.dialects import arith, func, gpu, memref, nvgpu, scf, nvvm, llvm, vector, builtin, index
 from mlir.extras import types as T
 from mlir import runtime as rt
 from tools import nvgpucompiler
@@ -161,8 +161,9 @@ class TMA:
             predicate=predicate,
         )
 
-
-WARP_GROUP_SIZE = 128  # Number of threads in a warpgroup
+CORE_MATRIX_SIZE = 8
+WARP_SIZE = 32  # Number of threads in a warp
+WARP_GROUP_SIZE = WARP_SIZE * 4  # Number of threads in a warpgroup
 
 
 class Warpgroup:
@@ -190,12 +191,53 @@ class Warpgroup:
         return True
 
 
+DEBUG = True
+
+
+def debug_print(fmt, *args, predicate=None, threadNumber=-1, forcePrint=False):
+    if not DEBUG and not forcePrint:
+        return
+    type_formats = []
+    for arg in args:
+        ty_format = None
+        if ir.IndexType.isinstance(arg.type):
+            ty_format = "%llu"
+        if ir.IntegerType.isinstance(arg.type):
+            width = ir.IntegerType(arg.type).width
+            if width == 64:
+                ty_format = "%llu"
+            elif width == 32:
+                ty_format = "%d"
+            elif width == 1:
+                ty_format = "%i"
+        if ir.F32Type.isinstance(arg.type):
+            ty_format = "%f"
+        if ty_format is None:
+            raise NotImplementedError(arg.type)
+        type_formats.append(ty_format)
+    if threadNumber != -1:
+        tidx = gpu.thread_id(gpu.Dimension.x)
+        predicate = arith.cmpi(arith.CmpIPredicate.eq, tidx, c(threadNumber))
+        scf.yield_([])
+    if_op = scf.IfOp(predicate)
+    with ir.InsertionPoint(if_op.then_block):
+        gpu.printf(fmt.format(*type_formats), args)
+        scf.yield_([])
 class WGMMAType(Enum):
     Accumulator = 1
     Descriptor = 2
 
 
+def get_acc_str_type(M : int):
+    WGMMA_M = 64
+    regs = np.ndarray(shape=(WGMMA_M), dtype=float)
+    str_inner_ty = ir.Type.parse(
+        f"!llvm.struct<({','.join('f32' for _ in regs)})>"
+    )
+    str_ty = ir.Type.parse(f"!llvm.struct<({','.join(str(str_inner_ty) for _ in range(M//WGMMA_M))})>")
+    return str_ty, str_inner_ty
 class WGMMAMatrix:
+
     def __init__(
         self,
         matrix_type: WGMMAType,
@@ -205,10 +247,10 @@ class WGMMAMatrix:
         ty=None,
         acc_op=None,
     ):
+        self.M = shape[0]
+        self.N = shape[1]
+        self.ty = ty
         if acc_op is None:
-            self.M = shape[0]
-            self.N = shape[1]
-            self.ty = ty
             self.matrix_type = matrix_type
             self.desc = desc
             self.smem = smem
@@ -239,21 +281,78 @@ class WGMMAMatrix:
         self.acc_op = acc_op
 
     def __matmul__(self, rhs):
-        lhs = nvgpu.warpgroup_generate_descriptor(
-            self.wgmma_ty, self.smem, self.desc.tma_descriptor
-        )
-        rhs = nvgpu.warpgroup_generate_descriptor(
-            rhs.wgmma_ty, rhs.smem, rhs.desc.tma_descriptor
-        )
+        lhs = nvgpu.warpgroup_generate_descriptor(self.wgmma_ty, self.smem,
+                                                  self.desc.tma_descriptor)
+        rhs = nvgpu.warpgroup_generate_descriptor(rhs.wgmma_ty, rhs.smem,
+                                                  rhs.desc.tma_descriptor)
         return [lhs, rhs]
 
     def __iadd__(self, matmulResult):
         lhs = matmulResult[0]
         rhs = matmulResult[1]
-        acc_op = nvgpu.WarpgroupMmaOp(
-            self.acc_op.type, lhs, rhs, self.acc_op, transposeB=True
-        )
-        return WGMMAMatrix(WGMMAType.Accumulator, acc_op=acc_op)
+        acc_op = nvgpu.WarpgroupMmaOp(self.acc_op.type,
+                                      lhs,
+                                      rhs,
+                                      self.acc_op,
+                                      transposeB=True)
+        return WGMMAMatrix(WGMMAType.Accumulator,
+                           shape=[self.M, self.N],
+                           ty=self.ty,
+                           acc_op=acc_op)
+
+    def __isub__(self, redResult):
+        print(redResult)
+        return self
+
+    def reduce(self, red_op):
+        assert (self.matrix_type == WGMMAType.Accumulator)
+        
+        def reduce_row(struct_op, red_op, ty, reduced_vec, str_idx, result_idx):
+            # Thread reduce its own row
+            thread_max_res = const(0.0, ty)
+            for i in range(0, 16):
+                r1 = llvm.extractvalue(ty, struct_op, [(i*4) + str_idx])
+                r2 = llvm.extractvalue(ty, struct_op, [(i*4) + str_idx + 1])
+                loc_max = red_op(r1, r2)
+                if i == 0:
+                    thread_max_res = loc_max
+                else:
+                    thread_max_res = red_op(thread_max_res, loc_max)
+            
+            # 4 consecutive threads reduce their results
+            for i in (1, 2):
+                other_result = nvvm.shfl_sync(
+                    ty,
+                    const(0xFFFFFFFF, T.i32()),
+                    thread_max_res,
+                    const(i, T.i32()),
+                    const(0x1F, T.i32()),
+                    nvvm.ShflKind.bfly,
+                )
+                thread_max_res = red_op(thread_max_res, other_result)
+            
+            return llvm.insertelement(reduced_vec, thread_max_res, position=result_idx)
+
+        reduced_vec = llvm.UndefOp(ir.VectorType.get((2, ), self.ty))
+
+        str_ty, str_in_ty = get_acc_str_type(self.M)
+        str_op = builtin.unrealized_conversion_cast([str_ty], [self.acc_op])
+        
+        # tidx = gpu.thread_id(gpu.Dimension.x)
+        # warpId = tidx / 32
+        # lane4Id = (tidx % 32) / 4 
+        # dim_i = lane4Id + warpId * 16
+        
+        for row in range(2):
+            current_struct = llvm.extractvalue(str_in_ty, str_op, [row])
+            reduced_vec = reduce_row(current_struct, red_op, T.f32(), reduced_vec, row+1, result_idx=const(row, T.i32()))
+        
+
+        # for i in scf.for_(0, 128, 1):
+        #     elem = vector.extractelement(T.f32(), reduced_vec, position=[i])
+        #     scf.yield_([])
+
+        return reduced_vec
 
 
 def get_dynamic_shared_memory(shape=None, ty=None, offset: int = 0):
@@ -428,7 +527,7 @@ class NVDSL:
                         func.ReturnOp([])
 
                 # Save IR in a file
-                # saveIR(module)
+                saveIR(module)
 
                 # Verify the module
                 # module.operation.verify()
@@ -449,7 +548,7 @@ class NVDSL:
             newArgs = get_mlir_func_obj_ty(args)
 
             # Run the compiled program
-            engine.invoke(function_name, *newArgs)
+            # engine.invoke(function_name, *newArgs)
 
             return result
 
