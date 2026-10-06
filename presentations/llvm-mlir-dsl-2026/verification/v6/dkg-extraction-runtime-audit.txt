@@ -1,0 +1,158 @@
+DKG -> mlir dsl extraction: runtime, compilation, diagnostics, and control flow
+Read-only audit, 2026-10-05
+Source root: /home/gozen/work/dkg4
+Read AGENTS.md and relevant DkgDSL/README.md. No DkgDSL/AGENTS.md, DkgDSL/CLAUDE.md or agent-rules/python.md exists in this checkout. No production sources changed.
+
+FRAMING FOR THE REVISED TUTORIAL
+The intended lesson is how to EXTRACT the reusable machinery from DkgDSL, not an inventory of limitations in the smaller mlir/python/mlir/dsl prototype.
+Use 'mlir dsl' as product name, `import mlir.dsl as m` as Python spelling.
+Show desired extracted APIs in mlir dsl spelling, and put precise DKG provenance/extraction notes in speaker notes. Do not pretend those renamed APIs are already implemented in the prototype; likewise do not remove features merely because the prototype lacks them.
+No PyIR implementation or advanced mutation explanation is included here; that section belongs to Amir.
+
+EXTRACTION MAP
+DKG reusable mechanism -> extracted mlir dsl core -> retained in sub-DSL
+- base_dsl/runtime/{tensor_descriptor,dlpack_types}.py + runtime/csrc/dlpack_runtime.cpp -> framework-neutral DLPack descriptor/ownership boundary -> CUDA stream/device policy and allocator.
+- base_dsl/array.py Array/_ArrayImpl -> basic Array view, pointer + shape/strides/dtype, scalar loads/stores -> shared/local/global allocation factories, PTX memory/cache controls, cute.Tensor compatibility.
+- base_dsl/compiler.py CompileCallable/CompileOptions -> compile[options](func,*args), specialization, artifact selection -> target option catalog and target artifact serializers.
+- base_dsl/compile_backend.py + cache_helpers.py -> compilation lifecycle, memory/disk cache, atomic persistence -> backend-specific compilation/loading.
+- base_dsl/diagnostics.py + _mlir_helpers source-location helpers -> diagnostic records/rendering/MLIR remark bridge -> NVVM/PTXAS/CuTe error categories and advice.
+- base_dsl/ast_preprocessor.py + ast_helpers.py -> AST region capture, symbolic write_args, callback dispatch -> dialect's for/if/while builders, terminators and loop annotations.
+- cutlass_dsl/cutlass_ast_decorators.py -> default SCF executor/carry model -> vendor loop options and target-specific attributes.
+
+1. ARRAY / DLPACK: USER'S REQUEST IS GROUNDED IN DKG
+Array is already in DkgDSL/base_dsl/array.py, not only a CuTe-specific surface.
+- :12-29 explains intent: Array lives below cutlass.cute beside Float32; low-level memory helpers shared with Pointer. Existing runtime coupling remains.
+- :1772-1793 _ArrayImpl stores _base:ir.Value, dtype, shape, strides, address-space, alignment.
+- :1799-1800 __extract_mlir_values__ returns [self._base]; :1839-1849 rebuilds from new SSA base preserving metadata.
+- :3246-3248 public @dataclass(frozen=True, eq=False) Array is a memory reference with shape, strides and element type.
+- :3417-3446 constructor distinguishes allocation factory, internal wrapper, raw MLIR-pointer view.
+- :3543-3551 public extract/rebuild methods delegate to implementation.
+- :1992-2024 imports shape/stride/type from a CuTe tensor and obtains iterator.llvm_ptr.
+- :2079-2097 and :2104-2119 still use function-local cutlass.cute imports for dispatch/verification. Those are specific seams to separate when extracting.
+
+DLPack boundary:
+- base_dsl/runtime/tensor_descriptor.py:52-82 accepts __dlpack__/__dlpack_device__, keeps original tensor alive, extracts data pointer/device.
+- :96-102 pointer; :105-133 dtype mapping; :135-148 shape and strides.
+- base_dsl/runtime/csrc/dlpack_runtime.cpp:113-199 consumes producer capsule, handles stream keyword, reads pointer, shape, strides, dtype, device, byte_offset.
+- This implementation's Python TensorDescriptor supports CPU and CUDA GPU devices (:67-74), not every DLPack device kind. Framework-neutral means protocol-driven, with explicit device support.
+- cutlass_dsl/cutlass.py:2148-2158 permits live from_dlpack tensor for bare Array annotation.
+- :2252-2290 rebuilds Array from real tensor layout and MLIR block arguments, preserving row-major layout.
+- DkgDSL/test/ctm/test_array_dlpack.py:74-102 is a trace-only test demonstrating from_dlpack(torch_tensor) -> @jit host(a:Array) -> @kernel(a:Array) with no explicit make_array_view. :121-145 is actual GPU vector-add test source.
+- The source supports the reusable protocol architecture for PyTorch/JAX/NumPy. We inspected actual Torch tests, not a JAX execution; do not claim all frameworks were tested in this audit.
+
+Slide-ready extracted API (proposed m namespace, learned from DKG):
+```python
+from mlir.dsl.runtime import from_dlpack
+
+@m.jit
+def add(a: m.Array, b: m.Array, out: m.Array):
+    for i in m.range(out.shape[0]):
+        out[i] = a[i] + b[i]
+
+add(from_dlpack(a), from_dlpack(b), from_dlpack(out))
+```
+Diagram: PyTorch / JAX / NumPy -> DLPack -> Array {pointer, shape, strides, dtype} -> LLVM loads/stores.
+Speaker note: this is the extracted interface. Retain descriptor metadata and ownership; replace CuTe reconstruction/allocation dependencies with core adapters and downstream factories.
+Avoid claiming Array is literally a memref descriptor or an LLVM struct in DKG. It wraps an LLVM pointer with Python metadata; runtime signature construction may additionally carry dynamic dimensions.
+
+2. COMPILE[FLAGS] AND REAL AOT
+The user is correct: DKG has bracket-option compilation.
+- base_dsl/compiler.py:2404-2449 CompileCallable docs: representative/fake arguments, returned callable, options strings, hooks, external link libraries.
+- :2453-2469 converts BooleanCompileOption classes and tuples, __getitem__ returns a new CompileCallable(options).
+- :2471-2484 calls _compile.
+- :2486-2489 to_precompiled_mlir returns pre-pass artifact.
+- :2492-2513 compile_to supports PreCompiledMlir, CompiledMlir, LlvmIr, Ptx, LtoIr, Object with target selection.
+- :2607-2608 compile-only/no-cache; :2640-2645 rejects @kernel as normal CompileCallable target: compile a @jit host wrapper.
+- :609 OptLevel; :898 GenerateLineInfo; :1238-1263 RemarkFilter/RemarkOutput are concrete option classes.
+- base_dsl/jit_executor.py:1958-1977 export_to_c emits header + object/library, including host launch entry and device metadata/cubin payload.
+
+Slide-ready extracted API:
+```python
+compiled = m.compile[m.GenerateLineInfo(True)](
+    launch, a_signature, b_signature, out_signature
+)
+compiled(a, b, out)
+compiled.export_to_c('build', 'vector_add')
+```
+Possible second call for recipe-only / external consumer use:
+```python
+artifact = m.compile.to_precompiled_mlir(recipe, *signature)
+```
+Speaker note: proposed mlir dsl spelling of existing DKG facilities; reuse CompileCallable, split option registration and export provider by target. The smaller prototype currently has a plain compile function, which is extraction work remaining, not a reason to teach the wrong interface.
+
+3. CACHE: PORTABLE ORCHESTRATION, TARGET-SPECIFIC ARTIFACT
+- base_dsl/cache_helpers.py:370-378 JitCacheDict stores JitCompiledFunction, function-lifetime cleanup, optional LRU cap.
+- base_dsl/dsl.py:1849-1867 key combines serialized module bytecode + environment cache key + compile_options.to_str() + pipeline options + explicit extra-link paths + version hash.
+- :1833-1847 version hash finds DKG commit identity in this build; extraction should use upstream compiler/package toolchain identity.
+- base_dsl/compile_backend.py:99-133 resolves file cache before backend compile; :180-199 finalizes both caches.
+- :263-273 cache miss compiles/JITs; cache hit JITs loaded lowered module without rerunning pipeline.
+- base_dsl/cache_helpers.py:140-153 writes MLIR bytecode with CRC32 trailer.
+- :291-323 reads <dsl>_<hash>.mlir and constructs JitCompiledFunction without engine; :331-363 writes ir_module.
+- save_ir at :234-288 writes temporary path then atomic replace.
+- :90-104 per-DSL CACHE_DIR/default-directory naming.
+
+Slide visual: generated MLIR -> key -> memory hit (compiled callable) / file hit (lowered MLIR) / compile miss; all converge on execution.
+Caption: 'The core owns cache policy. The backend owns the compiled artifact.'
+Do not label disk cache as only raw source IR or claim it stores a live ExecutionEngine. GPU binary payload can be embedded in lowered module; stored container is MLIR bytecode.
+
+4. DIAGNOSTICS + REMARKS
+- base_dsl/diagnostics.py:83 CompilerDiagnostic record; :217-256 scoped regular-MLIR diagnostic callback.
+- :259-299 CompilerDiagnosticSession combines collection, filters and output; :301-372 source-oriented success/failure rendering + finalization.
+- :505-551 uses diagnostic bindings: enable_remark_collection(policy='all') or enable_remarks(policy='final',output_file=...).
+- base_dsl/compiler.py:275-411 wraps pass manager in that session and classifies compile failures.
+- :1238-1263 RemarkFilter and RemarkOutput configure context engine, not pass pipeline strings.
+Extraction: carry record, collection, source frames and rendering; adapt binding provider to upstream MLIR remark APIs. Keep NVVM/PTXAS-specific categories/recognizers in target extension.
+Slide phrasing: 'One source location, from Python to MLIR'; Python source -> loc(file,line,col) -> MLIR error/remark -> readable code frame and fix.
+Typed compile example in proposed namespace:
+```python
+m.compile[m.RemarkFilter('.*'),
+          m.RemarkOutput('remarks.yaml')](launch, *signature)
+```
+Avoid conflating frontend exceptions with optimization remarks: reusable renderer can present both, but they have different sources.
+
+5. AST / SYMBOLIC CARRIES / EXTENSIBLE CONTROL FLOW
+The standard DKG AST frontend demonstrates the reusable mechanism before Amir's advanced mutation material.
+- base_dsl/ast_preprocessor.py:1328-1434 analyze_region_variables; ordered writes + method receivers + closure calls.
+- :1353-1374 assignments/augassign mark written names; :1397-1400 conservatively treats method receivers as potentially mutable; :1417-1434 intersects with enclosing active symbols and returns write_args.
+- :1517-1583 lifts loop body into Python function with iv and write_args; returns updated written values.
+- base_dsl/ast_helpers.py:122-143 Executor.set_functions accepts is_dynamic_expression, loop/if/while/compare/builtin/ifexp implementations. :145-175 dispatches loop body through selected emitter.
+- cutlass_dsl/cutlass_ast_decorators.py:220-237 flattens carries and creates SCF op; :239-275 fills regions and yields; later validates stable tree/types.
+
+Slide: acc defined before loop + assigned inside -> write_args=['acc']; flatten -> scf iter_args; body returns updated acc -> scf.yield.
+This is symbolic source analysis and typed reconstruction, not full Python alias analysis.
+
+Real alternate dialect example:
+- cuda_tile_dsl/cuda_tile_ast_decorators.py:16-57 consumes same func/start/stop/step/write_args callback protocol; emits cuda_tile.for_loop(init_values=list(write_args)) and cuda_tile.loop_continue(updated values).
+- :60-78 explicitly has if/while NotImplementedError. Do not show them as already supported in that DKG Tile adapter.
+
+Slide-ready generalized mechanism:
+```python
+executor.set_functions(
+    is_dynamic_expression=is_staged,
+    loop_execute_range_dynamic=emit_my_for,
+    if_dynamic=emit_my_if,
+    while_dynamic=emit_my_while,
+    compare_executor=emit_compare,
+)
+```
+Draw common AST capture feeding either SCF executor or target dialect executor. The source callback protocol already exists; an explicit DialectPlugin package/lifecycle is the extraction's modular presentation of these seams.
+
+6. FROZEN RECORDS: DO NOT MISSTATE DKG AS 'ONLY FROZEN CLASSES WORK'
+- base_dsl/utils/tree_utils.py:119-146 checks frozen; :327-376 reconstructs both frozen and non-frozen records differently; :463-478 supports __new_from_mlir_values__ protocol objects.
+- cutlass_dsl/cutlass.py:4039-4043 drops read-only frozen records from conservative method-receiver carry candidates.
+- :4046-4060 removal; :4064-4093 reinserts unchanged originals after region.
+- Array itself is frozen (:3246), while arr[i]=... mutates underlying memory through IR; immutability of Python descriptor is distinct from device memory stores.
+Tutorial may deliberately choose a simpler initial contract: 'Carry immutable records of SSA values; construct an updated record rather than mutate arbitrary Python object fields.' Then hand off richer mutable-object/alias tracking to Amir.
+Label this as the tutorial's first-stage design boundary, not a categorical statement that DKG rejects all mutable classes. Plain Python Meta objects, dictionaries and polymorphic Op objects remain useful and valid.
+
+REVISED RECOMMENDATIONS FOR EXISTING V6
+- Replace prototype-specific 'Array/DLPack are only future ideas' framing with the extraction diagram, real DKG provenance, and desired m.Array interface.
+- Replace plain-only m.compile lesson with CompileCallable bracket syntax and genuine export_to_c option.
+- Show cache mechanism learned from DKG, retain precise lowered-MLIR disk format.
+- Explain diagnostics as extracted source/MLIR bridge, target catalogs separated.
+- Keep existing simple and polymorphic Meta examples as pedagogical programs. Their prototype execution is supporting evidence for the staging idea; DKG source is the design source of truth.
+- For frozen states, say this is the deliberately simple first model before advanced mutation, not a claim about the total DKG feature set.
+- Do not insert detailed PyIR mechanism into Guray's section; use a clean handoff question.
+
+VALIDATION STATUS
+This audit is source-verified against current DKG working tree. Existing test sources read for Array/DLPack; no DKG runtime tests or GPU launches performed in this pass. Earlier /tmp/mlir-tutorial-runtime-* execution logs validate only the current extracted prototype, not these DKG APIs. Keep those distinctions in verification README/speaker notes, not cluttering presentation bodies.

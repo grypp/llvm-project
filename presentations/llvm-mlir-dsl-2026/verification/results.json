@@ -1,0 +1,91 @@
+[
+  {
+    "example": "expression",
+    "mode": "ir",
+    "exit_code": 0,
+    "log": "expression.ir.log",
+    "filecheck_exit_code": 0
+  },
+  {
+    "example": "expression",
+    "mode": "exec",
+    "exit_code": 0,
+    "log": "expression.exec.log"
+  },
+  {
+    "example": "cumsum",
+    "mode": "ir",
+    "exit_code": 0,
+    "log": "cumsum.ir.log",
+    "filecheck_exit_code": 0
+  },
+  {
+    "example": "cumsum",
+    "mode": "exec",
+    "exit_code": 0,
+    "log": "cumsum.exec.log",
+    "filecheck_exit_code": 0
+  },
+  {
+    "example": "builders",
+    "mode": "ir",
+    "exit_code": 0,
+    "log": "builders.ir.log",
+    "filecheck_exit_code": 0
+  },
+  {
+    "example": "builders",
+    "mode": "exec",
+    "exit_code": 0,
+    "log": "builders.exec.log",
+    "filecheck_exit_code": 0
+  },
+  {
+    "example": "axpy_pointer",
+    "mode": "ir",
+    "exit_code": 0,
+    "log": "axpy_pointer.ir.log",
+    "filecheck_exit_code": 0
+  },
+  {
+    "example": "axpy_pointer",
+    "mode": "exec",
+    "exit_code": 0,
+    "log": "axpy_pointer.exec.log",
+    "filecheck_exit_code": 0
+  },
+  {
+    "example": "core_only",
+    "mode": "ir",
+    "exit_code": 0,
+    "log": "core_only.ir.log",
+    "filecheck_exit_code": 0
+  },
+  {
+    "example": "core_only",
+    "mode": "exec",
+    "exit_code": 0,
+    "log": "core_only.exec.log"
+  },
+  {
+    "example": "meta_loop",
+    "mode": "ir",
+    "exit_code": 0,
+    "log": "meta_loop.ir.log",
+    "filecheck_exit_code": 0
+  },
+  {
+    "example": "meta_loop",
+    "mode": "exec",
+    "exit_code": 0,
+    "log": "meta_loop.exec.log",
+    "filecheck_exit_code": 0
+  },
+  {
+    "example": "diagnostics",
+    "mode": "ir",
+    "exit_code": 0,
+    "log": "diagnostics.ir.log",
+    "filecheck_exit_code": 0
+  }
+]

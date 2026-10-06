@@ -1,0 +1,41 @@
+Reproducible core example verification, 2026-10-05
+
+Source: /tmp/mlir-tutorial-core-smoke.py
+Fingerprint: /tmp/mlir-tutorial-core-smoke.sources.json
+Source root: /home/gozen/work/llvm-project
+Interpreter: /usr/bin/python3.12 (Python 3.12.3)
+
+Execution command (exit 0):
+env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core MLIR_DSL_NO_CACHE=1 MLIR_DSL_DISABLE_FILE_CACHING=1 MY_DSL_NO_CACHE=1 MY_DSL_DISABLE_FILE_CACHING=1 /usr/bin/python3.12 /tmp/mlir-tutorial-core-smoke.py > /tmp/mlir-tutorial-core-smoke.exec.log 2>&1
+
+IR capture command (exit 0):
+env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core MLIR_DSL_NO_CACHE=1 MLIR_DSL_DISABLE_FILE_CACHING=1 MY_DSL_NO_CACHE=1 MY_DSL_DISABLE_FILE_CACHING=1 MLIR_DSL_PRINT_IR=1 MY_DSL_PRINT_IR=1 /usr/bin/python3.12 /tmp/mlir-tutorial-core-smoke.py > /tmp/mlir-tutorial-core-smoke.ir.log 2>&1
+
+Both runs execute the scalar CPU examples; no GPU required. IR capture also
+prints each generated module before lowering. DRYRUN is intentionally not set:
+that mode returns a trace result rather than an executable from compile_only,
+so the final compiled(4, 3) invocation requires real compilation.
+
+Expected execution output:
+SUBDSL 12
+CUSTOM_OP 10.0
+COMPILE 12
+LITERAL Int32 Int64 Float32
+
+IR evidence:
+- llvm.func @scale_3 has one i32 argument; Meta factor=3 enters the symbol and
+  arith.constant, then arith.muli.
+- llvm.func @magnitude has two f32 arguments, complex.create, complex.add,
+  complex.abs and f32 result.
+- Explicit m.compile builds another scale_3 module and returns executable 12.
+
+Direct dependencies exercised:
+mlir.dsl BaseDSL/MlirDSL/Compiler/DialectPlugin/register_leaf/numeric types;
+mlir.ir, mlir.passmanager, mlir.execution_engine;
+MLIR dialect bindings builtin, llvm, arith, complex;
+Python ctypes and NumPy scalar dtype support.
+
+The fingerprint covers all current mlir/python/mlir/dsl/*.py source files and
+the smoke program. It is intentionally working-tree evidence, since the
+publishing clone contains an older DSL snapshot. No source implementation was
+copied to that clone or modified for this check.

@@ -1,0 +1,3 @@
+[96mremark[analysis]:[0m TraceDecision | Category:mlir.dsl | Function=twice | Remark="n is staged", RemarkId=1, staged=n
+RESULT: 42
+COLLECTED: [('analysis', 'TraceDecision', 'mlir.dsl', 'twice', 'n is staged', 'n')]

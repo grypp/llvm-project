@@ -1,0 +1,30 @@
+
+//===--- ------ Generated IR ------ ---====
+
+module {
+  llvm.func @expression_3(%arg0: i32, %arg1: i32) -> i32 {
+    %c3_i32 = arith.constant 3 : i32
+    %0 = arith.muli %arg1, %c3_i32 : i32
+    %1 = arith.addi %arg0, %0 : i32
+    llvm.return %1 : i32
+  }
+}
+
+//===--- --- End of Generated IR -- ---====
+
+RESULT: ?
+
+//===--- ------ Generated IR ------ ---====
+
+module {
+  llvm.func @fma(%arg0: f32, %arg1: f32, %arg2: i32) -> f32 {
+    %0 = arith.mulf %arg0, %arg1 : f32
+    %1 = arith.sitofp %arg2 : i32 to f32
+    %2 = arith.addf %0, %1 : f32
+    llvm.return %2 : f32
+  }
+}
+
+//===--- --- End of Generated IR -- ---====
+
+RESULT: ?

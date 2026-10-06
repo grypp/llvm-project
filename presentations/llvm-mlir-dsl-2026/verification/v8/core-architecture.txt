@@ -1,0 +1,263 @@
+V8 architecture audit — 2026-10-06
+
+Scope
+-----
+Read-only source audit of the user's uncommitted working tree at:
+  /home/gozen/work/llvm-project/mlir/tools/mlir-dsl
+Compared with the canonical presentation's v7 deck.json. No implementation,
+index, tests, or slide sources were modified by this audit. No execution or
+test-pass claim is made. The code takes precedence over README summaries.
+
+Namespace and import boundary
+-----------------------------
+mlir.dsl is the reusable core/authoring package. It exports BaseDSL, core
+types, Plugin, DialectPlugin, ASTPreprocessorPlugin, OpEmitter, current_emitter,
+register_leaf and register_jit_arg_adapter. It has NO module-level jit,
+kernel, compile or MlirDSL. See dsl/__init__.py:6 and :91.
+
+The runnable reference namespace is:
+  import mlir.mlir_dsl as m
+It reexports core types, SCF builders, LLVM and AST plugin names, then
+MlirDSL, jit, kernel, compile. GPU index helpers are reexported when the GPU
+plugin module/bindings import. Availability of names is not proof that a
+runtime GPU plugin has been installed. See
+sub-dsls/mlir-dsl/mlir_dsl/__init__.py:6 and mlir_dsl.py:86.
+
+A downstream package can import core plus the individual plugins it wants;
+it need not depend on the reference sub-DSL. A subclass of the reference
+MlirDSL is also supported as a shortcut. No core import loads a dialect or
+optional plugin at import time. Default LLVM/SCF plugins resolve at first
+DSL construction; standalone type operations resolve LlvmEmitter on demand.
+Evidence: test/core_only.py:1; core/mlir_op.py:207; core/dsl.py:443.
+
+Three plugin families
+---------------------
+1. DialectPlugin: register_dialects(context), pipeline_passes(), emitter,
+   host_gen_helper, kernel_gen_helper, compiler_provider.
+   Built-in choices: LlvmDialectPlugin, ScfDialectPlugin, GpuPlugin.
+2. ASTPreprocessorPlugin: preprocessor_class, closure_check, executors(dsl).
+   Built-in choice: ScfASTPreprocessorPlugin. This owns native control-flow
+   rewrite and executor selection, separate from SCF dialect lowering.
+3. Plain Plugin: optional integrations. Shared lifecycle hooks: available(),
+   install(dsl), shared_libs(), attach_to_module(...),
+   wrap_compiled_function(...). Built-in integrations: PyTorchPlugin,
+   DlpackPlugin, TvmFfiPlugin.
+Evidence: core/plugin.py:33, :86, :131; README.md Plugins table.
+
+What is core, what is selected
+-----------------------------
+Core owns binding-time/argument classification, source locations, diagnostics,
+environment, tracing orchestration, pytrees, type/promotion policy, cache and
+compilation orchestration. Every scalar/vector/pointer operation asks the
+active OpEmitter for types and operations. Scalars are not intrinsically
+arith and Pointer is not intrinsically !llvm.ptr.
+
+OpEmitter supplies:
+  Scalars: mlir_type/scalar_type; const/add/cmp/cast/... .
+  Vectors: vector_type/vector_shape; from_elements/broadcast/extract/reduce.
+  Pointers: pointer_type/pointer_space; load/store/ptr_add and conversions.
+The default LlvmEmitter maps these onto builtin scalar/vector types and
+arith/math/vector/llvm operations. A tile emitter can use rank-0 scalars,
+rank-1 vectors and tile pointers without changing Python Numeric classes.
+Missing operations raise DSLRuntimeError. See core/mlir_op.py:37 and
+plugins/dialects/llvm/emitter.py:23.
+
+@struct is now a frozen field record flattened and rebuilt as a pytree at
+boundaries. It is NOT an SSA LLVM aggregate and needs no emitter hook. The
+LLVM host-result ABI may separately pack multiple return leaves into a
+!llvm.struct; do not conflate that ABI detail with @struct semantics.
+Evidence: types/typing.py:3044, :3187; plugins/dialects/llvm/entry.py:81.
+
+Binding-time caveat: README says 'annotation alone', but actual
+runtime/jit_arg_adapters.py:134–157 stages a DSL annotation OR an adapted
+value containing registered leaves. Plain unannotated Python configuration
+is Meta. Reserved receivers, type arguments and None remain Meta. There is
+no Constexpr in the new public namespace. Use the implementation wording.
+
+Default selection and lifecycle ordering
+---------------------------------------
+BaseDSL.plugins defaults to empty. default_ast_preprocessor defaults to None.
+default_dialects resolves lazily to (ScfDialectPlugin(), LlvmDialectPlugin()).
+
+At BaseDSL construction (core/dsl.py:598–688):
+1. Shallow-copy listed plugins per DSL instance; install them in list order.
+2. If NO listed DialectPlugin has a non-None emitter, shallow-copy/install
+   default_dialects. If ANY listed dialect plugin brings an emitter, install
+   NONE of the default dialect plugins. This replaces defaults, not just
+   scalar arithmetic. Bring host entry/compiler/lowering explicitly.
+3. The first dialect plugin with each non-None attribute supplies emitter,
+   kernel_gen_helper and host_gen_helper. Compiler is first provided unless
+   the constructor already specified compiler_provider.
+4. The first listed ASTPreprocessorPlugin wins; otherwise shallow-copy the
+   class default. Install executor callbacks AFTER the listed plugins.
+   preprocess=True requires a plugin with a preprocessor_class.
+5. The subclass constructor resumes after super().__init__; its later
+   overrides win. This is not a recommendation to bypass the plugin API.
+
+Dialect hook iteration order is listed dialect plugins, then the defaults
+when enabled (core/dsl.py:738). On trace: register dialects before building
+types/ops (:2175); build IR; listed plugin attach_to_module before hashing
+(:2005). Pipeline order: explicit call override, else environment override,
+else dialect plugin passes in the above order, then the ONLY core pass
+reconcile-unrealized-casts (:956). Libraries are collected before the engine;
+listed plugins wrap the compiled function after the engine exists and before
+cache insertion (:1739, :2119). Plain plugins never contribute dialect passes.
+
+MlirDSL defaults (reference mlir_dsl.py:53–117):
+- ScfASTPreprocessorPlugin supplies native control flow.
+- Optional GpuPlugin, TvmFfiPlugin, PyTorchPlugin, DlpackPlugin are selected
+  by available() on first class-list access, not during core import.
+- plugins=[] on a MlirDSL subclass removes optional plugins but retains
+  the AST default and default SCF/LLVM dialect plugins.
+- BaseDSL with no AST plugin uses explicit builders; this is different from
+  MlirDSL.plugins=[].
+
+Host/compiler/kernel roles
+--------------------------
+LlvmDialectPlugin supplies LlvmEmitter, LlvmHostGenHelper and a per-instance
+Compiler(passmanager, execution_engine). Host entries are func.func with
+llvm.emit_c_interface; multiple numeric result leaves use an LLVM struct
+for the return slot. Its passes lower vector/arith/math/func. ScfDialectPlugin
+lowers scf/cf first. The core no longer has the old host_entry selector.
+Evidence: plugins/dialects/llvm/plugin.py:22; llvm/entry.py:81;
+plugins/dialects/scf/plugin.py:15.
+
+GpuPlugin supplies GpuKernelGenHelper (gpu.func, terminator, launch, container),
+its target pipeline and runtime libraries; it has no replacement emitter, so
+the default LLVM+SCF world remains. See plugins/dialects/gpu.py:365, :575.
+Custom host generation subclasses _HostGenHelper; custom kernels implement
+_KernelGenHelper and their diagnostic catalogue. These are concrete target
+responsibilities, not automatically supplied by a custom emitter alone.
+Evidence: core/dsl.py:234, :314; core/plugin.py:96–119.
+
+Minimal slide code — exact API surface
+-------------------------------------
+A. Reference programs (replace old import everywhere):
+
+  import mlir.mlir_dsl as m
+
+  @m.jit
+  def scale(x: m.Int32, factor):
+      return x * factor
+
+B. A downstream package, mydsl/__init__.py (constructor excerpt):
+
+  from mlir.dsl import BaseDSL
+  from mlir.dsl.plugins.ast_preprocessor import ScfASTPreprocessorPlugin
+
+  class MyDSL(BaseDSL):
+      plugins = [ScfASTPreprocessorPlugin()]
+      def __init__(self):
+          super().__init__(
+              name="MY_DSL", dsl_package_name=["mydsl"],
+              pass_sm_arch_name="cubin-chip", preprocess=True)
+
+  jit = MyDSL.jit
+
+Default dialect plugins supply the compiler and host entry here; no
+target_config placeholder is required. In a full package, reexport the core
+type names and selected dialect/AST helpers too. In particular the rewritten
+Boolean code resolves and_/or_/not_/as_ir_value on the configured package.
+An accurately complete SCF namespace can reexport core names plus
+plugins.dialects.scf helpers and plugins.ast_preprocessor.range, without
+importing mlir.mlir_dsl. The slide can show the constructor only and state
+namespace exports in notes. _jit_arg_adapter_scope="mlir" is appropriate
+when opting into the reference adapters; scalar-only example does not need it.
+
+C. Optional plugin selection, reference-derived implementation excerpt:
+
+  import mlir.mlir_dsl as m
+  from mlir.dsl.plugins.thirdparty.dlpack import DlpackPlugin
+
+  class TensorDSL(m.MlirDSL):
+      plugins = [DlpackPlugin()]
+
+Use this only when the DLPack extension is available (reference selection
+uses available()); it retains SCF/LLVM defaults and the AST default while
+replacing the list of optional plugins. To append, use
+plugins = [*m.MlirDSL.plugins, MyPlugin()].
+
+D. Emitter selection, downstream interface sketch:
+
+  from mlir.dsl import DialectPlugin, OpEmitter
+
+  class MyEmitter(OpEmitter):
+      def mlir_type(self, dtype): ...
+      def scalar_type(self, ir_type): ...
+      def const(self, value, ty=None, **kw): ...
+      def add(self, lhs, rhs, **kw): ...
+
+  class MyDialectPlugin(DialectPlugin):
+      emitter = MyEmitter()
+      host_gen_helper = MyHostGenHelper
+      compiler_provider = my_compiler
+
+The ellipses denote the operations and type mapping a downstream implements;
+MyHostGenHelper and my_compiler are explicit target placeholders, not shipped
+names. pipeline_passes must lower every emitted operation including the
+entry. Add kernel_gen_helper for kernel support. This sketch does not imply
+the four shown methods implement a complete emitter. For a concrete read-only
+trace, the repository's RankZeroTensorEmitter example changes mlir_type,
+scalar_type and const while reusing LlvmEmitter for tensor-compatible arith.
+It is traced only and its fictitious lowering must not be presented as run.
+
+E. AST callback customization, implementation excerpt:
+
+  class MyAST(ScfASTPreprocessorPlugin):
+      def executors(self, dsl):
+          hooks = super().executors(dsl)
+          hooks["loop_execute_range_dynamic"] = my_loop_builder
+          return hooks
+
+This is the smallest accurate plugin seam for replacing a loop callback.
+A full different control-flow world also supplies branch/while callbacks and
+the dialect's lowering; inheriting SCF only intentionally retains those
+remaining SCF callbacks. test/plugins_ast_preprocessor.py:99 demonstrates
+this exact override shape with a counting loop wrapper.
+
+Changes required in the v7 presentation
+--------------------------------------
+- All executable reference snippets: import mlir.mlir_dsl as m.
+- Slide 3: show reusable core plus THREE plugin families and sub-DSL assembly.
+  AST capture is a selected plugin, not an intrinsic fixed core frontend.
+- Slide 7: use func.return/return for reference trace, not llvm.return.
+- Slide 10: constructor can use default plugin compiler; show real required
+  arguments and selected AST plugin instead of hidden target_config.
+- Slide 13: explain dialect/AST/integration plugin families, distinguish an
+  added dialect (no emitter) from replacement IR world (has emitter).
+- Slide 15: numeric arith examples are LLVM-world examples; emitter selects
+  actual operations. Type family includes signed 2/4/8/16/32/64/128 and
+  unsigned 8/16/32/64/128, not universally only 8–64.
+- Slide 16 / 31: @struct is frozen field-wise data, not LLVM aggregate;
+  remove old packed/zero_init claims for the current core.
+- Slide 18: replace old custom wrapper story with OpEmitter. Existing note
+  saying no emitter policy exists is obsolete.
+- Slide 21: ops is plain Meta configuration; remove m.Constexpr annotation.
+- Slide 25: current host entry is selected by plugin, default func.func;
+  remove old llvm-or-func setting. Third-party adapters/export are plugins.
+- Slide 29 / 32: name ASTPreprocessorPlugin, use executors(dsl). A
+  DialectPlugin.install(set_functions) can be overwritten by later AST setup.
+- Slide 33: explicit SCF builders come from a plugin/reference namespace,
+  not the core package itself.
+- Slides 38–42: retained DKG backend snippets remain source-grounded design
+  examples; the extracted target should be framed as a custom emitter plus
+  AST plugin, entry/kernel helper and compiler. Direct core type annotations
+  are the intended interface. Do not introduce legacy boundary wrappers.
+- Speaker notes, feature map and provenance paths need the moved source root.
+  Preserve old v6/v7 evidence as historical rather than rewriting test claims.
+
+Tests inspected, not executed
+-----------------------------
+test/core_only.py: absence of eager dialect/plugin imports; explicit core DSL.
+test/plugins_dialect.py: same scalar source under default and rank-0-tensor
+  emitter; default suppression and pass ordering; no real custom lowering.
+test/plugins_ast_preprocessor.py: native control flow via plugin; subclassed
+  executors; missing-plugin error; explicit builders without preprocessing.
+test/core.py:357–455: shallow copies, pipeline contributions, module hook,
+  compiled wrapper and cache-hit behavior.
+sub-dsls/mlir-dsl/test/mlir_dsl.py: namespace, optional plugins, CPU-only list,
+  default AST/SCF/LLVM assembly and pipeline.
+
+Commands used: rg/rg --files, cat/sed for the source files above, Python JSON
+inspection of v7 deck.json. No broad tests or source edits were needed for
+this architecture audit.

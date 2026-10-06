@@ -1,0 +1,83 @@
+
+//===--- ------ Generated IR ------ ---====
+
+module {
+  llvm.func @cumsum_builders(%arg0: i32) -> i32 {
+    %c0_i32 = arith.constant 0 : i32
+    %c0_i32_0 = arith.constant 0 : i32
+    %c1_i32 = arith.constant 1 : i32
+    %0 = scf.for %arg1 = %c0_i32_0 to %arg0 step %c1_i32 iter_args(%arg2 = %c0_i32) -> (i32)  : i32 {
+      %1 = arith.addi %arg2, %arg1 : i32
+      scf.yield %1 : i32
+    }
+    llvm.return %0 : i32
+  }
+}
+
+//===--- --- End of Generated IR -- ---====
+
+RESULT: ?
+
+//===--- ------ Generated IR ------ ---====
+
+module {
+  llvm.func @clamp_builders(%arg0: i32) -> i32 {
+    %c3_i32 = arith.constant 3 : i32
+    %0 = arith.cmpi sgt, %arg0, %c3_i32 : i32
+    %1 = scf.if %0 -> (i32) {
+      %c3_i32_0 = arith.constant 3 : i32
+      scf.yield %c3_i32_0 : i32
+    } else {
+      scf.yield %arg0 : i32
+    }
+    llvm.return %1 : i32
+  }
+}
+
+//===--- --- End of Generated IR -- ---====
+
+
+//===--- ------ Generated IR ------ ---====
+
+module {
+  llvm.func @clamp_builders(%arg0: i32) -> i32 {
+    %c3_i32 = arith.constant 3 : i32
+    %0 = arith.cmpi sgt, %arg0, %c3_i32 : i32
+    %1 = scf.if %0 -> (i32) {
+      %c3_i32_0 = arith.constant 3 : i32
+      scf.yield %c3_i32_0 : i32
+    } else {
+      scf.yield %arg0 : i32
+    }
+    llvm.return %1 : i32
+  }
+}
+
+//===--- --- End of Generated IR -- ---====
+
+RESULT: ? ?
+
+//===--- ------ Generated IR ------ ---====
+
+module {
+  llvm.func @countdown_builders(%arg0: i32) -> i32 {
+    %c0_i32 = arith.constant 0 : i32
+    %0:2 = scf.while (%arg1 = %arg0, %arg2 = %c0_i32) : (i32, i32) -> (i32, i32) {
+      %c0_i32_0 = arith.constant 0 : i32
+      %1 = arith.cmpi sgt, %arg1, %c0_i32_0 : i32
+      scf.condition(%1) %arg1, %arg2 : i32, i32
+    } do {
+    ^bb0(%arg1: i32, %arg2: i32):
+      %c2_i32 = arith.constant 2 : i32
+      %1 = arith.subi %arg1, %c2_i32 : i32
+      %c1_i32 = arith.constant 1 : i32
+      %2 = arith.addi %arg2, %c1_i32 : i32
+      scf.yield %1, %2 : i32, i32
+    }
+    llvm.return %0#1 : i32
+  }
+}
+
+//===--- --- End of Generated IR -- ---====
+
+RESULT: ?

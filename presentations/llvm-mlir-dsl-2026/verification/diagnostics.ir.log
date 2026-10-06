@@ -1,0 +1,44 @@
+
+error[PHASE_MUTATE_PYTHON]: `acc` is a Python value, but it is changed inside a for/while/if controlled by a runtime value (this `for`). Only a runtime value can change there: the code inside is compiled once, not run once per iteration or per taken branch.
+  --> /home/gozen/work/llvm-project/mlir/test/python/dsl/diagnostics.py:21
+   |
+19 | def cumsum_meta_acc(n: m.Int32) -> m.Int32:
+20 |     acc = 0
+21 |     for i in range(n):
+   |     ^
+  = category: not zero-cost (a Python value changes inside a runtime for/while/if)
+  = note: region: for
+  suggestion: Create `acc` as a runtime value of the matching type before the for/while/if, e.g.
+              `acc = Int32(0)`, `Float32(0.0)`, or `Boolean(False)`, and update it inside.
+  suggestion: If `acc` is a fixed setting, assign it once before the for/while/if and do not change
+              it inside.
+
+
+error[PHASE_DYNAMIC_TO_STATIC_BOOL]: A runtime value is used where plain Python needs a true/false answer, for example `if x:` in a function that is not compiled or has preprocessing disabled, or `sorted()` comparing runtime values; only a Python value can be used there.
+  --> /home/gozen/work/llvm-project/mlir/test/python/dsl/diagnostics.py:40:8
+   |
+38 | @m.jit(preprocess=False)
+39 | def clamp_no_preprocess(n: m.Int32) -> m.Int32:
+40 |     if n > 3:
+   |        ^^^^^
+  = category: not zero-cost (a Python-only operation is applied to a runtime value)
+  suggestion: Decorate the function that contains the `if`/`while` with `@jit` and keep the
+              preprocessor enabled, so it becomes an if/while controlled by a runtime value, or
+              build it with `if_(...)`/`while_(...)`.
+  suggestion: If the condition is decided at compile time, make it a Python value.
+
+
+error[PHASE_DYNAMIC_INDEX]: Cannot use a runtime value as a list index or for loop range in plain Python code; only a Python `int` works there.
+  --> /home/gozen/work/llvm-project/mlir/test/python/dsl/diagnostics.py:58:14
+   |
+56 | def cumsum_no_preprocess(n: m.Int32) -> m.Int32:
+57 |     acc = m.Int32(0)
+58 |     for i in range(n):
+   |              ^^^^^^^^
+  = category: not zero-cost (a Python-only operation is applied to a runtime value)
+  suggestion: For a loop: put `for ... in range(...)` inside a function decorated with `@jit` (with
+              the preprocessor enabled), so it becomes a for controlled by a runtime value, or build
+              the loop with `for_(...)`.
+  suggestion: For an index: if it is known at compile time, keep it a Python `int`, i.e. a Python
+              value, instead of a runtime value.
+

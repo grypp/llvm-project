@@ -1,0 +1,68 @@
+Displayed tutorial example checks — 2026-10-06
+
+Source snippets were extracted from canonical deck.json by stable ID:
+v7-07 scale; v7-20 affine; v7-21 AddN/MulN + dictionary pipeline;
+v7-33 explicit builder; v7-34 native accumulator; v7-35 fused NumPy;
+v7-26 annotation diagnostic. Harness checks/imports are added around them.
+No implementation changes or broad test suite runs were made.
+
+Command:
+env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core MLIR_DSL_DISABLE_FILE_CACHING=1 /usr/bin/python3.12 /home/gozen/work/mlir-dsl/presentations/llvm-mlir-dsl-2026/verification/v8/presentation-examples.py
+
+First run (original displayed examples): exit 1.
+PASS scale: 12
+PASS affine: 25
+PASS pipeline: 18
+PASS explicit sum_upto: 45
+PASS native sum_upto: 45
+PASS fused NumPy: [6.0, 9.0, 12.0, 15.0]
+FAIL expects_int diagnostic: accepted float
+Failed: expects_int diagnostic
+
+Required presentation correction: expects_int(1.5) is accepted by the host
+argument coercion; it does not illustrate ARG_ANNOTATION_MISMATCH. Change the
+call to expects_int("oops"). The corrected verification script uses a string
+and checks that exact diagnostic. This is the only snippet adjustment.
+
+The explicit m.for_ example's m.yield_([current + i]) works as displayed;
+there is no need to change the single-carry yield to scalar syntax.
+
+Runtime implementation provenance is recorded in runtime-types.txt next to
+this file. These checks execute CPU generated code using existing built
+bindings; no GPU execution is claimed. They validate the shown outputs, not
+every abbreviated IR excerpt on the presentation slides.
+
+Corrected displayed-example run (same command), exit 0:
+PASS scale: 12
+PASS affine: 25
+PASS pipeline: 18
+PASS explicit sum_upto: 45
+PASS native sum_upto: 45
+PASS fused NumPy: [6.0, 9.0, 12.0, 15.0]
+PASS expects_int(str): ARG_ANNOTATION_MISMATCH
+
+error[ARG_ANNOTATION_MISMATCH]: Argument #1 `x` must be a `Int32`, but got a `str`.
+   --> /home/gozen/work/mlir-dsl/presentations/llvm-mlir-dsl-2026/verification/v8/presentation-examples.py:131:5
+    |
+129 | 
+130 | try:
+131 |     expects_int("oops")
+    |     ^^^^^^^^^^^^^^^^^^^
+  = category: usage (arguments)
+  = note: Caused exception: 
+error[ARG_NOT_NUMERIC]: Argument `Int32(...)` expects a numeric value, but this call passes a value of type `str`.
+   --> /home/gozen/work/mlir-dsl/presentations/llvm-mlir-dsl-2026/verification/v8/presentation-examples.py:131:5
+    |
+129 | 
+130 | try:
+131 |     expects_int("oops")
+    |     ^^^^^^^^^^^^^^^^^^^
+  = category: usage (arguments)
+  suggestion: Pass an `int`, a `float`, or a DSL numeric such as `Int32(...)` for `Int32(...)`.
+
+  suggestion: Pass a value that matches `x`'s annotation.
+  suggestion: If the value you pass is the intended one, change `x`'s annotation to that type.
+
+Presentation examples: passed
+
+Script SHA256: 2f2399eeca5de605993c7d04b3d9c579c351e3ffa4e468a991b0f642d4d0b92c

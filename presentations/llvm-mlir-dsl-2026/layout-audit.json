@@ -1,0 +1,7238 @@
+[
+  {
+    "slide": 1,
+    "text": "01",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 1,
+    "text": "2026 US LLVM Developers\u2019 Meeting",
+    "font_size": 12.0,
+    "x": 0.52,
+    "y": 0.58,
+    "w": 8.96,
+    "h": 0.3
+  },
+  {
+    "slide": 1,
+    "text": "27 October 2026",
+    "font_size": 11.5,
+    "x": 0.52,
+    "y": 0.99,
+    "w": 8.96,
+    "h": 0.28
+  },
+  {
+    "slide": 1,
+    "text": "How to build a Python DSL\nfor MLIR",
+    "font_size": 31.0,
+    "x": 0.48,
+    "y": 1.81,
+    "w": 9.04,
+    "h": 1.23
+  },
+  {
+    "slide": 1,
+    "text": "mlir dsl \u00b7 shared core + reusable plugins",
+    "font_size": 14.0,
+    "x": 0.52,
+    "y": 3.27,
+    "w": 8.98,
+    "h": 0.4
+  },
+  {
+    "slide": 1,
+    "text": "Guray Ozen",
+    "font_size": 18.0,
+    "x": 0.52,
+    "y": 4.11,
+    "w": 4.2,
+    "h": 0.36
+  },
+  {
+    "slide": 1,
+    "text": "Principal Compiler Engineer, NVIDIA",
+    "font_size": 11.8,
+    "x": 0.52,
+    "y": 4.58,
+    "w": 4.2,
+    "h": 0.44
+  },
+  {
+    "slide": 1,
+    "text": "Amir Tavakkoli",
+    "font_size": 18.0,
+    "x": 5.140000000000001,
+    "y": 4.11,
+    "w": 4.2,
+    "h": 0.36
+  },
+  {
+    "slide": 2,
+    "text": "Why a Python DSL for MLIR?",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 2,
+    "text": "02",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 2,
+    "text": "Introduction",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 2,
+    "text": "01",
+    "font_size": 11.5,
+    "x": 0.71,
+    "y": 1.615,
+    "w": 0.33,
+    "h": 0.22
+  },
+  {
+    "slide": 2,
+    "text": "Test internal IR",
+    "font_size": 16.5,
+    "x": 1.19,
+    "y": 1.5499999999999998,
+    "w": 3.49,
+    "h": 0.33
+  },
+  {
+    "slide": 2,
+    "text": "Public",
+    "font_size": 12.2,
+    "x": 0.775,
+    "y": 2.505,
+    "w": 0.8999999999999999,
+    "h": 0.24
+  },
+  {
+    "slide": 2,
+    "text": "Internal",
+    "font_size": 12.2,
+    "x": 2.165,
+    "y": 2.505,
+    "w": 1.0799999999999998,
+    "h": 0.24
+  },
+  {
+    "slide": 2,
+    "text": "LLVM",
+    "font_size": 12.2,
+    "x": 3.6649999999999996,
+    "y": 2.505,
+    "w": 0.9299999999999999,
+    "h": 0.24
+  },
+  {
+    "slide": 2,
+    "text": "Python test",
+    "font_size": 10.5,
+    "x": 2.14,
+    "y": 2.035,
+    "w": 1.13,
+    "h": 0.19
+  },
+  {
+    "slide": 2,
+    "text": "02",
+    "font_size": 11.5,
+    "x": 5.32,
+    "y": 1.615,
+    "w": 0.33,
+    "h": 0.22
+  },
+  {
+    "slide": 2,
+    "text": "Generate recipe IR",
+    "font_size": 16.5,
+    "x": 5.800000000000001,
+    "y": 1.5499999999999998,
+    "w": 3.49,
+    "h": 0.33
+  },
+  {
+    "slide": 2,
+    "text": "</>",
+    "font_size": 7.7,
+    "x": 5.742000000000001,
+    "y": 2.1,
+    "w": 0.256,
+    "h": 0.17
+  },
+  {
+    "slide": 2,
+    "text": "Python",
+    "font_size": 10.5,
+    "x": 5.215000000000001,
+    "y": 2.39,
+    "w": 1.31,
+    "h": 0.4
+  },
+  {
+    "slide": 2,
+    "text": "</>",
+    "font_size": 7.7,
+    "x": 7.152000000000001,
+    "y": 2.1,
+    "w": 0.256,
+    "h": 0.17
+  },
+  {
+    "slide": 2,
+    "text": "Recipe IR",
+    "font_size": 10.5,
+    "x": 6.625000000000001,
+    "y": 2.39,
+    "w": 1.31,
+    "h": 0.4
+  },
+  {
+    "slide": 2,
+    "text": "External\nconsumer",
+    "font_size": 10.5,
+    "x": 8.035000000000002,
+    "y": 2.39,
+    "w": 1.31,
+    "h": 0.4
+  },
+  {
+    "slide": 2,
+    "text": "03",
+    "font_size": 11.5,
+    "x": 0.71,
+    "y": 3.265,
+    "w": 0.33,
+    "h": 0.22
+  },
+  {
+    "slide": 2,
+    "text": "Reuse building blocks",
+    "font_size": 16.5,
+    "x": 1.19,
+    "y": 3.2,
+    "w": 3.49,
+    "h": 0.33
+  },
+  {
+    "slide": 2,
+    "text": "MyDSL",
+    "font_size": 17.0,
+    "x": 3.13,
+    "y": 3.94,
+    "w": 1.23,
+    "h": 0.31
+  },
+  {
+    "slide": 2,
+    "text": "JIT",
+    "font_size": 10.7,
+    "x": 0.815,
+    "y": 3.673,
+    "w": 1.05,
+    "h": 0.19
+  },
+  {
+    "slide": 2,
+    "text": "Cache",
+    "font_size": 10.7,
+    "x": 0.815,
+    "y": 3.983,
+    "w": 1.05,
+    "h": 0.19
+  },
+  {
+    "slide": 2,
+    "text": "Env",
+    "font_size": 10.7,
+    "x": 0.815,
+    "y": 4.293,
+    "w": 1.05,
+    "h": 0.19
+  },
+  {
+    "slide": 2,
+    "text": "04",
+    "font_size": 11.5,
+    "x": 5.32,
+    "y": 3.265,
+    "w": 0.33,
+    "h": 0.22
+  },
+  {
+    "slide": 2,
+    "text": "Build a full language",
+    "font_size": 16.5,
+    "x": 5.800000000000001,
+    "y": 3.2,
+    "w": 3.49,
+    "h": 0.33
+  },
+  {
+    "slide": 2,
+    "text": "</>",
+    "font_size": 7.7,
+    "x": 5.742000000000001,
+    "y": 3.75,
+    "w": 0.256,
+    "h": 0.17
+  },
+  {
+    "slide": 2,
+    "text": "Python code",
+    "font_size": 10.5,
+    "x": 5.215000000000001,
+    "y": 4.04,
+    "w": 1.31,
+    "h": 0.4
+  },
+  {
+    "slide": 2,
+    "text": "DSL compiler",
+    "font_size": 10.5,
+    "x": 6.625000000000001,
+    "y": 4.04,
+    "w": 1.31,
+    "h": 0.4
+  },
+  {
+    "slide": 2,
+    "text": "01",
+    "font_size": 9.0,
+    "x": 8.56,
+    "y": 3.71,
+    "w": 0.26,
+    "h": 0.2
+  },
+  {
+    "slide": 2,
+    "text": "GPU",
+    "font_size": 10.5,
+    "x": 8.035000000000002,
+    "y": 4.04,
+    "w": 1.31,
+    "h": 0.4
+  },
+  {
+    "slide": 2,
+    "text": "NVIDIA CuTe DSL / CUTLASS Python",
+    "font_size": 9.4,
+    "x": 5.32,
+    "y": 4.43,
+    "w": 3.97,
+    "h": 0.18
+  },
+  {
+    "slide": 3,
+    "text": "Design principles",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 3,
+    "text": "03",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 3,
+    "text": "Introduction",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 3,
+    "text": "01",
+    "font_size": 18.0,
+    "x": 0.56,
+    "y": 1.84,
+    "w": 0.47,
+    "h": 0.4
+  },
+  {
+    "slide": 3,
+    "text": "No new language.",
+    "font_size": 23.0,
+    "x": 1.28,
+    "y": 1.81,
+    "w": 8.15,
+    "h": 0.53
+  },
+  {
+    "slide": 3,
+    "text": "Objects \u00b7 imports \u00b7 libraries",
+    "font_size": 13.0,
+    "x": 1.3,
+    "y": 2.44,
+    "w": 8.1,
+    "h": 0.42
+  },
+  {
+    "slide": 3,
+    "text": "02",
+    "font_size": 18.0,
+    "x": 0.56,
+    "y": 2.94,
+    "w": 0.47,
+    "h": 0.4
+  },
+  {
+    "slide": 3,
+    "text": "Python stays Python.",
+    "font_size": 23.0,
+    "x": 1.28,
+    "y": 2.91,
+    "w": 8.15,
+    "h": 0.53
+  },
+  {
+    "slide": 3,
+    "text": "MLIR through a DSL namespace",
+    "font_size": 13.0,
+    "x": 1.3,
+    "y": 3.54,
+    "w": 8.1,
+    "h": 0.42
+  },
+  {
+    "slide": 3,
+    "text": "This leads to multi-stage programming.",
+    "font_size": 16.0,
+    "x": 0.55,
+    "y": 4.38,
+    "w": 8.9,
+    "h": 0.39
+  },
+  {
+    "slide": 4,
+    "text": "What is multi-stage programming?",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 4,
+    "text": "04",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 4,
+    "text": "Introduction",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 4,
+    "text": "Traditional compiler",
+    "font_size": 12.5,
+    "x": 0.5,
+    "y": 1.47,
+    "w": 4.5,
+    "h": 0.29
+  },
+  {
+    "slide": 4,
+    "text": "</>",
+    "font_size": 7.7,
+    "x": 0.852,
+    "y": 1.94,
+    "w": 0.256,
+    "h": 0.17
+  },
+  {
+    "slide": 4,
+    "text": "source.cpp",
+    "font_size": 10.5,
+    "x": 0.17999999999999994,
+    "y": 2.23,
+    "w": 1.6,
+    "h": 0.4
+  },
+  {
+    "slide": 4,
+    "text": "compiler",
+    "font_size": 10.5,
+    "x": 2.2,
+    "y": 2.23,
+    "w": 1.6,
+    "h": 0.4
+  },
+  {
+    "slide": 4,
+    "text": "01",
+    "font_size": 9.0,
+    "x": 4.89,
+    "y": 1.9,
+    "w": 0.26,
+    "h": 0.2
+  },
+  {
+    "slide": 4,
+    "text": "binary",
+    "font_size": 10.5,
+    "x": 4.22,
+    "y": 2.23,
+    "w": 1.6,
+    "h": 0.4
+  },
+  {
+    "slide": 4,
+    "text": "Multi-stage compilers",
+    "font_size": 12.5,
+    "x": 0.5,
+    "y": 2.52,
+    "w": 4.5,
+    "h": 0.29
+  },
+  {
+    "slide": 4,
+    "text": "</>",
+    "font_size": 7.7,
+    "x": 0.852,
+    "y": 3.02,
+    "w": 0.256,
+    "h": 0.17
+  },
+  {
+    "slide": 4,
+    "text": "source.cpp",
+    "font_size": 10.5,
+    "x": 0.17999999999999994,
+    "y": 3.31,
+    "w": 1.6,
+    "h": 0.4
+  },
+  {
+    "slide": 4,
+    "text": "compiler",
+    "font_size": 10.5,
+    "x": 2.2,
+    "y": 3.31,
+    "w": 1.6,
+    "h": 0.4
+  },
+  {
+    "slide": 4,
+    "text": "01",
+    "font_size": 9.0,
+    "x": 4.89,
+    "y": 2.98,
+    "w": 0.26,
+    "h": 0.2
+  },
+  {
+    "slide": 4,
+    "text": "binary",
+    "font_size": 10.5,
+    "x": 4.22,
+    "y": 3.31,
+    "w": 1.6,
+    "h": 0.4
+  },
+  {
+    "slide": 4,
+    "text": "Run \u2192 generate the next source",
+    "font_size": 10.5,
+    "x": 0.7,
+    "y": 3.68,
+    "w": 4.8,
+    "h": 0.24
+  },
+  {
+    "slide": 4,
+    "text": "\u2026",
+    "font_size": 21.0,
+    "x": 6.13,
+    "y": 2.9099999999999997,
+    "w": 0.52,
+    "h": 0.4
+  },
+  {
+    "slide": 4,
+    "text": "Repeat\u2026",
+    "font_size": 12.0,
+    "x": 6.88,
+    "y": 2.9699999999999998,
+    "w": 2.62,
+    "h": 0.54
+  },
+  {
+    "slide": 4,
+    "text": "In our case",
+    "font_size": 12.5,
+    "x": 0.5,
+    "y": 3.94,
+    "w": 4.5,
+    "h": 0.29
+  },
+  {
+    "slide": 4,
+    "text": "</>",
+    "font_size": 7.7,
+    "x": 0.852,
+    "y": 4.41,
+    "w": 0.256,
+    "h": 0.17
+  },
+  {
+    "slide": 4,
+    "text": "source.py",
+    "font_size": 10.5,
+    "x": 0.17999999999999994,
+    "y": 4.7,
+    "w": 1.6,
+    "h": 0.4
+  },
+  {
+    "slide": 4,
+    "text": "Python\ninterpreter",
+    "font_size": 10.5,
+    "x": 2.1899999999999995,
+    "y": 4.7,
+    "w": 1.6,
+    "h": 0.4
+  },
+  {
+    "slide": 4,
+    "text": "</>",
+    "font_size": 7.7,
+    "x": 4.872,
+    "y": 4.41,
+    "w": 0.256,
+    "h": 0.17
+  },
+  {
+    "slide": 4,
+    "text": "*.mlir",
+    "font_size": 10.5,
+    "x": 4.2,
+    "y": 4.7,
+    "w": 1.6,
+    "h": 0.4
+  },
+  {
+    "slide": 4,
+    "text": "mlir-opt",
+    "font_size": 10.5,
+    "x": 6.21,
+    "y": 4.7,
+    "w": 1.6,
+    "h": 0.4
+  },
+  {
+    "slide": 4,
+    "text": "01",
+    "font_size": 9.0,
+    "x": 8.889999999999999,
+    "y": 4.37,
+    "w": 0.26,
+    "h": 0.2
+  },
+  {
+    "slide": 4,
+    "text": "binary",
+    "font_size": 10.5,
+    "x": 8.219999999999999,
+    "y": 4.7,
+    "w": 1.6,
+    "h": 0.4
+  },
+  {
+    "slide": 4,
+    "text": "LLVM codegen / JIT",
+    "font_size": 9.0,
+    "x": 7.155,
+    "y": 4.07,
+    "w": 1.72,
+    "h": 0.21
+  },
+  {
+    "slide": 5,
+    "text": "Why multi-stage programming?",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 5,
+    "text": "05",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 5,
+    "text": "Introduction",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 5,
+    "text": "01",
+    "font_size": 10.5,
+    "x": 0.55,
+    "y": 1.7,
+    "w": 0.34,
+    "h": 0.25
+  },
+  {
+    "slide": 5,
+    "text": "METAPROGRAM",
+    "font_size": 10.0,
+    "x": 1.03,
+    "y": 1.7,
+    "w": 3.72,
+    "h": 0.25
+  },
+  {
+    "slide": 5,
+    "text": "All of Python.",
+    "font_size": 21.0,
+    "x": 0.55,
+    "y": 2.12,
+    "w": 4.2,
+    "h": 0.47
+  },
+  {
+    "slide": 5,
+    "text": "Objects \u00b7 imports \u00b7 libraries",
+    "font_size": 12.5,
+    "x": 0.55,
+    "y": 2.78,
+    "w": 4.2,
+    "h": 0.58
+  },
+  {
+    "slide": 5,
+    "text": "02",
+    "font_size": 10.5,
+    "x": 5.25,
+    "y": 1.7,
+    "w": 0.34,
+    "h": 0.25
+  },
+  {
+    "slide": 5,
+    "text": "DSL NAMESPACE",
+    "font_size": 10.0,
+    "x": 5.73,
+    "y": 1.7,
+    "w": 3.72,
+    "h": 0.25
+  },
+  {
+    "slide": 5,
+    "text": "Explicit capture.",
+    "font_size": 21.0,
+    "x": 5.25,
+    "y": 2.12,
+    "w": 4.2,
+    "h": 0.47
+  },
+  {
+    "slide": 5,
+    "text": "Types \u00b7 operators \u00b7 builders",
+    "font_size": 12.5,
+    "x": 5.25,
+    "y": 2.78,
+    "w": 4.2,
+    "h": 0.58
+  },
+  {
+    "slide": 5,
+    "text": "import mlir.mlir_dsl as m",
+    "font_size": 10.0,
+    "x": 0.55,
+    "y": 3.61,
+    "w": 8.9,
+    "h": 0.26
+  },
+  {
+    "slide": 5,
+    "text": "range(4)",
+    "font_size": 14.0,
+    "x": 0.55,
+    "y": 4.02,
+    "w": 1.62,
+    "h": 0.35
+  },
+  {
+    "slide": 5,
+    "text": "Python loop",
+    "font_size": 14.0,
+    "x": 2.96,
+    "y": 4.01,
+    "w": 1.85,
+    "h": 0.33
+  },
+  {
+    "slide": 5,
+    "text": "Runs now",
+    "font_size": 10.0,
+    "x": 2.96,
+    "y": 4.38,
+    "w": 1.85,
+    "h": 0.25
+  },
+  {
+    "slide": 5,
+    "text": "m.range(4)",
+    "font_size": 14.0,
+    "x": 5.25,
+    "y": 4.02,
+    "w": 1.62,
+    "h": 0.35
+  },
+  {
+    "slide": 5,
+    "text": "scf.for",
+    "font_size": 14.0,
+    "x": 7.66,
+    "y": 4.01,
+    "w": 1.85,
+    "h": 0.33
+  },
+  {
+    "slide": 5,
+    "text": "Runs later",
+    "font_size": 10.0,
+    "x": 7.66,
+    "y": 4.38,
+    "w": 1.85,
+    "h": 0.25
+  },
+  {
+    "slide": 6,
+    "text": "How to build a Python DSL for MLIR",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 6,
+    "text": "06",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 6,
+    "text": "Introduction",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 6,
+    "text": "Python",
+    "font_size": 12.0,
+    "x": 0.54,
+    "y": 1.53,
+    "w": 3.32,
+    "h": 0.27
+  },
+  {
+    "slide": 6,
+    "text": "Trace: execute Python",
+    "font_size": 11.0,
+    "x": 3.96,
+    "y": 1.53,
+    "w": 2.08,
+    "h": 0.27
+  },
+  {
+    "slide": 6,
+    "text": "MLIR",
+    "font_size": 12.0,
+    "x": 6.18,
+    "y": 1.53,
+    "w": 3.28,
+    "h": 0.27
+  },
+  {
+    "slide": 6,
+    "text": "Python",
+    "font_size": 10.0,
+    "x": 0.67,
+    "y": 2.095,
+    "w": 2.99,
+    "h": 0.24
+  },
+  {
+    "slide": 6,
+    "text": "import mlir.mlir_dsl as m",
+    "font_size": 10.6,
+    "x": 0.67,
+    "y": 2.52,
+    "w": 2.99,
+    "h": 0.19138888888888891
+  },
+  {
+    "slide": 6,
+    "text": "",
+    "font_size": 10.6,
+    "x": 0.67,
+    "y": 2.7084444444444444,
+    "w": 2.99,
+    "h": 0.19138888888888891
+  },
+  {
+    "slide": 6,
+    "text": "@m.jit",
+    "font_size": 10.6,
+    "x": 0.67,
+    "y": 2.896888888888889,
+    "w": 2.99,
+    "h": 0.19138888888888891
+  },
+  {
+    "slide": 6,
+    "text": "def scale(x: m.Int32, factor):",
+    "font_size": 10.6,
+    "x": 0.67,
+    "y": 3.0853333333333333,
+    "w": 2.99,
+    "h": 0.19138888888888891
+  },
+  {
+    "slide": 6,
+    "text": "    return x * factor",
+    "font_size": 10.6,
+    "x": 0.67,
+    "y": 3.2737777777777777,
+    "w": 2.99,
+    "h": 0.19138888888888891
+  },
+  {
+    "slide": 6,
+    "text": "",
+    "font_size": 10.6,
+    "x": 0.67,
+    "y": 3.462222222222222,
+    "w": 2.99,
+    "h": 0.19138888888888891
+  },
+  {
+    "slide": 6,
+    "text": "scale(4, 3)",
+    "font_size": 10.6,
+    "x": 0.67,
+    "y": 3.6506666666666665,
+    "w": 2.99,
+    "h": 0.19138888888888891
+  },
+  {
+    "slide": 6,
+    "text": "Generated MLIR",
+    "font_size": 10.0,
+    "x": 6.34,
+    "y": 2.095,
+    "w": 2.99,
+    "h": 0.24
+  },
+  {
+    "slide": 6,
+    "text": "// x is a runtime i32",
+    "font_size": 10.6,
+    "x": 6.34,
+    "y": 2.52,
+    "w": 2.99,
+    "h": 0.19138888888888891
+  },
+  {
+    "slide": 6,
+    "text": "%c3 = arith.constant 3 : i32",
+    "font_size": 10.6,
+    "x": 6.34,
+    "y": 2.7084444444444444,
+    "w": 2.99,
+    "h": 0.19138888888888891
+  },
+  {
+    "slide": 6,
+    "text": "%r = arith.muli %x, %c3 : i32",
+    "font_size": 10.6,
+    "x": 6.34,
+    "y": 2.896888888888889,
+    "w": 2.99,
+    "h": 0.19138888888888891
+  },
+  {
+    "slide": 6,
+    "text": "func.return %r : i32",
+    "font_size": 10.6,
+    "x": 6.34,
+    "y": 3.0853333333333333,
+    "w": 2.99,
+    "h": 0.19138888888888891
+  },
+  {
+    "slide": 6,
+    "text": "Meta",
+    "font_size": 12.0,
+    "x": 4.25,
+    "y": 2.22,
+    "w": 1.51,
+    "h": 0.24
+  },
+  {
+    "slide": 6,
+    "text": "factor = 3\nRun Python",
+    "font_size": 10.2,
+    "x": 4.25,
+    "y": 2.5100000000000002,
+    "w": 1.51,
+    "h": 0.35
+  },
+  {
+    "slide": 6,
+    "text": "Staged",
+    "font_size": 12.0,
+    "x": 4.25,
+    "y": 3.2600000000000002,
+    "w": 1.51,
+    "h": 0.24
+  },
+  {
+    "slide": 6,
+    "text": "x = SSA\nEmit MLIR",
+    "font_size": 10.2,
+    "x": 4.25,
+    "y": 3.5500000000000003,
+    "w": 1.51,
+    "h": 0.35
+  },
+  {
+    "slide": 6,
+    "text": "Objects \u00b7 imports \u00b7 metaprogramming",
+    "font_size": 10.1,
+    "x": 0.54,
+    "y": 4.15,
+    "w": 4.0,
+    "h": 0.27
+  },
+  {
+    "slide": 6,
+    "text": "Compile",
+    "font_size": 9.9,
+    "x": 6.2,
+    "y": 4.29,
+    "w": 1.05,
+    "h": 0.34
+  },
+  {
+    "slide": 6,
+    "text": "Test",
+    "font_size": 9.9,
+    "x": 7.3100000000000005,
+    "y": 4.29,
+    "w": 1.05,
+    "h": 0.34
+  },
+  {
+    "slide": 6,
+    "text": "Consume IR",
+    "font_size": 9.9,
+    "x": 8.42,
+    "y": 4.29,
+    "w": 1.05,
+    "h": 0.34
+  },
+  {
+    "slide": 7,
+    "text": "One program. Two binding times.",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 7,
+    "text": "07",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 7,
+    "text": "Introduction",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 7,
+    "text": "Python / Meta",
+    "font_size": 18.0,
+    "x": 0.52,
+    "y": 1.85,
+    "w": 4.16,
+    "h": 0.6
+  },
+  {
+    "slide": 7,
+    "text": "RUNS NOW",
+    "font_size": 13.0,
+    "x": 0.52,
+    "y": 2.55,
+    "w": 4.16,
+    "h": 0.4
+  },
+  {
+    "slide": 7,
+    "text": "Objects \u00b7 functions \u00b7 dictionaries",
+    "font_size": 13.0,
+    "x": 0.52,
+    "y": 3.11,
+    "w": 4.16,
+    "h": 1.18
+  },
+  {
+    "slide": 7,
+    "text": "DSL / Staged",
+    "font_size": 18.0,
+    "x": 5.32,
+    "y": 1.85,
+    "w": 4.16,
+    "h": 0.6
+  },
+  {
+    "slide": 7,
+    "text": "RUNS LATER",
+    "font_size": 13.0,
+    "x": 5.32,
+    "y": 2.55,
+    "w": 4.16,
+    "h": 0.4
+  },
+  {
+    "slide": 7,
+    "text": "Typed values \u00b7 MLIR operations",
+    "font_size": 13.0,
+    "x": 5.32,
+    "y": 3.11,
+    "w": 4.16,
+    "h": 1.18
+  },
+  {
+    "slide": 7,
+    "text": "compile",
+    "font_size": 9.2,
+    "x": 4.61,
+    "y": 2.91,
+    "w": 0.65,
+    "h": 0.22
+  },
+  {
+    "slide": 8,
+    "text": "MLIR compilers make different choices",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 8,
+    "text": "08",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 8,
+    "text": "Introduction",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 8,
+    "text": "Different dialects.",
+    "font_size": 27.0,
+    "x": 0.61,
+    "y": 1.72,
+    "w": 8.73,
+    "h": 0.5
+  },
+  {
+    "slide": 8,
+    "text": "Different passes.",
+    "font_size": 27.0,
+    "x": 0.61,
+    "y": 2.46,
+    "w": 8.73,
+    "h": 0.5
+  },
+  {
+    "slide": 8,
+    "text": "Different capture rules.",
+    "font_size": 27.0,
+    "x": 0.61,
+    "y": 3.2,
+    "w": 8.73,
+    "h": 0.5
+  },
+  {
+    "slide": 8,
+    "text": "How can we reuse one DSL core?",
+    "font_size": 16.0,
+    "x": 0.61,
+    "y": 4.34,
+    "w": 8.73,
+    "h": 0.44
+  },
+  {
+    "slide": 9,
+    "text": "What is a plugin?",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 9,
+    "text": "09",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 9,
+    "text": "Introduction",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 9,
+    "text": "A reusable component that adds DSL behavior.",
+    "font_size": 23.0,
+    "x": 0.59,
+    "y": 1.65,
+    "w": 8.8,
+    "h": 0.8
+  },
+  {
+    "slide": 9,
+    "text": "Your DSL selects plugins.",
+    "font_size": 20.0,
+    "x": 0.61,
+    "y": 2.81,
+    "w": 8.73,
+    "h": 0.5
+  },
+  {
+    "slide": 9,
+    "text": "The core calls their hooks.",
+    "font_size": 20.0,
+    "x": 0.61,
+    "y": 3.46,
+    "w": 8.73,
+    "h": 0.5
+  },
+  {
+    "slide": 9,
+    "text": "Example: the LLVM plugin supplies IR and compilation.",
+    "font_size": 16.0,
+    "x": 0.61,
+    "y": 4.34,
+    "w": 8.73,
+    "h": 0.44
+  },
+  {
+    "slide": 10,
+    "text": "The shared core",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 10,
+    "text": "10",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 10,
+    "text": "Introduction",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 10,
+    "text": "Core DSL",
+    "font_size": 22.0,
+    "x": 0.79,
+    "y": 1.7,
+    "w": 8.42,
+    "h": 0.39
+  },
+  {
+    "slide": 10,
+    "text": "Diagnostics",
+    "font_size": 20.0,
+    "x": 0.99,
+    "y": 2.41,
+    "w": 3.6999999999999997,
+    "h": 0.36
+  },
+  {
+    "slide": 10,
+    "text": "Errors \u00b7 remarks",
+    "font_size": 13.1,
+    "x": 0.99,
+    "y": 2.9,
+    "w": 3.6999999999999997,
+    "h": 0.23
+  },
+  {
+    "slide": 10,
+    "text": "AST preprocessing",
+    "font_size": 20.0,
+    "x": 5.28,
+    "y": 2.41,
+    "w": 3.6999999999999997,
+    "h": 0.36
+  },
+  {
+    "slide": 10,
+    "text": "Plugin hooks",
+    "font_size": 13.1,
+    "x": 5.28,
+    "y": 2.9,
+    "w": 3.6999999999999997,
+    "h": 0.23
+  },
+  {
+    "slide": 10,
+    "text": "JIT cache",
+    "font_size": 20.0,
+    "x": 0.99,
+    "y": 3.49,
+    "w": 3.6999999999999997,
+    "h": 0.36
+  },
+  {
+    "slide": 10,
+    "text": "Memory \u00b7 disk",
+    "font_size": 13.1,
+    "x": 0.99,
+    "y": 3.98,
+    "w": 3.6999999999999997,
+    "h": 0.23
+  },
+  {
+    "slide": 10,
+    "text": "Type inference",
+    "font_size": 20.0,
+    "x": 5.28,
+    "y": 3.49,
+    "w": 3.6999999999999997,
+    "h": 0.36
+  },
+  {
+    "slide": 10,
+    "text": "Promotion \u00b7 casts",
+    "font_size": 13.1,
+    "x": 5.28,
+    "y": 3.98,
+    "w": 3.6999999999999997,
+    "h": 0.23
+  },
+  {
+    "slide": 10,
+    "text": "Add plugins for an end-to-end DSL.",
+    "font_size": 13.6,
+    "x": 0.59,
+    "y": 4.85,
+    "w": 8.82,
+    "h": 0.28
+  },
+  {
+    "slide": 11,
+    "text": "Plugins complete the DSL",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 11,
+    "text": "11",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 11,
+    "text": "Introduction",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 11,
+    "text": "1",
+    "font_size": 11.5,
+    "x": 0.7000000000000001,
+    "y": 1.724,
+    "w": 0.28,
+    "h": 0.22
+  },
+  {
+    "slide": 11,
+    "text": "Dialect",
+    "font_size": 15.4,
+    "x": 1.13,
+    "y": 1.67,
+    "w": 2.09,
+    "h": 0.32
+  },
+  {
+    "slide": 11,
+    "text": "LLVM",
+    "font_size": 10.8,
+    "x": 0.7100000000000001,
+    "y": 2.233,
+    "w": 0.7266666666666666,
+    "h": 0.21
+  },
+  {
+    "slide": 11,
+    "text": "SCF",
+    "font_size": 10.8,
+    "x": 1.5866666666666667,
+    "y": 2.233,
+    "w": 0.7266666666666666,
+    "h": 0.21
+  },
+  {
+    "slide": 11,
+    "text": "GPU",
+    "font_size": 10.8,
+    "x": 2.463333333333333,
+    "y": 2.233,
+    "w": 0.7266666666666666,
+    "h": 0.21
+  },
+  {
+    "slide": 11,
+    "text": "2",
+    "font_size": 11.5,
+    "x": 3.75,
+    "y": 1.724,
+    "w": 0.28,
+    "h": 0.22
+  },
+  {
+    "slide": 11,
+    "text": "AST preprocessor",
+    "font_size": 15.4,
+    "x": 4.18,
+    "y": 1.67,
+    "w": 2.09,
+    "h": 0.32
+  },
+  {
+    "slide": 11,
+    "text": "SCF capture",
+    "font_size": 10.8,
+    "x": 3.76,
+    "y": 2.233,
+    "w": 2.48,
+    "h": 0.21
+  },
+  {
+    "slide": 11,
+    "text": "3",
+    "font_size": 11.5,
+    "x": 6.8,
+    "y": 1.724,
+    "w": 0.28,
+    "h": 0.22
+  },
+  {
+    "slide": 11,
+    "text": "Third party",
+    "font_size": 15.4,
+    "x": 7.2299999999999995,
+    "y": 1.67,
+    "w": 2.09,
+    "h": 0.32
+  },
+  {
+    "slide": 11,
+    "text": "DLPack",
+    "font_size": 10.8,
+    "x": 6.8100000000000005,
+    "y": 2.233,
+    "w": 1.165,
+    "h": 0.21
+  },
+  {
+    "slide": 11,
+    "text": "TVM-FFI",
+    "font_size": 10.8,
+    "x": 8.125,
+    "y": 2.233,
+    "w": 1.165,
+    "h": 0.21
+  },
+  {
+    "slide": 11,
+    "text": "mlir dsl",
+    "font_size": 20.0,
+    "x": 0.7000000000000001,
+    "y": 3.33,
+    "w": 3.99,
+    "h": 0.36
+  },
+  {
+    "slide": 11,
+    "text": "Working end-to-end",
+    "font_size": 11.5,
+    "x": 0.7000000000000001,
+    "y": 3.79,
+    "w": 3.99,
+    "h": 0.23
+  },
+  {
+    "slide": 11,
+    "text": "SCF",
+    "font_size": 11.1,
+    "x": 0.7350000000000001,
+    "y": 4.208,
+    "w": 1.1933333333333334,
+    "h": 0.22
+  },
+  {
+    "slide": 11,
+    "text": "LLVM",
+    "font_size": 11.1,
+    "x": 2.0983333333333336,
+    "y": 4.208,
+    "w": 1.1933333333333334,
+    "h": 0.22
+  },
+  {
+    "slide": 11,
+    "text": "SCF AST",
+    "font_size": 11.1,
+    "x": 3.4616666666666673,
+    "y": 4.208,
+    "w": 1.1933333333333334,
+    "h": 0.22
+  },
+  {
+    "slide": 11,
+    "text": "Core DSL",
+    "font_size": 10.8,
+    "x": 0.73,
+    "y": 4.476,
+    "w": 3.93,
+    "h": 0.2
+  },
+  {
+    "slide": 11,
+    "text": "Your DSL",
+    "font_size": 20.0,
+    "x": 5.3100000000000005,
+    "y": 3.33,
+    "w": 3.99,
+    "h": 0.36
+  },
+  {
+    "slide": 11,
+    "text": "Reuse + extend",
+    "font_size": 11.5,
+    "x": 5.3100000000000005,
+    "y": 3.79,
+    "w": 3.99,
+    "h": 0.23
+  },
+  {
+    "slide": 11,
+    "text": "Existing plugins",
+    "font_size": 11.1,
+    "x": 5.345000000000001,
+    "y": 4.208,
+    "w": 1.875,
+    "h": 0.22
+  },
+  {
+    "slide": 11,
+    "text": "Your additions",
+    "font_size": 11.1,
+    "x": 7.390000000000001,
+    "y": 4.208,
+    "w": 1.875,
+    "h": 0.22
+  },
+  {
+    "slide": 11,
+    "text": "Core DSL",
+    "font_size": 10.8,
+    "x": 5.340000000000001,
+    "y": 4.476,
+    "w": 3.93,
+    "h": 0.2
+  },
+  {
+    "slide": 11,
+    "text": "Reuse existing plugins in either DSL.",
+    "font_size": 13.0,
+    "x": 0.59,
+    "y": 4.93,
+    "w": 8.82,
+    "h": 0.27
+  },
+  {
+    "slide": 12,
+    "text": "Agenda",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 12,
+    "text": "12",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 12,
+    "text": "Introduction",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 12,
+    "text": "01",
+    "font_size": 13.0,
+    "x": 0.55,
+    "y": 1.7249999999999999,
+    "w": 0.45,
+    "h": 0.35
+  },
+  {
+    "slide": 12,
+    "text": "Core + plugin architecture",
+    "font_size": 17.0,
+    "x": 1.16,
+    "y": 1.7,
+    "w": 8.3,
+    "h": 0.44
+  },
+  {
+    "slide": 12,
+    "text": "02",
+    "font_size": 13.0,
+    "x": 0.55,
+    "y": 2.405,
+    "w": 0.45,
+    "h": 0.35
+  },
+  {
+    "slide": 12,
+    "text": "Types + metaprogramming",
+    "font_size": 17.0,
+    "x": 1.16,
+    "y": 2.38,
+    "w": 8.3,
+    "h": 0.44
+  },
+  {
+    "slide": 12,
+    "text": "03",
+    "font_size": 13.0,
+    "x": 0.55,
+    "y": 3.085,
+    "w": 0.45,
+    "h": 0.35
+  },
+  {
+    "slide": 12,
+    "text": "Compile + control-flow plugins",
+    "font_size": 17.0,
+    "x": 1.16,
+    "y": 3.06,
+    "w": 8.3,
+    "h": 0.44
+  },
+  {
+    "slide": 12,
+    "text": "04",
+    "font_size": 13.0,
+    "x": 0.55,
+    "y": 3.765,
+    "w": 0.45,
+    "h": 0.35
+  },
+  {
+    "slide": 12,
+    "text": "Amir: mutation tracking",
+    "font_size": 17.0,
+    "x": 1.16,
+    "y": 3.74,
+    "w": 8.3,
+    "h": 0.44
+  },
+  {
+    "slide": 12,
+    "text": "05",
+    "font_size": 13.0,
+    "x": 0.55,
+    "y": 4.445,
+    "w": 0.45,
+    "h": 0.35
+  },
+  {
+    "slide": 12,
+    "text": "Tile IR: compose a new target",
+    "font_size": 17.0,
+    "x": 1.16,
+    "y": 4.42,
+    "w": 8.3,
+    "h": 0.44
+  },
+  {
+    "slide": 13,
+    "text": "Build your language from BaseDSL",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 13,
+    "text": "13",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 13,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 13,
+    "text": "mydsl/__init__.py \u00b7 setup excerpt",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 5.36,
+    "h": 0.24
+  },
+  {
+    "slide": 13,
+    "text": "class MyDSL(BaseDSL):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 13,
+    "text": "    plugins = [ScfASTPreprocessorPlugin()]",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.386222222222222,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 13,
+    "text": "    _jit_arg_adapter_scope = \"mlir\"",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.5924444444444443,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 13,
+    "text": "",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.7986666666666666,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 13,
+    "text": "    def __init__(self):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.004888888888889,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 13,
+    "text": "        super().__init__(",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.2111111111111112,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 13,
+    "text": "            name=\"MY_DSL\",",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.4173333333333336,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 13,
+    "text": "            dsl_package_name=[\"mydsl\"],",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.623555555555556,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 13,
+    "text": "            pass_sm_arch_name=\"cubin-chip\",",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.829777777777778,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 13,
+    "text": "            preprocess=True)",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 4.0360000000000005,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 13,
+    "text": "Choose",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 1.69,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 13,
+    "text": "Plugins + namespace",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 2.17,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 13,
+    "text": "Inherit",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 3.11,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 13,
+    "text": "Staging \u00b7 JIT \u00b7 cache \u00b7 env",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 3.59,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 14,
+    "text": "Core API \u2260 language namespace",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 14,
+    "text": "14",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 14,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 14,
+    "text": "For DSL authors",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 4.0600000000000005,
+    "h": 0.24
+  },
+  {
+    "slide": 14,
+    "text": "from mlir.dsl import (",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 14,
+    "text": "    BaseDSL, Plugin, DialectPlugin,",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.3808888888888884,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 14,
+    "text": "    ASTPreprocessorPlugin, OpEmitter,",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.581777777777777,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 14,
+    "text": "    Int32, Pointer, register_leaf,",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.7826666666666657,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 14,
+    "text": ")",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.9835555555555544,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 14,
+    "text": "For users of the reference DSL",
+    "font_size": 10.0,
+    "x": 5.27,
+    "y": 1.755,
+    "w": 4.08,
+    "h": 0.24
+  },
+  {
+    "slide": 14,
+    "text": "import mlir.mlir_dsl as m",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.1799999999999997,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 14,
+    "text": "",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.3808888888888884,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 14,
+    "text": "@m.jit",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.581777777777777,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 14,
+    "text": "def scale(x: m.Int32, factor):",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.7826666666666657,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 14,
+    "text": "    return x * factor",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.9835555555555544,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 14,
+    "text": "",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.184444444444443,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 14,
+    "text": "scale(4, 3)  # 12",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.3853333333333318,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 15,
+    "text": "Three plugin families",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 15,
+    "text": "15",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 15,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 15,
+    "text": "Dialect",
+    "font_size": 17.0,
+    "x": 0.6900000000000001,
+    "y": 1.75,
+    "w": 2.52,
+    "h": 0.31
+  },
+  {
+    "slide": 15,
+    "text": "DialectPlugin",
+    "font_size": 10.8,
+    "x": 0.6900000000000001,
+    "y": 2.32,
+    "w": 2.52,
+    "h": 0.38
+  },
+  {
+    "slide": 15,
+    "text": "Types + operations",
+    "font_size": 14.0,
+    "x": 0.6900000000000001,
+    "y": 2.94,
+    "w": 2.52,
+    "h": 0.31
+  },
+  {
+    "slide": 15,
+    "text": "Entries + lowering",
+    "font_size": 14.0,
+    "x": 0.6900000000000001,
+    "y": 3.34,
+    "w": 2.52,
+    "h": 0.31
+  },
+  {
+    "slide": 15,
+    "text": "LLVM \u00b7 SCF \u00b7 GPU",
+    "font_size": 10.8,
+    "x": 0.6900000000000001,
+    "y": 4.1,
+    "w": 2.52,
+    "h": 0.24
+  },
+  {
+    "slide": 15,
+    "text": "Python syntax",
+    "font_size": 17.0,
+    "x": 3.74,
+    "y": 1.75,
+    "w": 2.52,
+    "h": 0.31
+  },
+  {
+    "slide": 15,
+    "text": "ASTPreprocessorPlugin",
+    "font_size": 10.8,
+    "x": 3.74,
+    "y": 2.32,
+    "w": 2.52,
+    "h": 0.38
+  },
+  {
+    "slide": 15,
+    "text": "AST rewrite",
+    "font_size": 14.0,
+    "x": 3.74,
+    "y": 2.94,
+    "w": 2.52,
+    "h": 0.31
+  },
+  {
+    "slide": 15,
+    "text": "Region callbacks",
+    "font_size": 14.0,
+    "x": 3.74,
+    "y": 3.34,
+    "w": 2.52,
+    "h": 0.31
+  },
+  {
+    "slide": 15,
+    "text": "SCF AST \u00b7 custom AST",
+    "font_size": 10.8,
+    "x": 3.74,
+    "y": 4.1,
+    "w": 2.52,
+    "h": 0.24
+  },
+  {
+    "slide": 15,
+    "text": "Integration",
+    "font_size": 17.0,
+    "x": 6.79,
+    "y": 1.75,
+    "w": 2.52,
+    "h": 0.31
+  },
+  {
+    "slide": 15,
+    "text": "Plugin",
+    "font_size": 10.8,
+    "x": 6.79,
+    "y": 2.32,
+    "w": 2.52,
+    "h": 0.38
+  },
+  {
+    "slide": 15,
+    "text": "Argument adapters",
+    "font_size": 14.0,
+    "x": 6.79,
+    "y": 2.94,
+    "w": 2.52,
+    "h": 0.31
+  },
+  {
+    "slide": 15,
+    "text": "ABI exports",
+    "font_size": 14.0,
+    "x": 6.79,
+    "y": 3.34,
+    "w": 2.52,
+    "h": 0.31
+  },
+  {
+    "slide": 15,
+    "text": "DLPack \u00b7 PyTorch \u00b7 TVM-FFI",
+    "font_size": 10.8,
+    "x": 6.79,
+    "y": 4.1,
+    "w": 2.52,
+    "h": 0.24
+  },
+  {
+    "slide": 16,
+    "text": "Extend a dialect\u2014or replace its IR",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 16,
+    "text": "16",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 16,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 16,
+    "text": "Downstream plugin \u00b7 implementation excerpt",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 5.36,
+    "h": 0.24
+  },
+  {
+    "slide": 16,
+    "text": "class MyDialectPlugin(m.DialectPlugin):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 16,
+    "text": "    name = \"mydialect\"",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.386222222222222,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 16,
+    "text": "    def register_dialects(self, context):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.5924444444444443,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 16,
+    "text": "        mydialect.register_dialect(context)",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.7986666666666666,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 16,
+    "text": "    def pipeline_passes(self):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.004888888888889,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 16,
+    "text": "        return [\"convert-mydialect-to-llvm\"]",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.2111111111111112,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 16,
+    "text": "",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.4173333333333336,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 16,
+    "text": "class MySubDSL(m.MlirDSL):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.623555555555556,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 16,
+    "text": "    plugins = [MyDialectPlugin()]",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.829777777777778,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 16,
+    "text": "Add dialect + passes",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 1.69,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 16,
+    "text": "Keep the default emitter",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 2.17,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 16,
+    "text": "Supply an emitter",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 3.11,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 16,
+    "text": "Replace SCF + LLVM defaults",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 3.59,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 17,
+    "text": "A plugin follows the compilation lifecycle",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 17,
+    "text": "17",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 17,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 17,
+    "text": "01",
+    "font_size": 10.5,
+    "x": 0.53,
+    "y": 1.78,
+    "w": 1.5959999999999999,
+    "h": 0.24
+  },
+  {
+    "slide": 17,
+    "text": "Build DSL",
+    "font_size": 14.0,
+    "x": 0.5900000000000001,
+    "y": 2.29,
+    "w": 1.476,
+    "h": 0.3
+  },
+  {
+    "slide": 17,
+    "text": "copy + install",
+    "font_size": 11.2,
+    "x": 0.5650000000000001,
+    "y": 3.03,
+    "w": 1.5259999999999998,
+    "h": 0.26
+  },
+  {
+    "slide": 17,
+    "text": "select providers",
+    "font_size": 11.2,
+    "x": 0.5650000000000001,
+    "y": 3.4899999999999998,
+    "w": 1.5259999999999998,
+    "h": 0.26
+  },
+  {
+    "slide": 17,
+    "text": "02",
+    "font_size": 10.5,
+    "x": 2.3659999999999997,
+    "y": 1.78,
+    "w": 1.5959999999999999,
+    "h": 0.24
+  },
+  {
+    "slide": 17,
+    "text": "Context",
+    "font_size": 14.0,
+    "x": 2.4259999999999997,
+    "y": 2.29,
+    "w": 1.476,
+    "h": 0.3
+  },
+  {
+    "slide": 17,
+    "text": "register_dialects",
+    "font_size": 11.2,
+    "x": 2.401,
+    "y": 3.03,
+    "w": 1.5259999999999998,
+    "h": 0.26
+  },
+  {
+    "slide": 17,
+    "text": "03",
+    "font_size": 10.5,
+    "x": 4.202,
+    "y": 1.78,
+    "w": 1.5959999999999999,
+    "h": 0.24
+  },
+  {
+    "slide": 17,
+    "text": "Trace",
+    "font_size": 14.0,
+    "x": 4.262,
+    "y": 2.29,
+    "w": 1.476,
+    "h": 0.3
+  },
+  {
+    "slide": 17,
+    "text": "AST \u2192 emit",
+    "font_size": 11.2,
+    "x": 4.237,
+    "y": 3.03,
+    "w": 1.5259999999999998,
+    "h": 0.26
+  },
+  {
+    "slide": 17,
+    "text": "attach_to_module",
+    "font_size": 11.2,
+    "x": 4.237,
+    "y": 3.4899999999999998,
+    "w": 1.5259999999999998,
+    "h": 0.26
+  },
+  {
+    "slide": 17,
+    "text": "Before cache key",
+    "font_size": 9.9,
+    "x": 4.252,
+    "y": 4.15,
+    "w": 1.4959999999999998,
+    "h": 0.47
+  },
+  {
+    "slide": 17,
+    "text": "04",
+    "font_size": 10.5,
+    "x": 6.037999999999999,
+    "y": 1.78,
+    "w": 1.5959999999999999,
+    "h": 0.24
+  },
+  {
+    "slide": 17,
+    "text": "Compile",
+    "font_size": 14.0,
+    "x": 6.097999999999999,
+    "y": 2.29,
+    "w": 1.476,
+    "h": 0.3
+  },
+  {
+    "slide": 17,
+    "text": "pipeline_passes",
+    "font_size": 11.2,
+    "x": 6.0729999999999995,
+    "y": 3.03,
+    "w": 1.5259999999999998,
+    "h": 0.26
+  },
+  {
+    "slide": 17,
+    "text": "shared_libs",
+    "font_size": 11.2,
+    "x": 6.0729999999999995,
+    "y": 3.4899999999999998,
+    "w": 1.5259999999999998,
+    "h": 0.26
+  },
+  {
+    "slide": 17,
+    "text": "05",
+    "font_size": 10.5,
+    "x": 7.874,
+    "y": 1.78,
+    "w": 1.5959999999999999,
+    "h": 0.24
+  },
+  {
+    "slide": 17,
+    "text": "Callable",
+    "font_size": 14.0,
+    "x": 7.933999999999999,
+    "y": 2.29,
+    "w": 1.476,
+    "h": 0.3
+  },
+  {
+    "slide": 17,
+    "text": "wrap_compiled_\nfunction",
+    "font_size": 11.2,
+    "x": 7.909,
+    "y": 3.03,
+    "w": 1.5259999999999998,
+    "h": 0.52
+  },
+  {
+    "slide": 17,
+    "text": "Before memory cache",
+    "font_size": 9.9,
+    "x": 7.9239999999999995,
+    "y": 4.15,
+    "w": 1.4959999999999998,
+    "h": 0.47
+  },
+  {
+    "slide": 18,
+    "text": "@jit and @kernel",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 18,
+    "text": "18",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 18,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 18,
+    "text": "Python",
+    "font_size": 18.0,
+    "x": 0.85,
+    "y": 1.9100000000000001,
+    "w": 1.86,
+    "h": 0.48
+  },
+  {
+    "slide": 18,
+    "text": "@jit",
+    "font_size": 18.0,
+    "x": 4.06,
+    "y": 1.9100000000000001,
+    "w": 1.86,
+    "h": 0.48
+  },
+  {
+    "slide": 18,
+    "text": "@kernel",
+    "font_size": 18.0,
+    "x": 7.2700000000000005,
+    "y": 1.9100000000000001,
+    "w": 1.86,
+    "h": 0.48
+  },
+  {
+    "slide": 18,
+    "text": "compile / invoke",
+    "font_size": 9.3,
+    "x": 2.91,
+    "y": 1.61,
+    "w": 0.95,
+    "h": 0.39
+  },
+  {
+    "slide": 18,
+    "text": "GPU launch",
+    "font_size": 9.3,
+    "x": 6.14,
+    "y": 1.72,
+    "w": 0.92,
+    "h": 0.28
+  },
+  {
+    "slide": 18,
+    "text": "Python helpers run while tracing",
+    "font_size": 10.3,
+    "x": 1.99,
+    "y": 2.9,
+    "w": 3.51,
+    "h": 0.28
+  },
+  {
+    "slide": 18,
+    "text": "Host",
+    "font_size": 13.0,
+    "x": 0.62,
+    "y": 3.56,
+    "w": 2.75,
+    "h": 0.38
+  },
+  {
+    "slide": 18,
+    "text": "Specialize \u00b7 compile \u00b7 call",
+    "font_size": 11.3,
+    "x": 0.62,
+    "y": 4.0,
+    "w": 2.75,
+    "h": 0.54
+  },
+  {
+    "slide": 18,
+    "text": "GPU",
+    "font_size": 13.0,
+    "x": 3.83,
+    "y": 3.56,
+    "w": 2.75,
+    "h": 0.38
+  },
+  {
+    "slide": 18,
+    "text": "Build kernel + launch",
+    "font_size": 11.3,
+    "x": 3.83,
+    "y": 4.0,
+    "w": 2.75,
+    "h": 0.54
+  },
+  {
+    "slide": 18,
+    "text": "Direct launch",
+    "font_size": 13.0,
+    "x": 7.04,
+    "y": 3.56,
+    "w": 2.75,
+    "h": 0.38
+  },
+  {
+    "slide": 18,
+    "text": "Python \u2192 @kernel\nTarget policy",
+    "font_size": 11.3,
+    "x": 7.04,
+    "y": 4.0,
+    "w": 2.75,
+    "h": 0.54
+  },
+  {
+    "slide": 19,
+    "text": "Types keep policy; emitters choose IR",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 19,
+    "text": "19",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 19,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 19,
+    "text": "Shown: the LLVM emitter",
+    "font_size": 11.5,
+    "x": 0.5,
+    "y": 4.72,
+    "w": 9.0,
+    "h": 0.34
+  },
+  {
+    "slide": 19,
+    "text": "Bool \u00b7 i1",
+    "font_size": 11.4,
+    "x": 0.6000000000000001,
+    "y": 1.6,
+    "w": 1.3599999999999999,
+    "h": 0.23
+  },
+  {
+    "slide": 19,
+    "text": "Int2\u2013128 / Uint8\u2013128",
+    "font_size": 11.4,
+    "x": 2.26,
+    "y": 1.6,
+    "w": 2.1599999999999997,
+    "h": 0.23
+  },
+  {
+    "slide": 19,
+    "text": "FP64/32/16 \u00b7 BF16",
+    "font_size": 11.4,
+    "x": 4.720000000000001,
+    "y": 1.6,
+    "w": 2.36,
+    "h": 0.23
+  },
+  {
+    "slide": 19,
+    "text": "FP8/6/4 \u00b7 TF32",
+    "font_size": 11.4,
+    "x": 7.380000000000001,
+    "y": 1.6,
+    "w": 2.02,
+    "h": 0.23
+  },
+  {
+    "slide": 19,
+    "text": "Python or SSA value",
+    "font_size": 16.0,
+    "x": 0.83,
+    "y": 2.12,
+    "w": 2.15,
+    "h": 0.31
+  },
+  {
+    "slide": 19,
+    "text": "dtype + promotion",
+    "font_size": 16.0,
+    "x": 3.93,
+    "y": 2.12,
+    "w": 2.15,
+    "h": 0.31
+  },
+  {
+    "slide": 19,
+    "text": "active OpEmitter",
+    "font_size": 16.0,
+    "x": 7.03,
+    "y": 2.12,
+    "w": 2.15,
+    "h": 0.31
+  },
+  {
+    "slide": 19,
+    "text": "Conversion",
+    "font_size": 10.3,
+    "x": 0.69,
+    "y": 2.58,
+    "w": 1.44,
+    "h": 0.25
+  },
+  {
+    "slide": 19,
+    "text": "Python",
+    "font_size": 10.3,
+    "x": 2.33,
+    "y": 2.58,
+    "w": 3.33,
+    "h": 0.25
+  },
+  {
+    "slide": 19,
+    "text": "MLIR",
+    "font_size": 10.3,
+    "x": 5.86,
+    "y": 2.58,
+    "w": 3.4,
+    "h": 0.25
+  },
+  {
+    "slide": 19,
+    "text": "Capture",
+    "font_size": 12.5,
+    "x": 0.69,
+    "y": 2.94,
+    "w": 1.44,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "m.Int32(7) \u2192 staged use",
+    "font_size": 11.5,
+    "x": 2.33,
+    "y": 2.94,
+    "w": 3.33,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "arith.constant : i32",
+    "font_size": 11.5,
+    "x": 5.86,
+    "y": 2.94,
+    "w": 3.4,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "Promote / upcast",
+    "font_size": 12.25,
+    "x": 0.69,
+    "y": 3.2319999999999998,
+    "w": 1.44,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "x32 + y64",
+    "font_size": 11.5,
+    "x": 2.33,
+    "y": 3.2319999999999998,
+    "w": 3.33,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "extsi \u2192 addi : i64",
+    "font_size": 11.5,
+    "x": 5.86,
+    "y": 3.2319999999999998,
+    "w": 3.4,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "Downcast",
+    "font_size": 12.5,
+    "x": 0.69,
+    "y": 3.524,
+    "w": 1.44,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "y64.to(m.Int32)",
+    "font_size": 11.5,
+    "x": 2.33,
+    "y": 3.524,
+    "w": 3.33,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "arith.trunci",
+    "font_size": 11.5,
+    "x": 5.86,
+    "y": 3.524,
+    "w": 3.4,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "Int \u2192 float",
+    "font_size": 12.5,
+    "x": 0.69,
+    "y": 3.816,
+    "w": 1.44,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "x32.to(m.Float32)",
+    "font_size": 11.5,
+    "x": 2.33,
+    "y": 3.816,
+    "w": 3.33,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "arith.sitofp",
+    "font_size": 11.5,
+    "x": 5.86,
+    "y": 3.816,
+    "w": 3.4,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "Float \u2192 int",
+    "font_size": 12.5,
+    "x": 0.69,
+    "y": 4.108,
+    "w": 1.44,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "f32.to(m.Int32)",
+    "font_size": 11.5,
+    "x": 2.33,
+    "y": 4.108,
+    "w": 3.33,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "arith.fptosi",
+    "font_size": 11.5,
+    "x": 5.86,
+    "y": 4.108,
+    "w": 3.4,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "Error",
+    "font_size": 12.5,
+    "x": 0.69,
+    "y": 4.4,
+    "w": 1.44,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "x32.to(int)",
+    "font_size": 11.5,
+    "x": 2.33,
+    "y": 4.4,
+    "w": 3.33,
+    "h": 0.28
+  },
+  {
+    "slide": 19,
+    "text": "Runtime \u2260 Python value",
+    "font_size": 11.5,
+    "x": 5.86,
+    "y": 4.4,
+    "w": 3.4,
+    "h": 0.28
+  },
+  {
+    "slide": 20,
+    "text": "One emitter, three value families",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 20,
+    "text": "20",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 20,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 20,
+    "text": "Structs need no dialect-specific aggregate type.",
+    "font_size": 11.5,
+    "x": 0.5,
+    "y": 4.72,
+    "w": 9.0,
+    "h": 0.34
+  },
+  {
+    "slide": 20,
+    "text": "Core value",
+    "font_size": 11.5,
+    "x": 0.63,
+    "y": 1.77,
+    "w": 2.74,
+    "h": 0.29
+  },
+  {
+    "slide": 20,
+    "text": "Dialect hooks",
+    "font_size": 11.5,
+    "x": 3.67,
+    "y": 1.77,
+    "w": 5.7,
+    "h": 0.29
+  },
+  {
+    "slide": 20,
+    "text": "Scalar",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 2.27,
+    "w": 2.74,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 20,
+    "text": "mlir_type \u00b7 const \u00b7 add \u00b7 cast",
+    "font_size": 12.0,
+    "x": 3.67,
+    "y": 2.27,
+    "w": 5.7,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 20,
+    "text": "Vector",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 2.738,
+    "w": 2.74,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 20,
+    "text": "vector_type \u00b7 broadcast \u00b7 reduce",
+    "font_size": 12.0,
+    "x": 3.67,
+    "y": 2.738,
+    "w": 5.7,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 20,
+    "text": "Pointer",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 3.206,
+    "w": 2.74,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 20,
+    "text": "pointer_type \u00b7 load \u00b7 store \u00b7 ptr_add",
+    "font_size": 12.0,
+    "x": 3.67,
+    "y": 3.206,
+    "w": 5.7,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 20,
+    "text": "Struct / frozen record",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 3.674,
+    "w": 2.74,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 20,
+    "text": "Flatten fields \u2192 rebuild record",
+    "font_size": 12.0,
+    "x": 3.67,
+    "y": 3.674,
+    "w": 5.7,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 20,
+    "text": "Custom leaf",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 4.142,
+    "w": 2.74,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 20,
+    "text": "register_leaf",
+    "font_size": 12.0,
+    "x": 3.67,
+    "y": 4.142,
+    "w": 5.7,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 21,
+    "text": "Local type inference",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 21,
+    "text": "21",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 21,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 21,
+    "text": "Annotations + local inference",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 5.36,
+    "h": 0.24
+  },
+  {
+    "slide": 21,
+    "text": "@m.jit",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 21,
+    "text": "def affine(x: m.Int32, factor):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.386222222222222,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 21,
+    "text": "    return x * factor + 1",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.5924444444444443,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 21,
+    "text": "",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.7986666666666666,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 21,
+    "text": "affine(4, 3)",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.004888888888889,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 21,
+    "text": "",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.2111111111111112,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 21,
+    "text": "# x       -> runtime i32",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.4173333333333336,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 21,
+    "text": "# factor  -> known Python int",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.623555555555556,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 21,
+    "text": "# result  -> i32",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.829777777777778,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 21,
+    "text": "Boundary",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 1.69,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 21,
+    "text": "Annotation \u2192 runtime type",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 2.17,
+    "w": 3.03,
+    "h": 0.41666666666666663
+  },
+  {
+    "slide": 21,
+    "text": "Operator",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 2.6366666666666667,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 21,
+    "text": "Promote \u2192 emit \u2192 wrap",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 3.1166666666666667,
+    "w": 3.03,
+    "h": 0.41666666666666663
+  },
+  {
+    "slide": 21,
+    "text": "Join",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 3.583333333333333,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 21,
+    "text": "Same structure + types",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 4.063333333333333,
+    "w": 3.03,
+    "h": 0.41666666666666663
+  },
+  {
+    "slide": 22,
+    "text": "Same Python types. Different IR.",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 22,
+    "text": "22",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 22,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 22,
+    "text": "x + y",
+    "font_size": 24.0,
+    "x": 0.5900000000000001,
+    "y": 2.73,
+    "w": 1.1600000000000001,
+    "h": 0.42
+  },
+  {
+    "slide": 22,
+    "text": "dtype + promotion",
+    "font_size": 13.5,
+    "x": 2.25,
+    "y": 2.73,
+    "w": 1.73,
+    "h": 0.42
+  },
+  {
+    "slide": 22,
+    "text": "active OpEmitter",
+    "font_size": 15.5,
+    "x": 4.489999999999999,
+    "y": 2.73,
+    "w": 2.0,
+    "h": 0.42
+  },
+  {
+    "slide": 22,
+    "text": "LlvmEmitter",
+    "font_size": 13.5,
+    "x": 7.25,
+    "y": 1.67,
+    "w": 2.0999999999999996,
+    "h": 0.29
+  },
+  {
+    "slide": 22,
+    "text": "i32",
+    "font_size": 13.0,
+    "x": 7.25,
+    "y": 2.0700000000000003,
+    "w": 2.0999999999999996,
+    "h": 0.29
+  },
+  {
+    "slide": 22,
+    "text": "arith.addi",
+    "font_size": 11.5,
+    "x": 7.25,
+    "y": 2.45,
+    "w": 2.0999999999999996,
+    "h": 0.23
+  },
+  {
+    "slide": 22,
+    "text": "CustomEmitter",
+    "font_size": 13.5,
+    "x": 7.25,
+    "y": 3.2700000000000005,
+    "w": 2.0999999999999996,
+    "h": 0.29
+  },
+  {
+    "slide": 22,
+    "text": "tensor<i32>",
+    "font_size": 13.0,
+    "x": 7.25,
+    "y": 3.6700000000000004,
+    "w": 2.0999999999999996,
+    "h": 0.29
+  },
+  {
+    "slide": 22,
+    "text": "arith.addi",
+    "font_size": 11.5,
+    "x": 7.25,
+    "y": 4.050000000000001,
+    "w": 2.0999999999999996,
+    "h": 0.23
+  },
+  {
+    "slide": 22,
+    "text": "Same Int32 class \u00b7 different SSA type",
+    "font_size": 12.5,
+    "x": 0.56,
+    "y": 4.14,
+    "w": 6.05,
+    "h": 0.34
+  },
+  {
+    "slide": 23,
+    "text": "Install the emitter as a dialect plugin",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 23,
+    "text": "23",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 23,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 23,
+    "text": "Rank-zero tensor plugin \u00b7 excerpt",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 4.0600000000000005,
+    "h": 0.24
+  },
+  {
+    "slide": 23,
+    "text": "class TensorDialect(m.DialectPlugin):",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "    emitter = RankZeroTensorEmitter()",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.3808888888888884,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "    host_gen_helper = m.LlvmHostGenHelper",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.581777777777777,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.7826666666666657,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "class TensorDSL(m.MlirDSL):",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.9835555555555544,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "    plugins = [TensorDialect()]",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.184444444444443,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.3853333333333318,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "@TensorDSL.jit",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.5862222222222204,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "def add6(x: m.Int32):",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.787111111111109,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "    return m.Int32(6) + x",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.9879999999999978,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "Same expression \u00b7 two traced forms",
+    "font_size": 10.0,
+    "x": 5.27,
+    "y": 1.755,
+    "w": 4.08,
+    "h": 0.24
+  },
+  {
+    "slide": 23,
+    "text": "// Default LLVM world",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.1799999999999997,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "%c6 = arith.constant 6 : i32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.3808888888888884,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "%r = arith.addi %c6, %x : i32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.581777777777777,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.7826666666666657,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "// Rank-zero tensor emitter",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.9835555555555544,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "%c6 = arith.constant dense<6>",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.184444444444443,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "    : tensor<i32>",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.3853333333333318,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "%r = arith.addi %c6, %x",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.5862222222222204,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 23,
+    "text": "    : tensor<i32>",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.787111111111109,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 24,
+    "text": "Add mydialect.Tensor",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 24,
+    "text": "24",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 24,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 24,
+    "text": "Register a Tensor leaf",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 5.36,
+    "h": 0.24
+  },
+  {
+    "slide": 24,
+    "text": "class Tensor:",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 24,
+    "text": "    def __init__(self, value):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.386222222222222,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 24,
+    "text": "        self.value = value",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.5924444444444443,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 24,
+    "text": "",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.7986666666666666,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 24,
+    "text": "m.register_leaf(",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.004888888888889,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 24,
+    "text": "    Tensor,",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.2111111111111112,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 24,
+    "text": "    ir_types=lambda t: [t.value.type],",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.4173333333333336,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 24,
+    "text": "    ir_values=lambda t: [t.value],",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.623555555555556,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 24,
+    "text": "    from_ir_values=lambda old, values:",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.829777777777778,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 24,
+    "text": "        Tensor(values[0]))",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 4.0360000000000005,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 24,
+    "text": "Value protocol",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 1.69,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 24,
+    "text": "Flatten / rebuild",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 2.17,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 24,
+    "text": "Runtime boundary",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 3.11,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 24,
+    "text": "Argument adapter",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 3.59,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 25,
+    "text": "Python values specialize the program",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 25,
+    "text": "25",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 25,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 25,
+    "text": "scale, bias: Meta \u00b7 x: Staged",
+    "font_size": 11.5,
+    "x": 0.5,
+    "y": 4.72,
+    "w": 9.0,
+    "h": 0.34
+  },
+  {
+    "slide": 25,
+    "text": "Python",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 4.0600000000000005,
+    "h": 0.24
+  },
+  {
+    "slide": 25,
+    "text": "@m.jit",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 25,
+    "text": "def affine(x: m.Int32, scale, bias):",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.3808888888888884,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 25,
+    "text": "    return x * scale + bias",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.581777777777777,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 25,
+    "text": "",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.7826666666666657,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 25,
+    "text": "affine(7, 3, 4)  # 25",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.9835555555555544,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 25,
+    "text": "Generated MLIR",
+    "font_size": 10.0,
+    "x": 5.27,
+    "y": 1.755,
+    "w": 4.08,
+    "h": 0.24
+  },
+  {
+    "slide": 25,
+    "text": "%c3 = arith.constant 3 : i32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.1799999999999997,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 25,
+    "text": "%c4 = arith.constant 4 : i32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.3808888888888884,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 25,
+    "text": "%a = arith.muli %x, %c3 : i32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.581777777777777,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 25,
+    "text": "%r = arith.addi %a, %c4 : i32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.7826666666666657,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 25,
+    "text": "func.return %r : i32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.9835555555555544,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "Objects + dictionaries \u2192 arithmetic",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 26,
+    "text": "26",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 26,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 26,
+    "text": "No runtime dictionary or virtual dispatch.",
+    "font_size": 11.5,
+    "x": 0.5,
+    "y": 4.72,
+    "w": 9.0,
+    "h": 0.34
+  },
+  {
+    "slide": 26,
+    "text": "Python polymorphism",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 4.0600000000000005,
+    "h": 0.24
+  },
+  {
+    "slide": 26,
+    "text": "class Op:",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "    def apply(self, x):",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.3808888888888884,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "        raise NotImplementedError",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.581777777777777,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.7826666666666657,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "class AddN(Op):",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.9835555555555544,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "    def __init__(self, n): self.n = n",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.184444444444443,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "    def apply(self, x): return x + self.n",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.3853333333333318,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.5862222222222204,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "class MulN(Op):",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.787111111111109,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "    def __init__(self, k): self.k = k",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.9879999999999978,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "    def apply(self, x): return x * self.k",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 4.188888888888886,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "Metaprogram",
+    "font_size": 10.0,
+    "x": 5.27,
+    "y": 1.755,
+    "w": 4.08,
+    "h": 0.24
+  },
+  {
+    "slide": 26,
+    "text": "@m.jit",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.1799999999999997,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "def pipeline(x: m.Int32, ops):",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.3808888888888884,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "    for op in ops.values():",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.581777777777777,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "        x = op.apply(x)",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.7826666666666657,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "    return x",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.9835555555555544,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.184444444444443,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "ops = {\"shift\": AddN(2), \"scale\": MulN(3)}",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.3853333333333318,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "pipeline(4, ops)  # 18",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.5862222222222204,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.787111111111109,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 26,
+    "text": "# Captured: (x + 2) * 3",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.9879999999999978,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 27,
+    "text": "A GPU plugin supplies kernel + launch",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 27,
+    "text": "27",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 27,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 27,
+    "text": "GPU body \u00b7 Pointer interface",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 5.36,
+    "h": 0.24
+  },
+  {
+    "slide": 27,
+    "text": "@m.kernel",
+    "font_size": 11.35,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 5.36,
+    "h": 0.20493055555555556
+  },
+  {
+    "slide": 27,
+    "text": "def fused(arr: m.Pointer[m.Float32],",
+    "font_size": 11.35,
+    "x": 0.65,
+    "y": 2.3817777777777773,
+    "w": 5.36,
+    "h": 0.20493055555555556
+  },
+  {
+    "slide": 27,
+    "text": "          ops):",
+    "font_size": 11.35,
+    "x": 0.65,
+    "y": 2.583555555555555,
+    "w": 5.36,
+    "h": 0.20493055555555556
+  },
+  {
+    "slide": 27,
+    "text": "    tx, _, _ = m.thread_idx()",
+    "font_size": 11.35,
+    "x": 0.65,
+    "y": 2.7853333333333326,
+    "w": 5.36,
+    "h": 0.20493055555555556
+  },
+  {
+    "slide": 27,
+    "text": "    x = arr[tx]",
+    "font_size": 11.35,
+    "x": 0.65,
+    "y": 2.98711111111111,
+    "w": 5.36,
+    "h": 0.20493055555555556
+  },
+  {
+    "slide": 27,
+    "text": "    for op in ops.values():",
+    "font_size": 11.35,
+    "x": 0.65,
+    "y": 3.1888888888888878,
+    "w": 5.36,
+    "h": 0.20493055555555556
+  },
+  {
+    "slide": 27,
+    "text": "        x = op.apply(x)",
+    "font_size": 11.35,
+    "x": 0.65,
+    "y": 3.3906666666666654,
+    "w": 5.36,
+    "h": 0.20493055555555556
+  },
+  {
+    "slide": 27,
+    "text": "    arr[tx] = x",
+    "font_size": 11.35,
+    "x": 0.65,
+    "y": 3.592444444444443,
+    "w": 5.36,
+    "h": 0.20493055555555556
+  },
+  {
+    "slide": 27,
+    "text": "",
+    "font_size": 11.35,
+    "x": 0.65,
+    "y": 3.7942222222222206,
+    "w": 5.36,
+    "h": 0.20493055555555556
+  },
+  {
+    "slide": 27,
+    "text": "# From @m.jit, for four elements:",
+    "font_size": 11.35,
+    "x": 0.65,
+    "y": 3.995999999999998,
+    "w": 5.36,
+    "h": 0.20493055555555556
+  },
+  {
+    "slide": 27,
+    "text": "# fused(arr, ops).launch(grid=[1], block=[4])",
+    "font_size": 11.35,
+    "x": 0.65,
+    "y": 4.197777777777776,
+    "w": 5.36,
+    "h": 0.20493055555555556
+  },
+  {
+    "slide": 27,
+    "text": "Core",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 1.69,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 27,
+    "text": "Meta recipe \u00b7 typed values",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 2.17,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 27,
+    "text": "GPU plugin",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 3.11,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 27,
+    "text": "gpu.func \u00b7 gpu.launch_func",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 3.59,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 28,
+    "text": "DLPack is a boundary plugin",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 28,
+    "text": "28",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 28,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 28,
+    "text": "Tensor",
+    "font_size": 15.0,
+    "x": 0.62,
+    "y": 2.23,
+    "w": 1.7924999999999998,
+    "h": 0.62
+  },
+  {
+    "slide": 28,
+    "text": "NumPy \u00b7 PyTorch\nJAX \u00b7 \u2026",
+    "font_size": 11.5,
+    "x": 0.62,
+    "y": 3.03,
+    "w": 1.7924999999999998,
+    "h": 0.73
+  },
+  {
+    "slide": 28,
+    "text": "DlpackPlugin",
+    "font_size": 15.0,
+    "x": 2.9425,
+    "y": 2.23,
+    "w": 1.7924999999999998,
+    "h": 0.62
+  },
+  {
+    "slide": 28,
+    "text": "Protocol adapter",
+    "font_size": 11.5,
+    "x": 2.9425,
+    "y": 3.03,
+    "w": 1.7924999999999998,
+    "h": 0.73
+  },
+  {
+    "slide": 28,
+    "text": "DlpackTensor",
+    "font_size": 15.0,
+    "x": 5.265,
+    "y": 2.23,
+    "w": 1.7924999999999998,
+    "h": 0.62
+  },
+  {
+    "slide": 28,
+    "text": "Layout + dtype\nproducer lifetime",
+    "font_size": 11.5,
+    "x": 5.265,
+    "y": 3.03,
+    "w": 1.7924999999999998,
+    "h": 0.73
+  },
+  {
+    "slide": 28,
+    "text": "Pointer[T]",
+    "font_size": 15.0,
+    "x": 7.5874999999999995,
+    "y": 2.23,
+    "w": 1.7924999999999998,
+    "h": 0.62
+  },
+  {
+    "slide": 28,
+    "text": "Data address\nsize passed separately",
+    "font_size": 11.5,
+    "x": 7.5874999999999995,
+    "y": 3.03,
+    "w": 1.7924999999999998,
+    "h": 0.73
+  },
+  {
+    "slide": 28,
+    "text": "Contiguous buffers \u00b7 supported dtype + device",
+    "font_size": 11.5,
+    "x": 0.5,
+    "y": 4.18,
+    "w": 9.0,
+    "h": 0.35
+  },
+  {
+    "slide": 29,
+    "text": "Compile now. Call later.",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 29,
+    "text": "29",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 29,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 29,
+    "text": "Current compile API",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 5.36,
+    "h": 0.24
+  },
+  {
+    "slide": 29,
+    "text": "@m.jit",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 29,
+    "text": "def axpb(x: m.Float32,",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.386222222222222,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 29,
+    "text": "         a: m.Float32, b: int):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.5924444444444443,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 29,
+    "text": "    return a * x + b",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.7986666666666666,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 29,
+    "text": "",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.004888888888889,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 29,
+    "text": "compiled = m.compile(axpb, 2.0, 3.0, 1)",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.2111111111111112,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 29,
+    "text": "compiled(2.0, 3.0, 1)  # 7.0",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.4173333333333336,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 29,
+    "text": "Signature",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 1.69,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 29,
+    "text": "Runtime types + Meta b",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 2.17,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 29,
+    "text": "Compiler provider",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 3.11,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 29,
+    "text": "Pass manager + engine",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 3.59,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 30,
+    "text": "An export plugin wraps both sides",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 30,
+    "text": "30",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 30,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 30,
+    "text": "Python",
+    "font_size": 15.0,
+    "x": 0.62,
+    "y": 2.23,
+    "w": 1.7924999999999998,
+    "h": 0.62
+  },
+  {
+    "slide": 30,
+    "text": "Adapt arguments",
+    "font_size": 11.5,
+    "x": 0.62,
+    "y": 3.03,
+    "w": 1.7924999999999998,
+    "h": 0.73
+  },
+  {
+    "slide": 30,
+    "text": "Traced module",
+    "font_size": 15.0,
+    "x": 2.9425,
+    "y": 2.23,
+    "w": 1.7924999999999998,
+    "h": 0.62
+  },
+  {
+    "slide": 30,
+    "text": "Add ABI wrapper",
+    "font_size": 11.5,
+    "x": 2.9425,
+    "y": 3.03,
+    "w": 1.7924999999999998,
+    "h": 0.73
+  },
+  {
+    "slide": 30,
+    "text": "Compiler",
+    "font_size": 15.0,
+    "x": 5.265,
+    "y": 2.23,
+    "w": 1.7924999999999998,
+    "h": 0.62
+  },
+  {
+    "slide": 30,
+    "text": "Lower + link",
+    "font_size": 11.5,
+    "x": 5.265,
+    "y": 3.03,
+    "w": 1.7924999999999998,
+    "h": 0.73
+  },
+  {
+    "slide": 30,
+    "text": "Callable",
+    "font_size": 15.0,
+    "x": 7.5874999999999995,
+    "y": 2.23,
+    "w": 1.7924999999999998,
+    "h": 0.62
+  },
+  {
+    "slide": 30,
+    "text": "TVM-FFI callable",
+    "font_size": 11.5,
+    "x": 7.5874999999999995,
+    "y": 3.03,
+    "w": 1.7924999999999998,
+    "h": 0.73
+  },
+  {
+    "slide": 30,
+    "text": "Optional: TvmFfiPlugin \u00b7 MLIR_DSL_ENABLE_TVM_FFI=1",
+    "font_size": 11.5,
+    "x": 0.5,
+    "y": 4.18,
+    "w": 9.0,
+    "h": 0.35
+  },
+  {
+    "slide": 31,
+    "text": "Errors + MLIR remarks",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 31,
+    "text": "31",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 31,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 31,
+    "text": "MLIR_DSL_DEBUGINFO=1 \u00b7 MLIR_DSL_REMARKS=.*",
+    "font_size": 11.5,
+    "x": 0.5,
+    "y": 4.72,
+    "w": 9.0,
+    "h": 0.34
+  },
+  {
+    "slide": 31,
+    "text": "Source error + fix",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 5.36,
+    "h": 0.24
+  },
+  {
+    "slide": 31,
+    "text": "@m.jit",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 31,
+    "text": "def expects_int(x: m.Int32):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.386222222222222,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 31,
+    "text": "    return x",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.5924444444444443,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 31,
+    "text": "",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.7986666666666666,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 31,
+    "text": "expects_int(\"oops\")",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.004888888888889,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 31,
+    "text": "# ARG_ANNOTATION_MISMATCH",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.2111111111111112,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 31,
+    "text": "# Expected: Int32",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.4173333333333336,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 31,
+    "text": "# Pass an integer, or change the annotation.",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.623555555555556,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 31,
+    "text": "Errors",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 1.69,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 31,
+    "text": "File \u00b7 line \u00b7 fix",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 2.17,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 31,
+    "text": "Remarks",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 3.11,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 31,
+    "text": "Trace + passes \u2192 records",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 3.59,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 32,
+    "text": "See what the compiler does",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 32,
+    "text": "32",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 32,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 32,
+    "text": "Tool",
+    "font_size": 11.5,
+    "x": 0.63,
+    "y": 1.77,
+    "w": 2.74,
+    "h": 0.29
+  },
+  {
+    "slide": 32,
+    "text": "Setting / output",
+    "font_size": 11.5,
+    "x": 3.67,
+    "y": 1.77,
+    "w": 5.7,
+    "h": 0.29
+  },
+  {
+    "slide": 32,
+    "text": "Source locations",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 2.27,
+    "w": 2.74,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 32,
+    "text": "Python line \u2192 MLIR location",
+    "font_size": 12.0,
+    "x": 3.67,
+    "y": 2.27,
+    "w": 5.7,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 32,
+    "text": "Verify trace",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 2.738,
+    "w": 2.74,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 32,
+    "text": "VERIFY_TRACE",
+    "font_size": 12.0,
+    "x": 3.67,
+    "y": 2.738,
+    "w": 5.7,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 32,
+    "text": "Remarks",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 3.206,
+    "w": 2.74,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 32,
+    "text": "REMARKS \u00b7 REMARKS_OUTPUT",
+    "font_size": 12.0,
+    "x": 3.67,
+    "y": 3.206,
+    "w": 5.7,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 32,
+    "text": "Inspect IR",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 3.674,
+    "w": 2.74,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 32,
+    "text": "PRINT_IR \u00b7 KEEP_IR",
+    "font_size": 12.0,
+    "x": 3.67,
+    "y": 3.674,
+    "w": 5.7,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 32,
+    "text": "Profile",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 4.142,
+    "w": 2.74,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 32,
+    "text": "PROFILE_COMPILER",
+    "font_size": 12.0,
+    "x": 3.67,
+    "y": 4.142,
+    "w": 5.7,
+    "h": 0.26799999999999996
+  },
+  {
+    "slide": 33,
+    "text": "Cache compilation work",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 33,
+    "text": "33",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 33,
+    "text": "mlir dsl core",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 33,
+    "text": "Cache",
+    "font_size": 11.5,
+    "x": 0.63,
+    "y": 1.77,
+    "w": 1.7499999999999998,
+    "h": 0.29
+  },
+  {
+    "slide": 33,
+    "text": "Stores",
+    "font_size": 11.5,
+    "x": 2.6799999999999997,
+    "y": 1.77,
+    "w": 3.1500000000000004,
+    "h": 0.29
+  },
+  {
+    "slide": 33,
+    "text": "Hit",
+    "font_size": 11.5,
+    "x": 6.130000000000001,
+    "y": 1.77,
+    "w": 3.24,
+    "h": 0.29
+  },
+  {
+    "slide": 33,
+    "text": "Memory",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 2.27,
+    "w": 1.7499999999999998,
+    "h": 0.5799999999999998
+  },
+  {
+    "slide": 33,
+    "text": "Callable + engine",
+    "font_size": 12.0,
+    "x": 2.6799999999999997,
+    "y": 2.27,
+    "w": 3.1500000000000004,
+    "h": 0.5799999999999998
+  },
+  {
+    "slide": 33,
+    "text": "Reuse callable",
+    "font_size": 12.0,
+    "x": 6.130000000000001,
+    "y": 2.27,
+    "w": 3.24,
+    "h": 0.5799999999999998
+  },
+  {
+    "slide": 33,
+    "text": "Disk",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 3.05,
+    "w": 1.7499999999999998,
+    "h": 0.5799999999999998
+  },
+  {
+    "slide": 33,
+    "text": "Lowered bytecode",
+    "font_size": 12.0,
+    "x": 2.6799999999999997,
+    "y": 3.05,
+    "w": 3.1500000000000004,
+    "h": 0.5799999999999998
+  },
+  {
+    "slide": 33,
+    "text": "Skip passes",
+    "font_size": 12.0,
+    "x": 6.130000000000001,
+    "y": 3.05,
+    "w": 3.24,
+    "h": 0.5799999999999998
+  },
+  {
+    "slide": 33,
+    "text": "Identity",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 3.83,
+    "w": 1.7499999999999998,
+    "h": 0.5799999999999998
+  },
+  {
+    "slide": 33,
+    "text": "IR + settings + toolchain",
+    "font_size": 12.0,
+    "x": 2.6799999999999997,
+    "y": 3.83,
+    "w": 3.1500000000000004,
+    "h": 0.5799999999999998
+  },
+  {
+    "slide": 33,
+    "text": "Compatible programs",
+    "font_size": 12.0,
+    "x": 6.130000000000001,
+    "y": 3.83,
+    "w": 3.24,
+    "h": 0.5799999999999998
+  },
+  {
+    "slide": 34,
+    "text": "AST capture is a plugin, too",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 34,
+    "text": "34",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 34,
+    "text": "Control flow",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 34,
+    "text": "Syntax capture and IR emission are separate choices.",
+    "font_size": 11.5,
+    "x": 0.5,
+    "y": 4.72,
+    "w": 9.0,
+    "h": 0.34
+  },
+  {
+    "slide": 34,
+    "text": "Python",
+    "font_size": 15.0,
+    "x": 0.66,
+    "y": 2.0,
+    "w": 1.7874999999999999,
+    "h": 0.51
+  },
+  {
+    "slide": 34,
+    "text": "if \u00b7 for \u00b7 while",
+    "font_size": 11.5,
+    "x": 0.66,
+    "y": 2.76,
+    "w": 1.7874999999999999,
+    "h": 0.39
+  },
+  {
+    "slide": 34,
+    "text": "AST plugin",
+    "font_size": 15.0,
+    "x": 2.9574999999999996,
+    "y": 2.0,
+    "w": 1.7874999999999999,
+    "h": 0.51
+  },
+  {
+    "slide": 34,
+    "text": "Rewrite regions",
+    "font_size": 11.5,
+    "x": 2.9574999999999996,
+    "y": 2.76,
+    "w": 1.7874999999999999,
+    "h": 0.39
+  },
+  {
+    "slide": 34,
+    "text": "Executors",
+    "font_size": 15.0,
+    "x": 5.255,
+    "y": 2.0,
+    "w": 1.7874999999999999,
+    "h": 0.51
+  },
+  {
+    "slide": 34,
+    "text": "Meta or staged?",
+    "font_size": 11.5,
+    "x": 5.255,
+    "y": 2.76,
+    "w": 1.7874999999999999,
+    "h": 0.39
+  },
+  {
+    "slide": 34,
+    "text": "Dialect",
+    "font_size": 15.0,
+    "x": 7.5525,
+    "y": 2.0,
+    "w": 1.7874999999999999,
+    "h": 0.51
+  },
+  {
+    "slide": 34,
+    "text": "Build regions",
+    "font_size": 11.5,
+    "x": 7.5525,
+    "y": 2.76,
+    "w": 1.7874999999999999,
+    "h": 0.39
+  },
+  {
+    "slide": 34,
+    "text": "ASTPreprocessorPlugin",
+    "font_size": 11.8,
+    "x": 2.8625,
+    "y": 3.75,
+    "w": 4.2749999999999995,
+    "h": 0.49
+  },
+  {
+    "slide": 34,
+    "text": "DialectPlugin",
+    "font_size": 11.8,
+    "x": 7.4575000000000005,
+    "y": 3.75,
+    "w": 1.9774999999999998,
+    "h": 0.49
+  },
+  {
+    "slide": 34,
+    "text": "scf / your dialect",
+    "font_size": 12.0,
+    "x": 0.58,
+    "y": 4.3,
+    "w": 8.84,
+    "h": 0.29
+  },
+  {
+    "slide": 35,
+    "text": "Assigned name \u2192 iter_arg",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 35,
+    "text": "35",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 35,
+    "text": "Control flow",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 35,
+    "text": "Flatten \u2192 build region \u2192 yield \u2192 rebuild",
+    "font_size": 11.5,
+    "x": 0.5,
+    "y": 4.72,
+    "w": 9.0,
+    "h": 0.34
+  },
+  {
+    "slide": 35,
+    "text": "Python \u00b7 find the carry",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 4.0600000000000005,
+    "h": 0.24
+  },
+  {
+    "slide": 35,
+    "text": "acc = m.Int32(0)",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 35,
+    "text": "for i in range(n):",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.3808888888888884,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 35,
+    "text": "    acc = acc + i",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.581777777777777,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 35,
+    "text": "",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.7826666666666657,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 35,
+    "text": "# Defined outside: acc",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.9835555555555544,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 35,
+    "text": "# Written inside:  acc",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.184444444444443,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 35,
+    "text": "# write_args = [\"acc\"]",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.3853333333333318,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 35,
+    "text": "MLIR \u00b7 thread the SSA value",
+    "font_size": 10.0,
+    "x": 5.27,
+    "y": 1.755,
+    "w": 4.08,
+    "h": 0.24
+  },
+  {
+    "slide": 35,
+    "text": "%sum = scf.for %i = %c0 to %n",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.1799999999999997,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 35,
+    "text": "    step %c1 iter_args(%acc = %zero)",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.3808888888888884,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 35,
+    "text": "    -> (i32) : i32 {",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.581777777777777,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 35,
+    "text": "  %next = arith.addi %acc, %i : i32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.7826666666666657,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 35,
+    "text": "  scf.yield %next : i32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.9835555555555544,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 35,
+    "text": "}",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.184444444444443,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "Records flatten into their fields",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 36,
+    "text": "36",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 36,
+    "text": "Control flow",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 36,
+    "text": "Frozen record \u00b7 no aggregate SSA type",
+    "font_size": 11.5,
+    "x": 0.5,
+    "y": 4.72,
+    "w": 9.0,
+    "h": 0.34
+  },
+  {
+    "slide": 36,
+    "text": "Dialect-neutral record",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 4.0600000000000005,
+    "h": 0.24
+  },
+  {
+    "slide": 36,
+    "text": "@m.struct",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "class Vec2:",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.3808888888888884,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "    x: m.Float32",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.581777777777777,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "    y: m.Float32",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.7826666666666657,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.9835555555555544,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "@m.jit",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.184444444444443,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "def norm2(v: Vec2):",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.3853333333333318,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "    return v.x*v.x + v.y*v.y",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.5862222222222204,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "Two fields \u2192 two SSA arguments",
+    "font_size": 10.0,
+    "x": 5.27,
+    "y": 1.755,
+    "w": 4.08,
+    "h": 0.24
+  },
+  {
+    "slide": 36,
+    "text": "func.func @norm2(",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.1799999999999997,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "    %x: f32, %y: f32) -> f32 {",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.3808888888888884,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "  %a = arith.mulf %x, %x : f32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.581777777777777,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "  %b = arith.mulf %y, %y : f32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.7826666666666657,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "  %r = arith.addf %a, %b : f32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.9835555555555544,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "  func.return %r : f32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.184444444444443,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "}",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.3853333333333318,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.5862222222222204,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 36,
+    "text": "// norm2(Vec2(x=3, y=4)) \u2192 25",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.787111111111109,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 37,
+    "text": "Swap the region callbacks",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 37,
+    "text": "37",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 37,
+    "text": "Control flow",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 37,
+    "text": "AST plugin \u00b7 downstream sketch",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 5.36,
+    "h": 0.24
+  },
+  {
+    "slide": 37,
+    "text": "class MyAST(ASTPreprocessorPlugin):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 37,
+    "text": "    preprocessor_class = DSLPreprocessor",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.386222222222222,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 37,
+    "text": "",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.5924444444444443,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 37,
+    "text": "    def executors(self, dsl):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.7986666666666666,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 37,
+    "text": "        return mydialect_executors",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.004888888888889,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 37,
+    "text": "",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.2111111111111112,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 37,
+    "text": "class MyDSL(BaseDSL):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.4173333333333336,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 37,
+    "text": "    plugins = [MyAST(), MyDialect()]",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.623555555555556,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 37,
+    "text": "AST plugin",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 1.69,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 37,
+    "text": "Rewrite + callback map",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 2.17,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 37,
+    "text": "Dialect plugin",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 3.11,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 37,
+    "text": "Types \u00b7 regions \u00b7 lowering",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 3.59,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 38,
+    "text": "Or build regions explicitly",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 38,
+    "text": "38",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 38,
+    "text": "Control flow",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 38,
+    "text": "Explicit control flow",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 5.36,
+    "h": 0.24
+  },
+  {
+    "slide": 38,
+    "text": "@m.jit(preprocess=False)",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 38,
+    "text": "def sum_upto(n: m.Int32):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.386222222222222,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 38,
+    "text": "    acc = m.Int32(0)",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.5924444444444443,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 38,
+    "text": "    for i, current, result in m.for_(",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.7986666666666666,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 38,
+    "text": "            0, n, 1, [acc]):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.004888888888889,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 38,
+    "text": "        m.yield_([current + i])",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.2111111111111112,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 38,
+    "text": "    return result",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.4173333333333336,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 38,
+    "text": "Builders",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 1.69,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 38,
+    "text": "for_ \u00b7 if_ \u00b7 while_ \u00b7 yield_",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 2.17,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 38,
+    "text": "Boolean helpers",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 3.11,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 38,
+    "text": "and_ \u00b7 or_ \u00b7 not_\nany_ \u00b7 all_",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 3.59,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 39,
+    "text": "Python \u2192 MLIR \u2192 45",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 39,
+    "text": "39",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 39,
+    "text": "Worked examples",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 39,
+    "text": "Python \u00b7 executed",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 4.0600000000000005,
+    "h": 0.24
+  },
+  {
+    "slide": 39,
+    "text": "@m.jit",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 39,
+    "text": "def sum_upto(n: m.Int32):",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.3808888888888884,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 39,
+    "text": "    acc = m.Int32(0)",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.581777777777777,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 39,
+    "text": "    for i in range(n):",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.7826666666666657,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 39,
+    "text": "        acc += i",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.9835555555555544,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 39,
+    "text": "    return acc",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.184444444444443,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 39,
+    "text": "",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.3853333333333318,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 39,
+    "text": "sum_upto(10)  # 45",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.5862222222222204,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 39,
+    "text": "MLIR \u00b7 loop excerpt",
+    "font_size": 10.0,
+    "x": 5.27,
+    "y": 1.755,
+    "w": 4.08,
+    "h": 0.24
+  },
+  {
+    "slide": 39,
+    "text": "%sum = scf.for %i = %c0 to %n",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.1799999999999997,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 39,
+    "text": "    step %c1 iter_args(%a = %zero)",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.3808888888888884,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 39,
+    "text": "    -> (i32) : i32 {",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.581777777777777,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 39,
+    "text": "  %next = arith.addi %a, %i : i32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.7826666666666657,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 39,
+    "text": "  scf.yield %next : i32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.9835555555555544,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 39,
+    "text": "}",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.184444444444443,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 39,
+    "text": "func.return %sum : i32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.3853333333333318,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "Fuse a Python recipe",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 40,
+    "text": "40",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 40,
+    "text": "Worked examples",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 40,
+    "text": "Staged array loop \u00b7 Meta recipe loop",
+    "font_size": 11.5,
+    "x": 0.5,
+    "y": 4.72,
+    "w": 9.0,
+    "h": 0.34
+  },
+  {
+    "slide": 40,
+    "text": "Python \u00b7 executed",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 4.0600000000000005,
+    "h": 0.24
+  },
+  {
+    "slide": 40,
+    "text": "@m.jit",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "def fused(arr: m.Pointer[m.Float32],",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.3808888888888884,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "          ops):",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.581777777777777,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "    for i in m.range(4):",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.7826666666666657,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "        x = arr[i]",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.9835555555555544,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "        for op in ops.values():",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.184444444444443,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "            x = op.apply(x)",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.3853333333333318,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "        arr[i] = x",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.5862222222222204,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.787111111111109,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "# [0, 1, 2, 3] -> [6, 9, 12, 15]",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.9879999999999978,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "MLIR \u00b7 loop body",
+    "font_size": 10.0,
+    "x": 5.27,
+    "y": 1.755,
+    "w": 4.08,
+    "h": 0.24
+  },
+  {
+    "slide": 40,
+    "text": "%p = llvm.getelementptr %arr[%i]",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.1799999999999997,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "    : (!llvm.ptr, i32) -> !llvm.ptr, f32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.3808888888888884,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "%x = llvm.load %p : !llvm.ptr -> f32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.581777777777777,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "%a = arith.addf %x, %two : f32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.7826666666666657,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "%r = arith.mulf %a, %three : f32",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.9835555555555544,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "llvm.store %r, %p : f32, !llvm.ptr",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.184444444444443,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 40,
+    "text": "scf.yield",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.3853333333333318,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 41,
+    "text": "41",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 41,
+    "text": "NEXT \u00b7 AMIR TAVAKKOLI",
+    "font_size": 12.0,
+    "x": 0.52,
+    "y": 0.72,
+    "w": 8.95,
+    "h": 0.35
+  },
+  {
+    "slide": 41,
+    "text": "Richer mutation",
+    "font_size": 28.0,
+    "x": 0.49,
+    "y": 1.78,
+    "w": 9,
+    "h": 1.35
+  },
+  {
+    "slide": 41,
+    "text": "Objects \u00b7 aliasing \u00b7 staged control flow",
+    "font_size": 17.0,
+    "x": 0.52,
+    "y": 3.41,
+    "w": 8.96,
+    "h": 0.88
+  },
+  {
+    "slide": 41,
+    "text": "Guray Ozen",
+    "font_size": 12.0,
+    "x": 1.15,
+    "y": 4.47,
+    "w": 8,
+    "h": 0.4
+  },
+  {
+    "slide": 42,
+    "text": "42",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 42,
+    "text": "AMIR TAVAKKOLI",
+    "font_size": 12.0,
+    "x": 0.52,
+    "y": 0.72,
+    "w": 8.95,
+    "h": 0.35
+  },
+  {
+    "slide": 42,
+    "text": "Advanced mutation tracking",
+    "font_size": 28.0,
+    "x": 0.49,
+    "y": 1.78,
+    "w": 9,
+    "h": 1.35
+  },
+  {
+    "slide": 42,
+    "text": "PyIR \u00b7 Amir Tavakkoli",
+    "font_size": 17.0,
+    "x": 0.52,
+    "y": 3.41,
+    "w": 8.96,
+    "h": 0.88
+  },
+  {
+    "slide": 42,
+    "text": "Amir Tavakkoli",
+    "font_size": 12.0,
+    "x": 1.15,
+    "y": 4.47,
+    "w": 8,
+    "h": 0.4
+  },
+  {
+    "slide": 43,
+    "text": "Tile IR: compose a target",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 43,
+    "text": "43",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 43,
+    "text": "Tile IR sub-DSL",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 43,
+    "text": "Port to the new core \u00b7 design sketch",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 5.36,
+    "h": 0.24
+  },
+  {
+    "slide": 43,
+    "text": "class TileDSL(BaseDSL):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 43,
+    "text": "    plugins = [",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.386222222222222,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 43,
+    "text": "        TileDialect(),",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.5924444444444443,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 43,
+    "text": "        TileAST(),",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.7986666666666666,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 43,
+    "text": "    ]",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.004888888888889,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 43,
+    "text": "",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.2111111111111112,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 43,
+    "text": "# Package exports:",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.4173333333333336,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 43,
+    "text": "jit = TileDSL.jit",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.623555555555556,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 43,
+    "text": "kernel = TileDSL.kernel",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.829777777777778,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 43,
+    "text": "Reuse",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 1.69,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 43,
+    "text": "Types \u00b7 staging \u00b7 cache \u00b7 env",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 2.17,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 43,
+    "text": "Supply",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 3.11,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 43,
+    "text": "Emitter \u00b7 AST \u00b7 compiler",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 3.59,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 44,
+    "text": "Tile IR: one emitter for its values",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 44,
+    "text": "44",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 44,
+    "text": "Tile IR sub-DSL",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 44,
+    "text": "Direct types stay the same; the emitted IR changes.",
+    "font_size": 11.5,
+    "x": 0.5,
+    "y": 4.72,
+    "w": 9.0,
+    "h": 0.34
+  },
+  {
+    "slide": 44,
+    "text": "Core value",
+    "font_size": 11.5,
+    "x": 0.63,
+    "y": 1.77,
+    "w": 1.7499999999999998,
+    "h": 0.29
+  },
+  {
+    "slide": 44,
+    "text": "Tile representation",
+    "font_size": 11.5,
+    "x": 2.6799999999999997,
+    "y": 1.77,
+    "w": 3.1500000000000004,
+    "h": 0.29
+  },
+  {
+    "slide": 44,
+    "text": "Emitter hooks",
+    "font_size": 11.5,
+    "x": 6.130000000000001,
+    "y": 1.77,
+    "w": 3.24,
+    "h": 0.29
+  },
+  {
+    "slide": 44,
+    "text": "Int32",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 2.27,
+    "w": 1.7499999999999998,
+    "h": 0.38499999999999995
+  },
+  {
+    "slide": 44,
+    "text": "Rank-0 tile",
+    "font_size": 12.0,
+    "x": 2.6799999999999997,
+    "y": 2.27,
+    "w": 3.1500000000000004,
+    "h": 0.38499999999999995
+  },
+  {
+    "slide": 44,
+    "text": "mlir_type \u00b7 add \u00b7 cast",
+    "font_size": 12.0,
+    "x": 6.130000000000001,
+    "y": 2.27,
+    "w": 3.24,
+    "h": 0.38499999999999995
+  },
+  {
+    "slide": 44,
+    "text": "Vector",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 2.855,
+    "w": 1.7499999999999998,
+    "h": 0.38499999999999995
+  },
+  {
+    "slide": 44,
+    "text": "Rank-1 tile",
+    "font_size": 12.0,
+    "x": 2.6799999999999997,
+    "y": 2.855,
+    "w": 3.1500000000000004,
+    "h": 0.38499999999999995
+  },
+  {
+    "slide": 44,
+    "text": "vector_type \u00b7 reduce",
+    "font_size": 12.0,
+    "x": 6.130000000000001,
+    "y": 2.855,
+    "w": 3.24,
+    "h": 0.38499999999999995
+  },
+  {
+    "slide": 44,
+    "text": "Pointer",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 3.44,
+    "w": 1.7499999999999998,
+    "h": 0.38499999999999995
+  },
+  {
+    "slide": 44,
+    "text": "Tile of pointers",
+    "font_size": 12.0,
+    "x": 2.6799999999999997,
+    "y": 3.44,
+    "w": 3.1500000000000004,
+    "h": 0.38499999999999995
+  },
+  {
+    "slide": 44,
+    "text": "pointer_type \u00b7 load \u00b7 store",
+    "font_size": 12.0,
+    "x": 6.130000000000001,
+    "y": 3.44,
+    "w": 3.24,
+    "h": 0.38499999999999995
+  },
+  {
+    "slide": 44,
+    "text": "Struct",
+    "font_size": 12.0,
+    "x": 0.63,
+    "y": 4.025,
+    "w": 1.7499999999999998,
+    "h": 0.38499999999999995
+  },
+  {
+    "slide": 44,
+    "text": "Flattened fields",
+    "font_size": 12.0,
+    "x": 2.6799999999999997,
+    "y": 4.025,
+    "w": 3.1500000000000004,
+    "h": 0.38499999999999995
+  },
+  {
+    "slide": 44,
+    "text": "No aggregate hook",
+    "font_size": 12.0,
+    "x": 6.130000000000001,
+    "y": 4.025,
+    "w": 3.24,
+    "h": 0.38499999999999995
+  },
+  {
+    "slide": 45,
+    "text": "Tile IR: a typed Python kernel",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 45,
+    "text": "45",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 45,
+    "text": "Tile IR sub-DSL",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 45,
+    "text": "mlir dsl interface \u00b7 target sketch",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 4.0600000000000005,
+    "h": 0.24
+  },
+  {
+    "slide": 45,
+    "text": "import mytile as tile",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 45,
+    "text": "",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.3808888888888884,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 45,
+    "text": "@tile.kernel",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.581777777777777,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 45,
+    "text": "def sum_upto(n: tile.Int32):",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.7826666666666657,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 45,
+    "text": "    acc = tile.constant(0)",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 2.9835555555555544,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 45,
+    "text": "    for i in range(n):",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.184444444444443,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 45,
+    "text": "        acc += i",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.3853333333333318,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 45,
+    "text": "    tile.print_tko(\"sum=%i\\n\", [acc])",
+    "font_size": 11.3,
+    "x": 0.65,
+    "y": 3.5862222222222204,
+    "w": 4.0600000000000005,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 45,
+    "text": "Tile IR \u00b7 loop body",
+    "font_size": 10.0,
+    "x": 5.27,
+    "y": 1.755,
+    "w": 4.08,
+    "h": 0.24
+  },
+  {
+    "slide": 45,
+    "text": "%sum = for %i in (%zero to %n,",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.1799999999999997,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 45,
+    "text": "    step %one) : tile<i32>",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.3808888888888884,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 45,
+    "text": "    iter_values(%acc = %zero)",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.581777777777777,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 45,
+    "text": "    -> (tile<i32>) {",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.7826666666666657,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 45,
+    "text": "  %next = addi %acc, %i : tile<i32>",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 2.9835555555555544,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 45,
+    "text": "  continue %next : tile<i32>",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.184444444444443,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 45,
+    "text": "}",
+    "font_size": 11.3,
+    "x": 5.27,
+    "y": 3.3853333333333318,
+    "w": 4.08,
+    "h": 0.20402777777777778
+  },
+  {
+    "slide": 46,
+    "text": "Tile IR: entries + compiler are plugins",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 46,
+    "text": "46",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 46,
+    "text": "Tile IR sub-DSL",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 46,
+    "text": "Dialect plugin \u00b7 port sketch",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 5.36,
+    "h": 0.24
+  },
+  {
+    "slide": 46,
+    "text": "class TileDialect(DialectPlugin):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 46,
+    "text": "    emitter = TileEmitter()",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.386222222222222,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 46,
+    "text": "    host_gen_helper = TileHostEntry",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.5924444444444443,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 46,
+    "text": "    kernel_gen_helper = TileKernelEntry",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.7986666666666666,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 46,
+    "text": "    compiler_provider = tile_compiler",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.004888888888889,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 46,
+    "text": "",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.2111111111111112,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 46,
+    "text": "    def pipeline_passes(self):",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.4173333333333336,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 46,
+    "text": "        return tile_lowering_passes",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.623555555555556,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 46,
+    "text": "Entry helpers",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 1.69,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 46,
+    "text": "Arguments \u00b7 return \u00b7 launch",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 2.17,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 46,
+    "text": "Compiler",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 3.11,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 46,
+    "text": "Tile bytecode \u2192 GPU binary",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 3.59,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 47,
+    "text": "Tile IR: target-owned launch",
+    "font_size": 21.0,
+    "x": 0.48,
+    "y": 0.43,
+    "w": 9.04,
+    "h": 0.51
+  },
+  {
+    "slide": 47,
+    "text": "47",
+    "font_size": 8.5,
+    "x": 8.8,
+    "y": 5.14,
+    "w": 0.7,
+    "h": 0.22
+  },
+  {
+    "slide": 47,
+    "text": "Tile IR sub-DSL",
+    "font_size": 8.0,
+    "x": 5.5,
+    "y": 5.16,
+    "w": 3.1,
+    "h": 0.2
+  },
+  {
+    "slide": 47,
+    "text": "Choose plugins. Reuse the language core.",
+    "font_size": 11.5,
+    "x": 0.5,
+    "y": 4.72,
+    "w": 9.0,
+    "h": 0.34
+  },
+  {
+    "slide": 47,
+    "text": "CUDA Python launch \u00b7 backend excerpt",
+    "font_size": 10.0,
+    "x": 0.65,
+    "y": 1.755,
+    "w": 5.36,
+    "h": 0.24
+  },
+  {
+    "slide": 47,
+    "text": "module = cuda_helpers.load_cubin_module(cubin)",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.1799999999999997,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 47,
+    "text": "kernel = cuda_helpers.get_kernel_function(",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.386222222222222,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 47,
+    "text": "    module, name)",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.5924444444444443,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 47,
+    "text": "cuda_helpers.launch_kernel(",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 2.7986666666666666,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 47,
+    "text": "    kernel, num_tiles, (1, 1, 1), stream,",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.004888888888889,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 47,
+    "text": "    smem_size=0, kernel_args=packed_args)",
+    "font_size": 11.6,
+    "x": 0.65,
+    "y": 3.2111111111111112,
+    "w": 5.36,
+    "h": 0.20944444444444443
+  },
+  {
+    "slide": 47,
+    "text": "Desired Python call",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 1.69,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 47,
+    "text": "sum_upto(10,\n    num_tiles=[1, 1, 1])",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 2.17,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  },
+  {
+    "slide": 47,
+    "text": "Target provider",
+    "font_size": 14.0,
+    "x": 6.47,
+    "y": 3.11,
+    "w": 3.03,
+    "h": 0.44
+  },
+  {
+    "slide": 47,
+    "text": "Compile \u00b7 pack \u00b7 launch",
+    "font_size": 12.0,
+    "x": 6.47,
+    "y": 3.59,
+    "w": 3.03,
+    "h": 0.8899999999999999
+  }
+]

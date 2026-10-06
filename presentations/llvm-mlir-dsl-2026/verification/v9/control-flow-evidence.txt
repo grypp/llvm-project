@@ -1,0 +1,174 @@
+Control-flow and compiler diversity evidence — 2026-10-06
+
+Scope
+-----
+Read-only local source audit plus browsing official NVIDIA and MLIR docs.
+No implementation, slide, test or index changes. No GPU or new IR execution.
+The purpose is to distinguish IR capabilities from this tutorial frontend's
+current capture policy. Public documentation can evolve; the version
+difference below is material.
+
+Recommended slide claim
+-----------------------
+Different IRs expose different loop terminators. That changes frontend
+capture and region construction as well as the final compiler pipeline.
+Do NOT say that the whole SCF dialect cannot represent early termination.
+The comparison should specifically name scf.for versus cuda_tile.loop.
+
+Official NVIDIA evidence
+------------------------
+Current operations reference, retrieved 2026-10-06:
+https://docs.nvidia.com/cuda/tile-ir/latest/sections/operations.html
+Sections 9.5.2 break, 9.5.3 continue, 9.5.4 for, 9.5.6 loop, 9.5.7 return.
+
+Short quote (4 words): "innermost enclosing loop operation".
+
+Summary: cuda_tile.loop exits through break; a break in a nested if can
+transfer directly out of that loop. continue targets the nearest enclosing
+loop, including for/loop, rather than yielding only from the nested if.
+This is not a labelled escape to an arbitrary outer loop. cuda_tile.for is
+range-based, must finish each path with continue, and cannot terminate early.
+The current latest loop also permits return from the enclosing function;
+return is still excluded from for. Entry kernels have no return operands.
+Do not show break terminating cuda_tile.for.
+
+Pinned 13.1 operations reference:
+https://docs.nvidia.com/cuda/tile-ir/13.1/sections/operations.html
+Sections 8.5.2 break, 8.5.6 loop, 8.5.7 return.
+
+Short quote (9 words): "Early returns from inside loops are not supported".
+
+The pinned release supports loop+break and nested-if break, but requires
+leaving the loop before returning from the function. Therefore keep the
+tutorial's comparison on break rather than general early return unless the
+target version is explicitly specified. The earlier v8 Tile examples used
+13.1 references; do not silently import newer return semantics into them.
+
+Official MLIR evidence
+---------------------
+https://mlir.llvm.org/docs/Dialects/SCFDialect/
+Sections scf.for, scf.if, scf.yield, scf.while, scf.condition, scf.execute_region.
+
+Short quote (8 words): "exactly one block that terminates with scf.yield".
+
+Summary: scf.for has a fixed range and a single-block body with scf.yield.
+scf.if regions likewise yield to their parent operation. There is no direct
+SCF break terminator jumping from that nested if out of scf.for. However,
+scf.while makes continuation data-dependent through scf.condition; false
+ends the loop. Frontends can transform a source break into this form.
+scf.execute_region also admits a multi-block CFG inside a region and returns
+results through its exits. It does not itself mean an arbitrary nonlocal
+escape from an enclosing for. SCF supports nested control flow, so do not
+repeat the NVIDIA prose as if nesting were unique to Tile IR.
+
+Corroborating checked-out MLIR definitions:
+/home/gozen/work/llvm-project/mlir/include/mlir/Dialect/SCF/IR/SCFOps.td
+  89–94: execute_region permits multiple blocks and terminators.
+  196: for body requires a single block ending in yield.
+  1036–1046: while before-region condition, result/after forwarding,
+             after-region yield back to before.
+These are local source facts, not newly executed verifier tests.
+
+Current frontend implementation is a separate question
+------------------------------------------------------
+Root: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/
+plugins/ast_preprocessor/preprocessor.py:
+  978–1028: identify exits owned by the current region. Nested functions
+            are excluded; nested loops own their own break/continue.
+  1030–1049: check_early_exit raises UNSUP_EARLY_EXIT.
+  1051–1065: an if/while owning an exit can remain native Python; Meta
+             predicates execute normally, staged predicates are rejected.
+  1950–1965: transform_for_loop rejects early exits on its staged path.
+plugins/ast_preprocessor/helpers.py:
+  467–497: early_exit_predicate accepts Meta bools and diagnoses staged ones.
+plugins/dialects/scf/executors.py:
+  410: range executor builds SCF for.
+  561: while executor builds SCF while.
+
+Thus a diagram about dialect capabilities is not evidence that the current
+reference Python frontend accepts arbitrary staged Python break/return.
+Meta Python exits remain valid. Supporting richer staged exits may require
+a custom AST preprocessor, not only substituting its region callbacks:
+the shared rewrite can reject an exit before the emitter is reached.
+ASTPreprocessorPlugin.preprocessor_class is the seam for that choice;
+executors(dsl) supplies the associated callbacks. See core/plugin.py:131
+and core/dsl.py:655–688. DialectPlugin selects matching operations,
+providers and lowering, not a universal Python control-flow policy.
+
+Existing DkgDSL CUDA Tile frontend snapshot
+-----------------------------------------
+/home/gozen/work/dkg4/DkgDSL/cuda_tile_dsl/cuda_tile_ast_decorators.py:
+  16–57: native dynamic-range callback builds for_loop with loop_continue.
+  60–68: dynamic if callback raises NotImplementedError.
+  71–78: dynamic while callback raises NotImplementedError.
+/home/gozen/work/dkg4/DkgDSL/base_dsl/ast_preprocessor.py:
+  1197–1258: early-exit ownership analysis.
+  1260–1280: unsupported-exit diagnostic.
+  2277: staged for invokes early-exit check.
+  2950: staged while invokes early-exit check on its applicable path.
+
+Consequently the existing DKG backend is not evidence that its native Python
+frontend already implements the public Tile IR loop/break semantics.
+Treat the closing Tile adapter as a port design, not a completed capability.
+
+Compiler diversity: source-backed pipeline choices
+-------------------------------------------------
+The reference compiler parses an MLIR pass pipeline and constructs an
+ExecutionEngine:
+/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/compiler/compiler.py
+  114: PassManager.parse.
+  172–198: jit creates ExecutionEngine.
+/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/llvm/plugin.py
+  29–34: emitter, host helper and compiler provider.
+  36–43: vector/arith/math/func lowering.
+
+Existing DKG CUDA Tile backend:
+/home/gozen/work/dkg4/DkgDSL/cuda_tile_dsl/_backends.py
+  45–64: serialize with writeBytecode.
+  111–144: offline binary path invoking _tileiras_compile_cubin.
+  263: alternative load_library_from_file bytecode path.
+
+Official overview corroborates the backend alternatives:
+https://docs.nvidia.com/cuda/tile-ir/latest/sections/introduction.html
+Section 1.2 lists a portable bytecode, a compiler exposed both through the
+CUDA driver and a standalone toolkit tool, and an MLIR dialect frontend.
+The literal tileiras helper name and cubin path above are established by
+the local backend implementation, not invented from that overview.
+
+Compact diagram vocabulary (every individual label <=15 characters)
+-------------------------------------------------------------------
+Compiler rows:
+  Python -> arith + scf -> LLVM -> CPU code
+  Python -> cuda_tile -> Tile bytecode -> tileiras -> cubin
+Optional alternate compiler branch: CUDA driver
+
+Control-flow panel headings: SCF / CUDA Tile
+SCF nodes: scf.for / scf.if / scf.yield / No break op
+Tile nodes: cuda_tile.loop / cuda_tile.if / break / continue
+SCF caveat nodes: scf.while / scf.condition / Exit on false
+
+Plugin answer nodes:
+  AST plugin / Capture policy
+  Dialect plugin / Types + regions
+  Compiler / Lower + compile
+  Shared core / JIT + cache
+
+Suggested layout, not extra prose: two nested-region diagrams. SCF's inner
+yield returns to its containing operation. Tile's inner break arrow leaves
+the surrounding loop. Put the SCF while/condition caveat below the SCF panel
+so the comparison remains precise. Show these as IR capabilities; presenter
+notes state the current AST restrictions separately.
+
+Avoid on slides
+---------------
+- Blanket claims that SCF lacks early termination or nested control flow.
+- break attached to cuda_tile.for.
+- Unversioned claims about all Tile loop returns.
+- Claiming the DKG native frontend already captures every legal Tile exit.
+- Claiming one executor override bypasses all existing AST restrictions.
+
+Verification performed
+----------------------
+Browsed the four official URLs above. Read the exact local files/lines
+listed with rg/cat/sed. No third-party article was used. No tests, GPU runs,
+network publishing or implementation changes were performed.

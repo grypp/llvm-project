@@ -1,0 +1,14 @@
+{
+  "DkgDSL": {
+    "root": "/home/gozen/work/dkg4",
+    "head": "dc1e2fa48f1aba7ca0bd0638bfdf58c738ee70fc",
+    "source_date": "2026-10-05",
+    "note": "Read current working tree; source commit alone does not include uncommitted extraction changes."
+  },
+  "mlir_dsl_working_tree": {
+    "root": "/home/gozen/work/llvm-project",
+    "head": "4ce5233989602bd84e07aa26a89f5491e6515340",
+    "source_date": "2026-10-05",
+    "note": "Read current working tree; source commit alone does not include uncommitted extraction changes."
+  }
+}

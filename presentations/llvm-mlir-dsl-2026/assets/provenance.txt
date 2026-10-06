@@ -1,0 +1,38 @@
+MLIR DSL tutorial presentation assets
+=====================================
+
+Template
+--------
+template.pptx is a one-slide extraction of llvm-mlir-dsl-tutorial-v3.pptx.
+Only the editable Logo Eye and Logo Text shapes remain on its slide. The
+original slide master, layouts, themes, and all five embedded font parts
+are retained. The source tutorial used the user-supplied presentation
+cutlass-python-pytorch-v22.pptx (PyTorch Conference 2026) as its template.
+No unrelated source-presentation slides are included in this template.
+Canvas: 10 x 5.625 inches. Template and logos retain their original rights.
+
+Fonts
+-----
+NVIDIASans_Rg.ttf, NVIDIASans_Bd.ttf, and NVIDIASans_Lt.ttf are unchanged
+copies of the existing NVIDIA Sans installation used to build the tutorial.
+The files retain their original font metadata and rights; bundling them
+here does not relicense them under the LLVM source-code license. The
+embedded NVIDIA font parts retain editable embedding permissions (fsType=8).
+No separate NVIDIA font license file was present with that installation.
+
+JetBrainsMono-Regular.ttf and JetBrainsMono-Bold.ttf are unchanged copies
+of the reference presentation's JetBrains Mono 2.304 assets. Their license
+is fonts/JetBrainsMono-OFL.txt (SIL Open Font License 1.1).
+Upstream: https://github.com/JetBrains/JetBrainsMono/releases/tag/v2.304
+The embedded JetBrains Mono font parts retain their original installable
+embedding permissions (fsType=0).
+
+SHA-256 of bundled assets
+-------------------------
+5590990c82e097397517f275f430af4546e1c45cff408bde4255dad142479dcb  fonts/JetBrainsMono-Bold.ttf
+30f0c136e3c88e422d0791acd97238870f9054a9729bc34cf2ff0d4ed8cac4ad  fonts/JetBrainsMono-OFL.txt
+a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f  fonts/JetBrainsMono-Regular.ttf
+aa73cde03bcedf69ec9a9e4f1fbabd75abcc00f94f01a8e6f3d74334c66b5358  fonts/NVIDIASans_Bd.ttf
+4ee22a0ec7297c2362f66226cb907b34191253f4d0ffcfcfd526c9bc3170480f  fonts/NVIDIASans_Lt.ttf
+c2e260ec3962c9d486e01c9c2e59b736fa3b78efb6e6db5764ddfa3c4e15464e  fonts/NVIDIASans_Rg.ttf
+48e9cdc84f5907ebeec0e825cae978f554eb0043594a967fba7485e08a8462e7  template.pptx

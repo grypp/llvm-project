@@ -1,0 +1,8 @@
+loaded mlir.dsl.mlir_dsl: False
+loaded mlir.dsl.dialect_plugins: False
+loaded mlir.dsl.dialect_plugins.gpu: False
+loaded mlir.dialects.gpu: False
+loaded mlir.dialects.nvvm: False
+RESULT: 7
+pipeline: builtin.module(convert-scf-to-cf,convert-cf-to-llvm,convert-vector-to-llvm,convert-arith-to-llvm,convert-math-to-llvm,reconcile-unrealized-casts)
+gpu bindings loaded: False

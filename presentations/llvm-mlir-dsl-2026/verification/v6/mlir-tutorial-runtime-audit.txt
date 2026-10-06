@@ -1,0 +1,239 @@
+Read-only runtime / control-flow audit for tutorial v6
+Date: 2026-10-05
+Source root: /home/gozen/work/llvm-project
+No production sources changed. Temporary executable examples and logs live under /tmp.
+
+MOST IMPORTANT CORRECTIONS
+1. m.compile exists now. Syntax is m.compile(func, *representative_args, **kwargs), not m.compile[flags](func). This is compile-before-execute into a callable in the current process, not a standalone AOT distribution API.
+2. Both in-memory and on-disk caches are implemented now. Disk caches lowered MLIR bytecode, not native machine code. Every ordinary @jit call still retraces before consulting caches.
+3. Active m.Array does NOT exist; confirmed by importing the build. NumPy/PyTorch adapters produce Pointer, not DLPack views. Generic DLPack/Array is an adapter design to illustrate, not a shipped API to claim.
+4. Plain Python classes are fully usable as Meta objects (verified AddN/MulN). The frozen-dataclass restriction applies to staged state that must cross a control-flow region or runtime boundary.
+5. Control-flow executor hooks are replaceable. Careful: MlirDSL.__init__ installs SCF hooks after plugin installation. Use a BaseDSL subclass with a plugin, or install replacements after super().__init__ in your subclass.
+
+DLPACK / ARRAYS / ABI
+- Active public API imports Pointer, TypedPointer, Struct, etc., but no Array: mlir/python/mlir/dsl/__init__.py:60-71 and __all__ at 106+.
+- Pointer wraps one !llvm.ptr with Python element-dtype metadata; x[i] -> llvm.getelementptr + llvm.load and x[i] = v -> llvm.store. typing.py:2407-2430.
+- NumPy: C-contiguous np.ndarray -> Pointer(arg.ctypes.data, dtype=..., kind='host', keepalive=arg). No shape/stride crosses the boundary. runtime/jit_arg_adapters.py:533-546.
+- PyTorch: lazy qualified-name adapter torch.Tensor; requires contiguous; reads data_ptr(), dtype, device.type, is_contiguous(). No data copying. runtime/jit_arg_adapters.py:553-569. No generic JAX adapter in this file.
+- Working test: mlir/test/python/dsl/axpy_pointer.py:12-42. Signatures explicitly carry n; arrays become !llvm.ptr operands.
+- Legacy prototype has memref-backed Array/DLPack under mlir/tools/mlir-dsl/python/mlir/dsl/array.py and runtime.py. Do not blend it with active mlir/python/mlir/dsl APIs.
+- Generic adapter design: framework.__dlpack__ -> DLTensor metadata -> Array(ptr, shape, strides, dtype, device), represented using LLVM pointer + integer fields. Ownership/stream are part of the adapter contract. This is a schematic extension, not m.Array today.
+- TVM-FFI builder contains tensor/DLPack support machinery; current installed export plugin maps Pointer to spec.DataPointer and sends raw addresses via existing adapters (dialect_plugins/tvm_ffi.py:17-26). Do NOT claim generic DLPack/JAX is automatically accepted by current exported functions merely because TVM-FFI can handle tensors.
+
+SLIDE: Compile first; execute later
+```python
+import mlir.dsl as m
+
+@m.jit
+def twice(n: m.Int32) -> m.Int32:
+    return n * 2
+
+compiled = m.compile(twice, 21)
+compiled(7)                       # 14
+```
+- Real implementation: mlir_dsl/mlir_dsl.py:200-210 calls func(*args, compile_only=True, **kwargs).
+- Reserved compile keywords: pipeline, gpu_module_attrs, no_cache, extra_link_libs, compile_only; core/dsl.py:2332-2357. E.g. m.compile(f, sample, pipeline='builtin.module(...)'). There is no compile[] subscription interface.
+- compile_only disables caches (dsl.py:2355-2357); returns JitCompiledFunction, bypasses execution (dsl.py:2111-2113).
+- When original function has Meta arguments, current compiled callable still expects its original Python signature: compiled_affine(9, 3, 4), not compiled_affine(9). Prefer all-runtime twice example for the slide.
+- No high-level standalone object export API was found in JitCompiledFunction. Do not equate this API with packaging a binary for another process.
+
+SLIDE: Errors belong to the Python source
+Use actual diagnostic from mlir/test/python/dsl/diagnostics.py:17-35:
+```python
+@m.jit
+def sum_upto(n: m.Int32) -> m.Int32:
+    acc = 0
+    for i in range(n):
+        acc += i
+    return acc
+```
+error[PHASE_MUTATE_PYTHON]: `acc` is a Python value
+suggestion: Create `acc` as a runtime value: `acc = Int32(0)`.
+Diagnostic rendering includes filename, line, code frame, categories, remediation.
+- _mlir_helpers/op.py:5-11: @dsl_user_op attaches NameLoc(FileLineColLoc), optional immediate verification.
+- core/env_manager.py:395-401: DEBUGINFO and VERIFY_TRACE.
+- Keep error diagnostics distinct from optimization remarks. Both are source-oriented, but remarks are a separate structured MLIR engine, not how all frontend errors originate.
+
+SLIDE: One stream of compiler remarks
+```sh
+MLIR_DSL_REMARKS='.*' python example.py
+MLIR_DSL_REMARKS='.*' \
+  MLIR_DSL_REMARKS_OUTPUT=remarks.yaml python example.py
+```
+- compiler/compiler.py:132-140 and 164-205: _RemarkSession owns Context.enable_remarks across trace + passes; callback collection + human rendering without output path, YAML/bitstream streaming with path.
+- core/dsl.py:2018-2026: same session spans tracing and compilation, dsl.collected_remarks exposed.
+- Executed mlir/test/python/dsl/remarks.py; FileCheck passed. Actual output:
+  remark[analysis]: TraceDecision | Category:mlir.dsl | Function=twice | Remark="n is staged", RemarkId=1, staged=n
+  RESULT: 42
+  COLLECTED: [('analysis', 'TraceDecision', 'mlir.dsl', 'twice', 'n is staged', 'n')]
+- Source has graceful warning if Context.enable_remarks unavailable; here built bindings support it.
+
+SLIDE: Two cache levels
+In memory: hash -> compiled function + ExecutionEngine.
+On disk: hash -> lowered MLIR bytecode (+ CRC32); next process skips passes, builds its engine.
+Still traces to compute key before both lookups.
+```sh
+MLIR_DSL_CACHE_DIR=/tmp/my-cache python example.py
+MLIR_DSL_DISABLE_FILE_CACHING=1 python example.py
+MLIR_DSL_NO_CACHE=1 python example.py
+```
+- Memory lookup AFTER generate_original_ir: core/dsl.py:2052-2099.
+- Disk read/miss compile/dump: core/dsl.py:1913-1989.
+- Key: module bytecode + compile-affecting env values + pipeline + explicitly supplied link-library paths + toolchain identity. core/dsl.py:1541-1565. Avoid claiming a canonicalized IR hash: code hashes serialized module before any canonicalize guarantee.
+- Default file location $TMPDIR/<user>/mlir_dsl_cache, overridable CACHE_DIR: compiler/cache_helpers.py:72-87.
+- Exact existing test executed twice under one temp cache; FileChecks passed:
+  first process: FILE_HITS: 0 MISSES: 1 MEM_HITS: 1
+  second process: FILE_HITS: 1 MISSES: 0 MEM_HITS: 1
+  Both results 42 8; one persisted file.
+
+SLIDE: Native control flow needs capture
+Python source -> AST identifies region + written names -> generated Python region builder -> Python executes Meta operations and emits DSL operations -> scf/arith IR -> passes -> ExecutionEngine.
+Why AST here: operator overloads intercept x+y, but they cannot make Python's own bytecode interpreter build both regions of a runtime if, or record a runtime for loop.
+Keep this distinction: AST captures structure/names; Python still performs object dispatch, imports, dictionaries, calls, and Meta computation.
+- frontend/ast_preprocessor.py:1064-1079 analyze_region_variables protocol.
+- :1091-1122 identifies stores/rebinding/subscript bases, :1137-1169 conservative method receivers and active symbol intersection.
+- :1377-1430 creates Python body function taking loop variable + write_args, returns updated slots.
+- frontend/ast_helpers.py:139-165 executor injection; :302-335 loop_selector.
+
+SLIDE: From a symbolic name to an iter_arg
+```python
+acc = m.Int32(0)
+for i in range(n):
+    acc = acc + i
+```
+1. AST sees `acc` defined outside and rebound inside -> write_args = ['acc'].
+2. Trace flattens acc -> one i32 SSA value.
+3. Region receives current acc; result carries next acc.
+```mlir
+%sum = scf.for %i = %c0 to %n step %c1
+    iter_args(%acc = %zero) -> (i32) : i32 {
+  %next = arith.addi %acc, %i : i32
+  scf.yield %next : i32
+}
+```
+- mlir_dsl/mlir_dsl_ast_decorators.py:185-213 ScfGenerator carry classification.
+- :242-254 tree_flatten staged values; :383-440 scf.ForOp, pack block arguments, yield values, rebuild results.
+- Pointer only used as store base is a memory side effect, not an SSA carry (:208-213). Rebinding p = p + 1 DOES carry a pointer.
+- For current implementation acc=0 followed by staged updates is an error, NOT automatically upgraded to Int32.
+
+SLIDE: Immutable Python records can carry SSA state
+```python
+from dataclasses import dataclass, replace
+
+@dataclass(frozen=True)
+class State:
+    total: m.Int32
+
+@m.jit
+def sum_record(n: m.Int32) -> m.Int32:
+    state = State(m.Int32(0))
+    for i in range(n):
+        state = replace(state, total=state.total + i)
+    return state.total
+```
+Verified sum_record(10) -> 45; emitted exactly one i32 loop carry.
+- util/tree_utils.py:436-444: frozen dataclass, namedtuple, tuple/list/dict flattenable containers.
+- runtime/jit_arg_adapters.py:428-449: non-frozen dataclass with DSL-typed fields / leaves rejects CONTAINER_DATACLASS_NOT_FROZEN; pure Python dataclass remains Meta.
+- tree_utils.py:566-580 rejects unsupported containers hiding DSL leaves.
+- Do not say all non-frozen classes forbidden: metaprogramming classes below are supported and intentionally ordinary Python.
+
+SLIDE: Same AST capture, different control-flow dialect
+Schematic extension (not a shipped custom dialect):
+```python
+class MyControlFlow(m.DialectPlugin):
+    def install(self, dsl):
+        super().install(dsl)
+        dsl.executor.set_functions(
+            is_dynamic_expression=is_staged,
+            loop_execute_range_dynamic=emit_mydialect_for,
+            if_dynamic=emit_mydialect_if,
+            while_dynamic=emit_mydialect_while,
+            compare_executor=emit_compare,
+        )
+```
+Use on a BaseDSL subclass which does not overwrite these hooks.
+- core/plugin.py:38-43 explicitly names executor.set_functions as plugin seam.
+- core/dsl.py:523-531 installs plugins last inside BaseDSL initialization.
+- mlir_dsl/mlir_dsl.py:184-193 installs default SCF hooks after BaseDSL, so adding above plugin to MlirDSL.plugins alone is not enough. A MlirDSL subclass can instead call executor.set_functions after super().__init__.
+- Core does not provide a prewritten arbitrary yourdialect.cf emitter. The downstream dialect author writes typed region creation/yields with the same carry protocol and lowering passes.
+
+METAPROGRAMMING EXAMPLE A (verified)
+```python
+@m.jit
+def affine(x: m.Int32, scale, bias) -> m.Int32:
+    return x * scale + bias
+
+affine(7, 3, 4)       # 25
+```
+Python scale/bias specialize; x runtime i32. IR has x argument, constants 3,4, arith.muli, arith.addi. No scale/bias runtime arguments.
+
+METAPROGRAMMING EXAMPLE B (verified classes and dictionary)
+```python
+class Op:
+    def apply(self, x):
+        raise NotImplementedError
+
+class AddN(Op):
+    def __init__(self, n): self.n = n
+    def apply(self, x): return x + self.n
+
+class MulN(Op):
+    def __init__(self, k): self.k = k
+    def apply(self, x): return x * self.k
+
+@m.jit
+def pipeline(x: m.Int32, ops: m.Constexpr) -> m.Int32:
+    for op in ops.values():
+        x = op.apply(x)
+    return x
+
+ops = {'shift': AddN(2), 'scale': MulN(3)}
+pipeline(4, ops)       # 18
+```
+Python resolves dictionary order, polymorphic method dispatch and object fields. The captured IR is constants 2,3 plus addi,muli. No runtime vtable/dict lookup or loop.
+The same objects work inside a staged pointer loop:
+```python
+@m.jit
+def fused(arr: m.Pointer[m.Float32], ops: m.Constexpr):
+    for tx in m.range(4):
+        x = arr[tx]
+        for op in ops.values():
+            x = op.apply(x)
+        arr[tx] = x
+```
+NumPy arange(4,float32) -> [6.,9.,12.,15.]. Emitted scf.for contains llvm.load, arith.addf, arith.mulf, llvm.store.
+A GPU version can use @m.kernel and tx,_,_ = m.thread_idx(), launched from @m.jit. CPU version above was actually executed, and illustrates Meta vs staged distinction without requiring hardware.
+
+EXACT VERIFICATION COMMANDS
+Environment on each Python run unless explicitly testing caches:
+  PYTHONPATH=/home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core
+  PYTHONDONTWRITEBYTECODE=1
+  MLIR_DSL_NO_CACHE=1
+  MLIR_DSL_DISABLE_FILE_CACHING=1
+Interpreter /usr/bin/python3.12.
+Commands:
+1. /usr/bin/python3.12 /tmp/mlir-tutorial-runtime-examples.py
+   PASS exit0, AFFINE25, POLYMORPHIC18, FUSED[6,9,12,15], COMPILED31.
+2. same with MLIR_DSL_PRINT_IR=1 -> /tmp/mlir-tutorial-runtime-examples.ir.log
+   PASS exit0 and displayed exact expected IR.
+3. /usr/bin/python3.12 /tmp/mlir-tutorial-state-example.py with MLIR_DSL_PRINT_IR=1
+   PASS exit0, FROZEN45, MUTABLETrue, one i32 iter_arg.
+4. /usr/bin/python3.12 /tmp/mlir-tutorial-aot-example.py
+   PASS exit0, COMPILE JitCompiledFunction, EXECUTE14, HAS_ARRAYFalse.
+5. MLIR_DSL_REMARKS='.*' /usr/bin/python3.12 mlir/test/python/dsl/remarks.py
+   PASS exit0 and build/bin/FileCheck mlir/test/python/dsl/remarks.py < /tmp/mlir-tutorial-remarks.log PASS.
+6. /usr/bin/python3.12 /tmp/mlir-tutorial-cache-check.py
+   Harness supplies build PYTHONPATH, removes NO_CACHE/DISABLE_FILE_CACHING, allocates fresh temp cache. Runs existing mlir/test/python/dsl/file_cache.py twice, invokes FileCheck with MISS/HIT. Both PASS; log /tmp/mlir-tutorial-cache-check.log.
+
+ARTIFACTS TO COPY INTO verification/v6
+/tmp/mlir-tutorial-runtime-examples.py
+/tmp/mlir-tutorial-runtime-examples.exec.log
+/tmp/mlir-tutorial-runtime-examples.ir.log
+/tmp/mlir-tutorial-state-example.py
+/tmp/mlir-tutorial-state-example.log
+/tmp/mlir-tutorial-aot-example.py
+/tmp/mlir-tutorial-aot-example.log
+/tmp/mlir-tutorial-remarks.log
+/tmp/mlir-tutorial-cache-check.py
+/tmp/mlir-tutorial-cache-check.log
+/tmp/mlir-tutorial-runtime-audit.txt

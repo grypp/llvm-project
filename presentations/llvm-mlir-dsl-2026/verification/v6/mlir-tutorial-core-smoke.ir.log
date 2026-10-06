@@ -1,0 +1,44 @@
+
+//===--- ------ Generated IR ------ ---====
+
+module {
+  llvm.func @scale_3(%arg0: i32) -> i32 {
+    %c3_i32 = arith.constant 3 : i32
+    %0 = arith.muli %arg0, %c3_i32 : i32
+    llvm.return %0 : i32
+  }
+}
+
+//===--- --- End of Generated IR -- ---====
+
+SUBDSL 12
+
+//===--- ------ Generated IR ------ ---====
+
+module {
+  llvm.func @magnitude(%arg0: f32, %arg1: f32) -> f32 {
+    %0 = complex.create %arg0, %arg1 : complex<f32>
+    %1 = complex.add %0, %0 : complex<f32>
+    %2 = complex.abs %1 : complex<f32>
+    llvm.return %2 : f32
+  }
+}
+
+//===--- --- End of Generated IR -- ---====
+
+CUSTOM_OP 10.0
+
+//===--- ------ Generated IR ------ ---====
+
+module {
+  llvm.func @scale_3(%arg0: i32) -> i32 {
+    %c3_i32 = arith.constant 3 : i32
+    %0 = arith.muli %arg0, %c3_i32 : i32
+    llvm.return %0 : i32
+  }
+}
+
+//===--- --- End of Generated IR -- ---====
+
+COMPILE 12
+LITERAL Int32 Int64 Float32

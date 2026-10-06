@@ -1,0 +1,165 @@
+MLIR DSL tutorial core API audit — 2026-10-05
+Source of truth: /home/gozen/work/llvm-project (current working tree).
+Read-only audit; no source or test files changed. Small smoke program is /tmp/mlir-tutorial-core-smoke.py.
+All paths below relative to this source root. Present the product as “mlir dsl”; keep real Python import `import mlir.dsl as m`.
+
+MOST IMPORTANT CONTENT CORRECTIONS
+1. BaseDSL is a real reusable class, but `class MySubDSL(BaseDSL): pass` is not a ready-to-run DSL: its constructor requires name, package name, Compiler provider, pass_sm_arch_name. A named subclass of MlirDSL can be a two-line extension. Distinguish the framework inheritance diagram from executable setup code.
+2. Default @kernel must be launched inside @jit. Python -> kernel directly through CUDA Python is a downstream adaptation, not this default API.
+3. Integer/float scalar types are builtin MLIR types; arithmetic ops are from arith. Say “Builtin numeric types, arith operations.”
+4. There is NO plugin-wide arithmetic-emitter override. Numeric's literal policy and _ARITH_EMITTERS table are fixed. Downstream classes may overload their own operators and register as leaves. Plugin owns dialect registration/passes, not global arithmetic dispatch.
+5. `m.compile(func, *args, **kwargs)` exists; `m.compile[flags](func)` does not. Compile kwargs include pipeline, extra_link_libs and no_cache.
+6. Current public API has Pointer, Vector, Struct, not Array. Do not import a CuTeDSL Array signature into current mlir dsl examples. Generic DLPack is not the current boundary; a separate audit should cover tensor adapters.
+
+BASEDSL: WHAT IT GIVES
+Source: mlir/python/mlir/dsl/core/dsl.py
+- BaseDSL starts line 387; class knobs: plugins, _env_class, _jit_arg_adapter_scope, _name_mangling_prefix, host_entry, _preprocessor_class.
+- Constructor lines 428–529: name/environment prefix; compiler provider; AST enablement; in-memory JIT cache; Executor; install shallow copy of class plugins.
+- Environment manager uses `self._env_class(self.name)` at lines 533–535.
+- @jit and @kernel are class methods, lines 668–695.
+- Pass pipeline composition, lines 814–842: explicit call pipeline wins, then <PREFIX>_PIPELINE, then plugin passes followed by core passes.
+- Name mangling, lines 888–914: Meta arguments included in symbol, address/whitespace sanitization and optional prefix.
+- JIT compile/execute: lines 1468ff, 1899ff, 2000ff, 2394ff.
+- Host entry default llvm.func; `host_entry = "func"` switches to func.func plus convert-func-to-llvm. Native SCF support installed by MlirDSL, not the empty BaseDSL itself.
+
+SMALL EXECUTABLE BASEDSL SNIPPET (tested; split imports into notes if needed)
+    import mlir.dsl as m
+    from mlir import execution_engine, passmanager
+
+    class MySubDSL(m.BaseDSL):
+        plugins = []
+        _unannotated_arg_is_constexpr = True
+        def __init__(self):
+            super().__init__(
+                name="MY_DSL", dsl_package_name=["mydsl"],
+                compiler_provider=m.Compiler(passmanager, execution_engine),
+                pass_sm_arch_name="cubin-chip", preprocess=False)
+
+    @MySubDSL.jit
+    def scale(x: m.Int32, factor):
+        return x * factor
+
+    scale(4, 3)  # 12
+Notes: this scalar example deliberately needs no native control-flow executor. The fuller tested snippet also sets _jit_arg_adapter_scope="mlir" for that registry; irrelevant to two scalar parameters. pass_sm_arch_name is required even for this CPU path. Public imports of m load the default DSL module; the no-GPU-import example in mlir/test/python/dsl/core_only.py:49 uses direct imports/stub package.
+
+ALTERNATIVE TINY RUNNABLE SUBCLASS
+    class MySubDSL(m.MlirDSL):
+        plugins = [MyDialectPlugin()]
+Retains the existing constructor and SCF executor. A custom environment prefix requires overriding the constructor/create-env-manager seam; this example retains MLIR_DSL_* prefix. Do not imply simply changing the class name changes the prefix.
+
+ENVIRONMENT SETTINGS FOR A SLIDE
+`MY_DSL_PRINT_IR=1`, `MY_DSL_DRYRUN=1`, `MY_DSL_CACHE_DIR=...`, `MY_DSL_PIPELINE=...` follow the DSL name supplied to BaseDSL.
+Real declarations: core/env_manager.py:333–456. EnvVar descriptor helper :74; per-prefix manager :450.
+Custom env extension:
+    from mlir.dsl.core.env_manager import EnvironmentVarManager, env_var
+    class MyEnv(EnvironmentVarManager):
+        fast_math: bool = env_var("FAST_MATH", affects_compile=True, default=False)
+    class MySubDSL(...):
+        _env_class = MyEnv
+The setting participates in the cache key because affects_compile=True.
+
+PLUGIN PROTOCOL
+`DialectPlugin` methods at core/plugin.py:27:
+    install(self, dsl)                         # :38
+    register_dialects(self, context)           # :46
+    pipeline_passes(self) -> list[str]         # :54
+    shared_libs(self) -> list[str]             # :58
+    attach_to_module(self, dsl, module, function_name, sig, trace_args, trace_kwargs) # :62
+    wrap_compiled_function(self, dsl, jit_function) # :80
+Core import/export at __init__.py:95–103. plugins is a class attribute, not a BaseDSL constructor keyword. Register leaf classes once on module import, not on plugin install.
+Real small plugin usable on slide (tested in a complex arithmetic example):
+    class ComplexPlugin(m.DialectPlugin):
+        name = "complex"
+        def pipeline_passes(self):
+            return ["convert-complex-to-llvm"]
+
+    class ComplexDSL(m.MlirDSL):
+        plugins = [ComplexPlugin()]
+If keeping all default plugins use `plugins = [*m.MlirDSL.plugins, ComplexPlugin()]`.
+Fictional MyDialectPlugin.register_dialects(...) and convert-mydialect-to-llvm are legitimate extension sketches, not existing API implementations. State they are supplied by the downstream dialect.
+
+DECORATORS / CALL CONVENTION
+- @m.jit aliases MlirDSL.jit; @m.kernel aliases MlirDSL.kernel (mlir_dsl/mlir_dsl.py:196–197).
+- Python calls @jit: arguments specialize/stage -> build host entry -> compile -> ExecutionEngine -> return. A @jit called during another trace inlines its preprocessed Python body (core/dsl.py:2410–2412). No automatic separate func.call boundary.
+- @kernel call binds arguments into KernelLauncher (core/dsl.py:701–721). .launch accepts LaunchConfig or grid/block kwargs. It emits kernel and gpu.launch_func within host trace.
+- LAUNCH_OUTSIDE_JIT check at core/dsl.py:344–357. Requires GPU plugin (core/dsl.py:709–715), which installs helper (dialect_plugins/gpu.py:433).
+Slide snippet:
+    @m.kernel
+    def twice(x: m.Pointer[m.Float32]):
+        tx, _, _ = m.thread_idx()
+        x[tx] = x[tx] * 2.0
+
+    @m.jit
+    def launch(x: m.Pointer[m.Float32]):
+        twice(x).launch(grid=(1, 1, 1), block=(128, 1, 1))
+
+    launch(device_buffer)
+Assumes buffer has at least 128 elements and GPU plugin/runtime are configured. m.thread_idx returns m.Int32 components (gpu.py:182–190). This snippet was source-checked, not GPU-executed. Default path uses MLIR runtime wrappers, not CUDA Python. A TileIR sub-DSL can override _kernel_helper for direct Python launch; label as its downstream path.
+
+TYPE SYSTEM / INFERENCE
+Implementation: types/typing.py.
+- NumericMeta :132 and __new__ :155 register dtype class metadata: width, bytes, ctype, numpy name, mlir_type callable.
+- Numeric :780, __slots__=("value",) :795; payload is Python scalar or ir.Value. Data representation diagram: Int32(value=3) [Meta], Int32(value=%arg0:i32) [Staged].
+- Int32 definition :1864: `class Int32(Integer, metaclass=IntegerMeta, width=32, signed=True, mlir_type=T.i32): ...`
+- __add__ :1125 -> _binary_op(:688) -> promote -> if either payload is SSA, materialize constants and emit arith; else execute Python operator.
+- _ARITH_EMITTERS :650–676 is a module-level fixed map. `_mlir_helpers/arith.py:393` chooses arith.addf vs arith.addi by operand type.
+- Literal defaults :1096–1120: bool -> Boolean; int -> Int32 or Int64 when outside [-2^31,2^31-1]; float -> Float32.
+- SSA input is wrapped according to its own MLIR type via Numeric.from_mlir_type :1341.
+- Promotion :492–647: same type stable; wider same-signed integer; mixed sign unsigned wins if its width >= signed width; mixed/float promotion policy; unsupported narrow float mixes require explicit cast. Comparisons result Boolean; true division of Integer results Float32 (:748–753).
+- Function boundary DSL annotations trigger numeric casting then flatten/marshal (core/dsl.py:1256ff). Plain unannotated Python args are Meta for MlirDSL because _unannotated_arg_is_constexpr=True (mlir_dsl/mlir_dsl.py:170). DSL leaves/adapters remain staged even if unannotated.
+- Not full-program Python static type inference: type follows wrapper, annotation, operands, then MLIR results. At control-flow joins, leaf types must remain stable; no automatic join promotion.
+Slide example:
+    @m.jit
+    def affine(x: m.Int32, factor):
+        return x * factor + 1
+    affine(4, 3)
+    # x: SSA i32; factor: Python int
+    # result: i32; emit arith.constant/muli/addi
+Show `as_numeric(5) -> Int32`, `as_numeric(2**40) -> Int64`, `as_numeric(1.5) -> Float32` only as literal coercion, not normal Python reassignment.
+
+CUSTOM DOWNSTREAM TENSOR + ARITHMETIC
+This is the supported mechanism for adding your own types/ops, using hypothetical downstream mydialect bindings:
+    class Tensor:
+        def __init__(self, value): self.value = value
+        def __add__(self, other):
+            return Tensor(mydialect.AddOp(self.value, other.value).result)
+
+    m.register_leaf(
+        Tensor,
+        ir_types=lambda t: [t.value.type],
+        ir_values=lambda t: [t.value],
+        from_ir_values=lambda prototype, values: Tensor(values[0]))
+`mydialect.Tensor` can be the exported class name from this package. ir_types depends on prototype, so generic raw-SSA automatic wrap may not infer it without a prototype; wrapping explicit results as above works. Register once at module import. No marshal hook means this class is staged-only: cannot pass arbitrary Tensor host object to a compiled function. Add a scoped JIT argument adapter plus marshal for runtime buffer ABI. A custom leaf is restored in staged regions using its prototype and SSA results. Real protocol signature at util/tree_utils.py:152–173:
+    register_leaf(cls, *, ir_types, ir_values, from_ir_values, marshal=None, reference=False)
+`reference=True` reserved for pointer-like reference leaves whose stores are side effects.
+Actual smoke test used Complex64 wrapping complex<f32>, its __add__ emitted complex.add; plugin supplied convert-complex-to-llvm; magnitude(3.,4.) on z+z executed to 10.0.
+Do not show a nonexistent `m.set_arith_plugin(...)`, `arith_plugin=...`, or a global Numeric override. Arithmetic supplied by a downstream wrapper is separate from built-in Numeric arithmetic.
+
+COMPILE API (cross-check for other slides)
+Real signature at mlir_dsl/mlir_dsl.py:200:
+    def compile(func, *args, **kwargs):
+        return func(*args, compile_only=True, **kwargs)
+`func` must be @jit decorated. Pipeline supplied as keyword string, not brackets.
+Tested:
+    compiled = m.compile(scale, 0, 3)
+    compiled(4, 3)  # 12
+It retains original Python signature/argument adapter; the normal compiled callable still receives the Meta argument even though it has no MLIR operand. Use all-runtime example if avoiding this detail on a slide. Compile-only path disables JIT cache for explicit compilation (core/dsl.py:2354ff). This is ahead-of-call compilation to callable; do not claim portable object/library export unless another actual API is demonstrated.
+
+CURRENT TREE VS /home/gozen/work/mlir-dsl PUBLISHING CLONE
+Public BaseDSL, core plugin protocols, numeric types, GPU call convention, leaf registration largely match; current source is newer in these key areas:
+- Current core/dsl.py adds persistent file-cache hits and compilation path; publishing clone lacks those additions.
+- Current compiler/cache_helpers.py new file, compiler.py substantially newer.
+- Current DialectPlugin has attach_to_module and wrap_compiled_function hooks absent from older clone.
+- Current default MlirDSL optionally lists TVM-FFI export plugin. New dialect_plugins/tvm_ffi.py, tvm_ffi_builder/, types/torch.py; newer jit_arg_adapters.py uses type-only Torch import/adapter changes.
+- Current env manager ENABLE_TVM_FFI setting and extra error IDs.
+- types/typing.py and util/tree_utils.py unchanged between trees (ignoring bytecode). Do not overwrite current implementation with old clone while publishing slides.
+
+VERIFICATION PERFORMED
+Command:
+env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core MLIR_DSL_NO_CACHE=1 MLIR_DSL_DISABLE_FILE_CACHING=1 MY_DSL_NO_CACHE=1 MY_DSL_DISABLE_FILE_CACHING=1 /usr/bin/python3.12 /tmp/mlir-tutorial-core-smoke.py
+Exit 0, output:
+SUBDSL 12
+CUSTOM_OP 10.0
+COMPILE 12
+LITERAL Int32 Int64 Float32
+No GPU execution attempted. No fictional downstream mydialect operations executed.

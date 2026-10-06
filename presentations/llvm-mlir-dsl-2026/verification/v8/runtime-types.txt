@@ -1,0 +1,298 @@
+Runtime/type architecture audit for tutorial v8 — 2026-10-06
+
+Source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl (dirty working tree).
+This audit changes no implementation or existing tests. Execution uses the
+already-built Python bindings, whose loaded paths and current source hashes
+are recorded below. No build or broad test suite was run.
+
+Required v7 slide corrections
+-----------------------------
+All program examples: import mlir.mlir_dsl as m. mlir.dsl is the core authoring
+namespace; it exports types/BaseDSL/protocols, but no jit/kernel/compile.
+
+15: Keep the six conversion rows for the LLVM reference sub-DSL, but insert
+    OpEmitter between dtype/promotion and operations. NumericMeta.mlir_type
+    asks the active emitter; scalar_mlir_type is the builtin scalar behind
+    the dtype. Other dialects can use rank-0 tiles for the same m.Int32.
+16: Pointer and Vector use emitter hooks too. @m.struct is now a frozen
+    field-by-field pytree, NOT a single LLVM struct SSA value. No packed or
+    zero_init options. The LLVM host-entry helper may pack several returned
+    fields into an LLVM struct for its ABI; that is separate from @m.struct.
+    Torch dtype conversion is in plugins/thirdparty/pytorch/dtypes.py.
+    Math operation helpers belong to the LLVM dialect plugin.
+17: Local numeric inference remains valid. An unannotated Python scalar or
+    Python-typed scalar is Meta. Do not generalize this to every unannotated
+    object: DSL leaves and framework objects with adapters can stage without
+    annotations. Constexpr no longer exists or needs to be written.
+18: Replace the custom MyNumber/future-hook story with the real OpEmitter
+    protocol and DialectPlugin.emitter. The core Numeric/Vector/Pointer
+    classes can retain their surface while another emitter changes SSA types
+    and operations. Hooks are demonstrated by test/plugins_dialect.py.
+19: register_leaf still packages ir_types/ir_values/from_ir_values; optionally
+    marshal for a host ABI, reference for memory-like leaves. The existing
+    three-callback code remains a staged-only custom Tensor sketch.
+22: Replace m.Array with m.Pointer[m.Float32], and ops: m.Constexpr with ops.
+    If using multiple blocks, compute block_idx * block_dim + thread_idx;
+    carry n: m.Int32 and guard i < n. GpuPlugin owns these helpers, gpu.func
+    and .launch(grid=..., block=...) from the host @jit entry.
+23: DLPack is implemented, not merely an extraction target. Show:
+    tensor -> DlpackTensor metadata/lease -> contiguous Pointer[T] -> LLVM ABI.
+    Shape/strides are inspected on the host; the pointer ABI does not carry
+    them automatically. Pass n (or other required dimensions) separately.
+    No m.Array exists. PyTorch has its own lazy type adapter; the generic
+    DLPack protocol adapter is a separate optional plugin.
+24: Show m.compile(func, *representative_args) -> compiled(*matching_args).
+    compile[...] / GenerateLineInfo / export_to_c / to_precompiled_mlir are
+    absent from this implementation. Do not present those DkgDSL APIs as
+    current mlir dsl APIs. KEEP_IR and DRYRUN can inspect generated IR; they
+    are not a portable object/C-artifact AOT export API.
+25: Plugin owns the host-entry helper. LLVM reference emits func.func with
+    llvm.emit_c_interface and lowers via convert-func-to-llvm. Remove the
+    prior host_entry='llvm'/'func' selector claim. TVM-FFI export is implemented
+    via TvmFfiPlugin and compiled.tvm_ffi_function, enabled by
+    MLIR_DSL_ENABLE_TVM_FFI=1. Plain TVM-FFI calls receive DataPointer addresses;
+    compiled(...) applies the normal Python buffer adapters first.
+26: Frontend DSLUserCodeError and compiler remarks remain separate. Remarks
+    session spans trace and passes. collected_remarks is the last compile's
+    list; REMARKS_OUTPUT streams instead of collecting/rendering. Preserve
+    the current diagnostic-example failure below; do not claim all examples
+    or the whole diagnostic suite passed.
+27: Existing tooling settings remain valid; update source paths to the new
+    tree. DEBUGINFO, LOC_TRACEBACKS, VERIFY_TRACE, REMARKS[_OUTPUT], PRINT_IR,
+    KEEP_IR and PROFILE_COMPILER are available.
+28: Memory cache stores a callable/engine; disk cache stores lowered MLIR
+    bytecode + CRC32, skipping passes on a hit but rebuilding the engine.
+    Calls still trace to identify the module. Hash inputs include bytecode,
+    compile-affecting environment, pipeline, extra library paths, toolchain
+    binary identity. Current binary identity is path/size/mtime_ns, not a
+    guaranteed compiler version string or canonical IR hash.
+
+Compact, accurate code shapes (source-backed; not separately executed)
+---------------------------------------------------------------------
+import mlir.mlir_dsl as m
+
+@m.jit
+def affine(x: m.Int32, factor):
+    return x * factor + 1
+
+compiled = m.compile(affine, 4, 3)
+result = compiled(5, 3)  # 16; factor remains the specialized Meta value.
+
+@m.jit
+def scale(p: m.Pointer[m.Float32], n: m.Int32):
+    for i in range(n):
+        p[i] = p[i] * 2.0
+
+# A contiguous framework buffer with a registered adapter can be passed to p.
+# n is a separate runtime scalar; no m.Array or wrapper annotation is needed.
+
+Source contracts
+----------------
+README.md: core/reference separation; plugin families and defaults.
+dsl/core/mlir_op.py: OpEmitter; current_emitter resolves active DSL, then a
+  lazily imported LlvmEmitter for standalone type use.
+dsl/core/dsl.py: _is_meta_argument includes leaves/adapters; plugin install,
+  emitter/entry/compiler choice; module cache and per-compilation remarks.
+dsl/types/typing.py: scalar_mlir_type versus mlir_type; conversion dispatch;
+  Struct/struct field records.
+dsl/types/vector.py: vector construction/extraction/reduction dispatch.
+dsl/plugins/dialects/llvm/{emitter,plugin,entry,arith,memory}.py:
+  i32/f32, vector and LLVM-pointer world; func.func host entry and compiler.
+dsl/plugins/dialects/scf/{plugin,builders,executors}.py:
+  explicit control flow and the executors targeted by AST preprocessing.
+dsl/plugins/dialects/gpu.py: kernel_gen_helper, NVIDIA lowering, launch/index
+  helpers; optional availability probe.
+dsl/plugins/thirdparty/dlpack/plugin.py: generic DLPack protocol adapter;
+  supported scalar dtype map, row-major contiguity check, Pointer keepalive.
+dsl/plugins/thirdparty/dlpack/csrc/DlpackPlugin.cpp: nanobind ndarray view
+  retains the producer lease and exposes pointer/shape/strides/device/dtype.
+dsl/plugins/thirdparty/pytorch/plugin.py: qualified-name registration avoids
+  importing torch; data_ptr/dtype/device/contiguity become Pointer metadata.
+dsl/plugins/thirdparty/tvm_ffi/plugin.py: optional ABI export; scalar/Pointer
+  and scalar Meta support; unsupported signatures fall back with a warning.
+dsl/compiler/remarks.py: remark engine session; collected versus streamed.
+dsl/util/cache_key.py, dsl/util/cache_helpers.py: identity/persistence helpers.
+sub-dsls/mlir-dsl/mlir_dsl/{__init__,mlir_dsl}.py: reference namespace,
+  optional plugin assembly and plain compile API.
+
+Validation commands and actual results
+-------------------------------------
+Every command used /usr/bin/python3.12 with:
+  PYTHONDONTWRITEBYTECODE=1
+  PYTHONPATH=/home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core
+The relative paths below are rooted at:
+  /home/gozen/work/llvm-project/mlir/tools/mlir-dsl
+FileCheck is /home/gozen/work/llvm-project/build/bin/FileCheck.
+
+Environment/API probe (exit 0): imported mlir.dsl as core,
+mlir.mlir_dsl as m and plugins.thirdparty.{dlpack,pytorch,tvm_ffi}; printed
+module paths, type(m.MlirDSL().emitter), installed plugin names, available()
+and hasattr(core/m, name). Actual results:
+  emitter: LlvmEmitter
+  plugins: ['tvm_ffi', 'pytorch', 'dlpack']
+  available(dlpack, pytorch, tvm_ffi): True True True
+  Constexpr / Array / GenerateLineInfo: absent from core and reference
+  jit / compile: absent from core, present in reference
+
+env MLIR_DSL_DISABLE_FILE_CACHING=1 python sub-dsls/mlir-dsl/examples/02_numeric_types.py
+  exit 0: Int32(16), Float32(5.5), Int64(11), Float16(1.5), Boolean(True),
+  Boolean(False); Numeric types: passed.
+
+env MLIR_DSL_DISABLE_FILE_CACHING=1 python sub-dsls/mlir-dsl/examples/05_structs.py
+  exit 0: step ((2.0,0.0),(0.5,-1.0)), norm2 25, around (7,13), divmod (3,2);
+  Structs: passed.
+
+env MLIR_DSL_DISABLE_FILE_CACHING=1 python sub-dsls/mlir-dsl/examples/09_compile_and_cache.py
+  exit 0: m.compile returns JitCompiledFunction; compiled(...) 7.0;
+  ordinary calls [7.0,16.0,8.0]; memory (hits,misses)=(1,3).
+  Script creates /tmp/tmptobdtd33 and launches two subprocesses with
+  MLIR_DSL_CACHE_DIR pointing there and MLIR_DSL_DISABLE_FILE_CACHING=0:
+  first process entries0/filehits0, second entries1/filehits1; one bytecode
+  entry after both. Compilation and caches: passed.
+
+env MLIR_DSL_DISABLE_FILE_CACHING=1 python sub-dsls/mlir-dsl/examples/10_diagnostics.py
+  exit 1: first ARG_ANNOTATION_MISMATCH and UNSUP_EARLY_EXIT checks succeeded;
+  the latter rendered the source line/caret and suggestions. The next check
+  expected TYPE_UNSTABLE_JOIN, but got CONTAINER_UNSUPPORTED. Stack:
+  examples/10_diagnostics.py:33 -> scf/executors.py:456 -> :258 tree_flatten
+  -> util/tree_utils.py:399. Internal list of DSL values is rejected before
+  the expected type-unstable-loop diagnostic. No repair was attempted.
+
+env MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR=1 python test/plugins_dialect.py 2>&1 | FileCheck test/plugins_dialect.py
+  exit 0 (FileCheck): same expression emits arith on i32 and on tensor<i32>;
+  emitter selection and composed custom pipeline checks pass. This is IR
+  tracing of a rank-0 tensor stand-in, not real CUDA Tile compilation.
+
+set -o pipefail
+env MLIR_DSL_DISABLE_FILE_CACHING=1 python test/plugins_dlpack.py 2>&1 | FileCheck test/plugins_dlpack.py --check-prefix=EXEC
+  exit 0: AXPY [1. 3. 5. 7.]; FIRST 7. Wrapped objects expose only DLPack,
+  preventing NumPy's direct adapter from satisfying these calls.
+
+set -o pipefail
+env MLIR_DSL_DISABLE_FILE_CACHING=1 MLIR_DSL_REMARKS='.*' python test/remarks.py 2>&1 | FileCheck test/remarks.py
+  exit 0: TraceDecision analysis record; result42; next result3 clears last
+  compile's records. This checks the in-memory rendered/collected mode only.
+
+env MLIR_DSL_DISABLE_FILE_CACHING=1 python sub-dsls/mlir-dsl/examples/13_tvm_ffi_export.py
+  exit 0: exported tvm_ffi.core.Function returns28.0; another Meta value is
+  rejected by the raw ABI wrapper and by compiled(...) as CALL_TVM_FFI_ARGS.
+  The script sets MLIR_DSL_ENABLE_TVM_FFI=1 itself before import.
+
+env MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR=1 MLIR_DSL_ARCH=sm_90 python sub-dsls/mlir-dsl/examples/12_gpu_kernels.py
+  exit 0: GPU kernels: passed, in DRYRUN only. Traced bounds-checked gpu.func
+  bodies with NVVM thread/block IDs, LLVM loads/stores, arith operations and
+  scf.if; func.func hosts emit gpu.launch_func. No GPU execution claimed.
+
+env MLIR_DSL_DISABLE_FILE_CACHING=1 python sub-dsls/mlir-dsl/examples/03_control_flow.py
+  exit 0: fib10=55, power(2,10)=1024, magnitude(-7/7)=7, halvings1000=9,
+  odd_sum(100,10)=123 and odd_sum(100,0)=-100. Native control flow: passed.
+
+env MLIR_DSL_DISABLE_FILE_CACHING=1 python sub-dsls/mlir-dsl/examples/07_dataclass_arguments.py
+  exit 0: affine results7/13/11; runtime scale change adds0 compilations;
+  Meta bias change adds1; accumulate5=Stats(total=Int32(10),count=Int32(5));
+  norm2=25; mutable-record diagnostic CONTAINER_DATACLASS_NOT_FROZEN.
+  Dataclass arguments and carries: passed.
+
+Limits
+------
+No JAX, CUDA device execution, custom real Tile IR emitter, C artifact export,
+bitstream/YAML remark streaming, or entire lit suite was tested. DLPack
+metadata supports more framework producers than were exercised here; runtime
+adaptation requires supported dtype/device and contiguous storage. Framework
+memory ownership remains with the producer/caller. A custom dialect that
+provides an emitter replaces the default dialect set and must supply the
+entry/compiler/lowering hooks its execution path needs. Passing the stand-in
+emitter test does not supply those hooks for a real target automatically.
+
+Loaded modules and fingerprints
+-------------------------------
+Captured 2026-10-06T13:38:46.061218+00:00.
+Python /usr/bin/python3.12; same PYTHONPATH as the commands above.
+Hashes are of the current working-tree contents, not the publishing clone.
+mlir.dsl
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/__init__.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/__init__.py
+  sha256: 133bc10f35e942e00cf52f2557da62b0b32e8d325cf9227e742698a89f8a1ffb
+mlir.mlir_dsl
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/mlir_dsl/__init__.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/mlir_dsl/__init__.py
+  sha256: 2dbfb7e01010a2e8a56a2bd452f9f181bad360bc9ae3f623f4b7142734080297
+mlir.dsl.core.dsl
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/core/dsl.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/dsl.py
+  sha256: d4b6ca43b1134f242c9a17f458a9593c07012ba35c4ab035318c12b78a58f606
+mlir.dsl.core.mlir_op
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/core/mlir_op.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/mlir_op.py
+  sha256: 016fa52a6becce4e6514cbe79ffc2019792224b5a4806d7acfc29605135f2c73
+mlir.dsl.types.typing
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/types/typing.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/types/typing.py
+  sha256: b5beb89e6d0c47455ebf0ce54939e68367d9b25b281dcd47012086ce5c5ae38a
+mlir.dsl.types.vector
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/types/vector.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/types/vector.py
+  sha256: 7e96b315214a5daf4638bde1086618c5dbd6cc5e4b31023355ccee95d53ff611
+mlir.dsl.util.tree_utils
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/util/tree_utils.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/util/tree_utils.py
+  sha256: 8f91ebd91994d74049f48cc2d64ac47ead99e21c15e9d69c5299a325f71dca6f
+mlir.dsl.runtime.jit_arg_adapters
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/runtime/jit_arg_adapters.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/runtime/jit_arg_adapters.py
+  sha256: 7a7033c9b4d8a46cbdbbbb19394da0dd4fdde8e8060c65c27696c33f9be40112
+mlir.dsl.plugins.dialects.llvm.emitter
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/plugins/dialects/llvm/emitter.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/llvm/emitter.py
+  sha256: a72b38800e46bb20cebfccc8c537e570e9fd48fef6b5c3e1f14839439c33bff5
+mlir.dsl.plugins.dialects.llvm.plugin
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/plugins/dialects/llvm/plugin.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/llvm/plugin.py
+  sha256: 62075dd10cd3fc141706e3655db2036135dd2c9e429251f7068509c82a1a0b49
+mlir.dsl.plugins.dialects.llvm.entry
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/plugins/dialects/llvm/entry.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/llvm/entry.py
+  sha256: 2250bbdce4b7f9a905b795dd21cba2385427838fd2719034f6eff5b216368e74
+mlir.dsl.plugins.dialects.scf.executors
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/plugins/dialects/scf/executors.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/scf/executors.py
+  sha256: 0d2e295c9f7b583d5c8f80eae48e50046668b20328c228401cb43eab6bbe0fc8
+mlir.dsl.plugins.dialects.gpu
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/plugins/dialects/gpu.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/gpu.py
+  sha256: 2c89dbb5417ce99e6659efbbfb6846a97fcfb767d8dd61cfba7be2532730f9fb
+mlir.dsl.plugins.thirdparty.dlpack.plugin
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/plugins/thirdparty/dlpack/plugin.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/thirdparty/dlpack/plugin.py
+  sha256: 3f994d1e701acbd0a2313227004764a009fff03511531fbb338ab1f74cc3589f
+mlir.dsl.plugins.thirdparty.pytorch.plugin
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/plugins/thirdparty/pytorch/plugin.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/thirdparty/pytorch/plugin.py
+  sha256: e8ce321bf1dbcc28041e8c0ae3c216a552f9ca25978cf6d0253d85e26f66ea80
+mlir.dsl.plugins.thirdparty.tvm_ffi.plugin
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/plugins/thirdparty/tvm_ffi/plugin.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/thirdparty/tvm_ffi/plugin.py
+  sha256: 133b4949e05290cf5d688a26433578b19f07c247faa23eb32e25949e68e81901
+mlir.dsl.compiler.remarks
+  loaded: /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/compiler/remarks.py
+  source: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/compiler/remarks.py
+  sha256: 375167bd286fa7c4e8bf7640a094836a8607ba2476acc45b553773d614f5bfc6
+
+Additional source/example SHA256 (relative to source root):
+e92b4c0a76044d4b2716c8d75888509d66fe331729db8003bb439b4714bf7423  README.md
+2cf0867230da8a87183367b7db8081ad9d838b1f441006e448af2ef948483c85  dsl/util/cache_helpers.py
+89d8c5c03730f78a7d1e3809760d7f7bf2e5749866c29482c271af68ebf18a71  dsl/util/cache_key.py
+2830999c381ad521213a11a815074027757cf54c7bbb20200ba67952e5ac0526  dsl/core/env_manager.py
+99305b288ebe355d045b7272f3ba262398f4b2f9148495936b419863b6ad0fab  dsl/plugins/thirdparty/dlpack/csrc/DlpackPlugin.cpp
+cd7d42ea41143f61d997930309c44d8351251e8acebd454033483da0b7c1eba8  sub-dsls/mlir-dsl/mlir_dsl/mlir_dsl.py
+066207e04110a9772a11ac294242491723a0806943bb3da7962d9d8fefa8dc83  test/plugins_dialect.py
+591a91ee44b64da95e597a4675c7a56d89990ad7f12510a49fd81da1b89e1891  test/plugins_dlpack.py
+5df0f1db4004ad9b17761fdde828e1208329543259401617f7af3561d25f81a9  test/remarks.py
+71e7b586beed848c0e87d89d17a28becdb39b2ea4487e71765e11c4860af3cbb  sub-dsls/mlir-dsl/examples/02_numeric_types.py
+a6fe2fb734db031a3e1b5e0dafbb6587d722de532f169c99a143c9d58e488a49  sub-dsls/mlir-dsl/examples/03_control_flow.py
+586d0ced3c09902e6d51bdbcc983ffa66018b7faf582b00043d34e8c67c2f1b4  sub-dsls/mlir-dsl/examples/05_structs.py
+30a5670e5c414bee405553dc6fb25b44eb9347686210dff76b0add0dbc531955  sub-dsls/mlir-dsl/examples/07_dataclass_arguments.py
+378377fd7c0af66bdedffbcd9a7ce0bcb9caa00b4ff972b7fc6022adc13c9309  sub-dsls/mlir-dsl/examples/09_compile_and_cache.py
+e87fafb54c28037073aeb9adaa67c5944903efd6fb5d44eab8b34ba27aa98949  sub-dsls/mlir-dsl/examples/10_diagnostics.py
+996062ab36a115011ca629ac58cbf500ef796a0c4fde9cc26dbc44151756687d  sub-dsls/mlir-dsl/examples/12_gpu_kernels.py
+668ec33e0613eddc45736606eadf9a7eed928e2c42e7d4e9cd0b688716a59654  sub-dsls/mlir-dsl/examples/13_tvm_ffi_export.py

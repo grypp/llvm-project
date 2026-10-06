@@ -1,0 +1,26 @@
+V13 ARTIFACT CHECKS — 2026-10-06
+47 slides in PowerPoint/PDF. Timing remains core30min + Amir10min + target5min.
+Opening order remains use cases → design/staging → MLIR diversity/plugins.
+Slide10 shows four feature boxes inside the Core DSL: diagnostics,
+AST preprocessing hooks, JIT cache and type inference.
+Slide11 shows three plugin families and existing plugin choices, then two
+DSL assemblies containing selected plugins above identical Core DSL bases.
+The working mlir dsl and a downstream DSL can reuse existing plugins.
+No code, IR fragments or hook-call walkthroughs remain on these two slides;
+both contain at most70 visible words, including title and template footer.
+All47 slides rendered. Updated slides10–11 visually reviewed with no clipping.
+Other visible slides, order and timing remain unchanged from v12.
+All measured text bounds fit; template theme/masters/layouts/fonts unchanged.
+32 code panels retain green headers; 2233 visible words including code.
+54 feature-map rows use valid current slide numbers.
+Speaker notes, source links and verification paths resolve. PowerPoint ZIP
+integrity and official NVIDIA example hyperlink checks pass.
+No legacy annotation wrappers, stale imports, visible times or GenAI section.
+Historical v1–v12 artifacts preserved. No compiler implementation changes.
+
+RETAINED EXECUTION EVIDENCE
+Current API and computation checks are documented under verification/v8/.
+Displayed CPU computations and plugin/interop examples passed there.
+One pre-existing type-unstable-loop diagnostic mismatch remains documented;
+this presentation revision does not modify or retest implementation.
+Tile integration remains a port sketch, not a completed or GPU-tested plugin.

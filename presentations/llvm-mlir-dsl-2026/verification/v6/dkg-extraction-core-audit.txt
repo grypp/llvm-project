@@ -1,0 +1,190 @@
+DKG -> mlir dsl extraction core audit, 2026-10-05
+Source of truth: /home/gozen/work/dkg4/DkgDSL
+Read-only review. Read /home/gozen/work/dkg4/AGENTS.md and DkgDSL/README.md. No component AGENTS.md/CLAUDE.md or agent-rules/python.md present in the searched component. Did not modify source or run DKG tests. All DKG source references below are relative to /home/gozen/work/dkg4.
+
+MAIN STORY / CORRECTION TO THE V6 DRAFT
+The tutorial should explain extracting a proven reusable frontend from DkgDSL, not explain the present omissions of an early mlir.dsl prototype. DkgDSL already has BaseDSL, typed values, extensible runtime arguments, native staged control flow, Array, a DLPack tensor-descriptor path, bracketed compile options, compiler backends, memory/disk caches, diagnostics, and direct device-only kernel launch. Its existing CuTe and CUDA Tile subclasses are concrete evidence that a shared frontend serves different dialects and launch policies.
+
+Suggested opening core architecture sentence:
+“Extract the machinery once. A sub-DSL supplies its values, control-flow builders, compiler, and runtime.”
+
+WHAT / WHY / HOW figure:
+WHAT: DkgDSL/base_dsl -> mlir dsl core.
+WHY: Python metaprogramming and compiler services recur across dialects.
+HOW: retain reusable mechanisms; isolate dialect and runtime policy behind explicit extension points.
+Put CuTe DSL and CUDA Tile as evidence/examples around the diagram; when user requests generic sub-DSL boxes, label Arithmetic DSL / Tensor DSL / Recipe DSL instead. Do not reproduce branded boxes from reference slides.
+
+1. BASEDSL IS AN EXISTING SHARED LAYER
+File DkgDSL/base_dsl/dsl.py:337.
+Real constructor at :348:
+    BaseDSL(*, name, dsl_package_name, compiler_provider,
+            pass_sm_arch_name, device_compilation_only=False,
+            preprocess=False)
+It creates the named environment manager, cache, logger/profiling settings and preprocessor. No zero-configuration constructor exists, but a slide can show class MySubDSL(BaseDSL) plus named policies as the extraction interface, without using prototype boilerplate as the headline.
+
+Existing derived classes:
+- CutlassBaseDSL(BaseDSL), cutlass_dsl/cutlass.py:603; _env_class, adapter scope and name-mangling prefix at :606–618; constructor calls base at :688–705.
+- CudaTileIR(BaseDSL), cuda_tile_dsl/cuda_tile.py:622; constructor :629 chooses name CUDA_TILE_DSL, package tile_ir, Compiler, compute-capability option, device_compilation_only=True, preprocess=True.
+
+Reusable base services and source anchors:
+- Name/environment: base_dsl/dsl.py:348, :522; base_dsl/env_manager.py:185 EnvVar, :235 env_var, :288 EnvVarSpec, :315 cache_key_str, :820 EnvironmentVarManager.
+- Decorators/call wrapping: base_dsl/dsl.py:638 jit_runner, :769 jit, :784 kernel.
+- Signature and argument adaptation: :960, :985, :1126, :1261, :1388, :2916, :2975.
+- Source locations: :1557 get_location_from_frame, :1566 get_ir_location.
+- Compiler/JIT: :1631 compile_and_jit, :2428 compile_and_cache, :2633 generate_mlir.
+- Hash identity: :1849 get_module_hash includes MLIR bytecode, relevant env, compile options, pipeline options, linked-library paths and compiler/version digest.
+- Naming: :887 mangle_name; :933 _customize_generated_name handles user prefix and keep/remove mangled components. The DKG implementation has extra CuTe-specific naming fields to rename during extraction, e.g. _cute_dsl_name_options and remove_cutlass_symbol.
+- Post-trace customization: :1879 register_trace_finalize_hook, :1899 scoped trace_finalize_hooks, called before hashing.
+
+2. DIALECT EXTENSION IS ALREADY PRESENT AS SUBCLASS HOOKS
+Existing abstract/overridable hooks in base_dsl/dsl.py:
+    _kernel_helper(func, *args, **kwargs)    # :799
+    _enter_gpu_module()                     # :806
+    _build_gpu_module(attrs, loc=None)      # :813
+    _get_pipeline(pipeline)                 # :824
+    _generate_mlir_type_for_tensor_descriptor(tensor) # :1064
+    _generate_executable_arg_for_tensor_descriptor(...) # :1071
+    _is_tensor_descriptor(...)              # :1080
+    _handle_tensor_descriptor(...)          # :1084
+    _generate_jit_func_args_for_known_types(...) # :1126
+Kernel body generation also has _KernelGenHelper; kernel_launcher :3517 combines function-header/body/return/launch builders supplied by the subclass.
+
+Important precise distinction: DkgDSL does NOT currently define the prototype's m.DialectPlugin + plugins=[...] protocol. That is a useful proposed extraction interface, packaging these existing hooks. Present it as the mlir dsl target design, not a claimed verbatim DKG API. No need to burden every slide with caveats: label a slide/code panel “Extraction interface” and cite real DKG seams in notes.
+
+Recommended extraction-facing example:
+    class MySubDSL(BaseDSL):
+        name = "MY_DSL"
+        plugins = [MyDialectPlugin()]
+This is proposed simplified configuration, not an executable DKG constructor. The HOW annotation is “Map plugin hooks to dialect registration, value adapters, control-flow builders, and lowering.” If showing executable DKG-derived initialization, use a fuller constructor in notes/handout; do not show pass_sm_arch_name="cubin-chip" as a supposedly generic frontend requirement.
+
+Control-flow extensibility is real:
+- base_dsl/ast_helpers.py:122 Executor.set_functions accepts is_dynamic_expression, loop_execute_range_dynamic, if_dynamic, while_dynamic, compare_executor, builtin_redirector and ifexp_dynamic.
+- cutlass_dsl/cutlass.py:5239 installs CuTe's executor functions.
+- cuda_tile_dsl/cuda_tile.py:246 installs CUDA Tile's distinct executors.
+Extraction should make this policy per-DSL rather than module-global installation if the target framework must host several DSLs concurrently. Prototype does use per-instance Executor; that is a legitimate generalization to preserve.
+
+3. COMPILATION/LAUNCH POLICY IS NOT FIXED TO PYTHON -> JIT -> KERNEL
+Default familiar CuTe call story: Python -> @jit host metaprogram -> @kernel launch.
+Shared decorators route to _func / _kernel_helper (base_dsl/dsl.py:769–802).
+Nested @jit calls while a trace is active inline their Python bodies, with PyIR context handling (base_dsl/dsl.py:3213ff). Do not promise automatic separate runtime func.call for every decorated helper.
+
+A direct Python -> @kernel path ALREADY EXISTS in CUDA Tile:
+- CudaTileIR constructor sets device_compilation_only=True (cuda_tile.py:635).
+- Its jit override explicitly says use @CudaTileIR.kernel and call the GPU kernel directly (:706).
+- _kernel_helper (:1009) selects backend and target-specific kernel generator.
+- _backends.py:78 _make_kernel_generator uses inherited kernel_launcher and a target helper.
+- _backends.py:147 launch_gpu chooses grid=num_tiles, block=(1,1,1), and calls base _execute_by_cuda_driver.
+- base_dsl/dsl.py:3331 _execute_cuda loads cubin, gets function, resolves stream, launches, optionally synchronizes; :3371 _execute_by_cuda_driver generates IR, compiles cubin, executes.
+Thus “a direct launcher remains to implement” undersells DKG. Correct framing: “Extract the existing device-only path; a sub-DSL chooses its runtime adapter.” If showing modern CUDA Python ObjectCode APIs as a cleaned adapter, label that particular code as the proposed replacement for current runtime helpers, not the existence of direct launch itself.
+
+Target coupling to move OUT of the neutral BaseDSL:
+- CUDA helper imports and _execute_cuda (rather than deleting its functionality).
+- SM-specific option name `pass_sm_arch_name` -> generic target/pipeline option object.
+- gpu_module naming and func/gpu/CUDA-specific builder choices -> module/entry builder hooks.
+- default GPU adapter scopes -> explicit sub-DSL choice.
+- CUDA-specific compile options/backends and binary formats -> target plugin/provider.
+- CuTe naming and environment enum logic -> downstream policy.
+Retain common scheduling of trace -> hash/cache -> compile -> artifact -> execute.
+
+4. NUMERIC REPRESENTATION / ARITHMETIC
+Current DKG source:
+- base_dsl/typing.py:400 NumericMeta; :430 __new__ carries width, NumPy dtype name, MLIR type factory; injects DynamicExpression extract/rebuild methods at :441–452.
+- :601 IntegerMeta adds signedness/ctypes marshalling; :732 FloatMeta adds float metadata.
+- :1155 Numeric and :1185 constructor: `value` holds Python scalar / MLIR Value / Numeric depending on stage.
+- :1049 _binary_op: promote operands, choose result dtype, then `operator.add(lhs.value, rhs.value)` etc. Known payloads execute in Python; dynamic payloads dispatch through ArithValue's Python operators.
+- DkgDSL/_mlir_helpers/arith.py:571 ArithValue(ir.Value), :659 __add__ emits arith.addf vs arith.addi.
+- NumericMeta gets dtype classes and Python scalar conversion; DKG supports many low-precision types, not just Int32/Float32.
+
+Important correction to v6 slide14:
+DKG Numeric is NOT the prototype's immutable `__slots__=("value",)` class. It has additional metadata/PyIR holder state and __dict__ access. Show conceptual `Numeric(value, dtype)` or the actual `self.value = value` excerpt; never label prototype's exact slots implementation as DKG extraction evidence.
+
+Good simple teaching code (implementation outline, no PyIR detail):
+    class Numeric:
+        def __init__(self, value):
+            self.value = value
+
+    # Host-known: Int32(3)
+    # Staged:     Int32(%arg0 : i32)
+
+    # After promotion:
+    result = operator.add(lhs.value, rhs.value)
+    # Python scalars -> Python result
+    # ArithValue    -> arith.addi / arith.addf
+
+Inference remains local: definition-site DSL annotations, wrapped IR types, operand promotion, result wrapping. Scalar i32/f32 types are builtin MLIR types; arith supplies the operations. Use that technically accurate phrasing.
+
+Replacing arithmetic policy:
+DKG has a clean conceptual separation Numeric/promotion -> ArithValue/emission, but there is NOT already a declarative arithmetic plugin parameter to NumericMeta. IntegerMeta/FloatMeta docstrings mention arith fields, yet actual constructors have no `arith=` parameter. Do not invent it as existing.
+For extraction, two grounded choices:
+1. Downstream wrapper Tensor/Tile overloads Python operators to emit its own dialect. Already demonstrated by CUDA Tile binding value wrappers.
+2. Expose an arithmetic-emitter policy at the Numeric -> ArithValue boundary. This is target design/refactoring work; name it as such. It directly addresses requested “plug your arithmetic” slide without treating prototype limitation as the goal.
+Suggested slide diagram: Python `x + y` -> promotion policy -> [default arith emitter | yourdialect emitter]. Notes: default implementation extracted from DKG ArithValue; alternate emitter is the new extension hook.
+
+5. TYPE EXTENSION IS AN EXISTING PROTOCOL, NOT ONLY PROTOTYPE register_leaf
+base_dsl/typing.py:77 DynamicExpression protocol:
+    __extract_mlir_values__(self) -> list[ir.Value]
+    __new_from_mlir_values__(self, values) -> object
+Purpose: user-defined objects cross JIT helper calls, returns and staged control-flow regions.
+base_dsl/typing.py:148 JitArgument protocol adds:
+    __c_pointers__(self) -> list[ctypes.c_void_p]
+    __get_mlir_types__(self) -> list[ir.Type]
+    __new_from_mlir_values__(self, values) -> object
+Purpose: host argument ABI plus reconstruction from function block args.
+runtime/jit_arg_adapters.py provides scoped host-object adaptation.
+
+Small DKG-grounded downstream type snippet:
+    class Tensor:
+        def __init__(self, value):
+            self.value = value
+        def __extract_mlir_values__(self):
+            return [self.value]
+        def __new_from_mlir_values__(self, values):
+            return Tensor(values[0])
+        def __add__(self, rhs):
+            return Tensor(mydialect.add(self.value, rhs.value))
+The mydialect op spelling is illustrative. The extract/rebuild methods are exact existing protocol. Host tensor import additionally needs JitArgument/adapter, not just this SSA protocol.
+Extraction may expose the prototype's register_leaf callbacks as an alternate registration convenience, but explain equivalence to existing DKG protocols. Do not imply custom types are a hypothetical future capability.
+
+6. EXISTING ARRAY / COMPILE CAPABILITIES THAT V6 UNDERSOLD
+- DkgDSL/base_dsl/array.py:3247 Array exists; :3543 extract MLIR values, :3549 reconstruct, :4052 ir_value. Its implementation uses LLVM pointer/struct/load/store machinery. DLPack/tensor descriptors and array adapters are real existing DKG components. Another agent owns detailed ABI audit; remove current prototype-only “no Array / generic DLPack is extension” headline.
+- DkgDSL/base_dsl/compiler.py:2404 CompileCallable; :2464 __getitem__ implements compile[options]; :2471 __call__; :2490 to_precompiled_mlir; :2496 compile_to handles concrete artifact stages. The extraction can preserve this shape as m.compile[flags](func, representative_args...). V6's “m.compile[flags] is not API” should be removed.
+- base_dsl/compile_backend.py:75 CompilerBackend orchestrates compile/cache; :98 _resolve_compile_cache loads disk and populates in-memory cache. Current DKG has compiler-backend selection, not only raw ExecutionEngine.
+- base_dsl/export contains standalone export/header/binary modules. Do not state the design is only a process-local callable. AOT API cleanup/extraction should preserve useful artifact outputs while moving CUDA/CuTe artifact enums into backend policy.
+
+7. PROPOSED FILE MAP FOR THE EXTRACTION
+DKG source                                       -> mlir dsl target module
+base_dsl/dsl.py (generic orchestration)            -> mlir/dsl/core/dsl.py
+base_dsl/env_manager.py (generic descriptors)      -> mlir/dsl/core/env_manager.py
+base_dsl/common.py, diagnostics.py                -> mlir/dsl/core/common.py, diagnostics.py
+base_dsl/typing.py (numeric + value protocols)     -> mlir/dsl/types/typing.py
+base_dsl/array.py, pointer.py, vector.py, native_struct.py -> mlir/dsl/types/{array,pointer,vector,struct}.py (or consolidated types package)
+_mlir_helpers/{arith,math,op}.py                   -> mlir/dsl/_mlir_helpers/* plus emitter policy hooks
+base_dsl/ast_preprocessor.py, ast_helpers.py       -> mlir/dsl/frontend/*
+base_dsl/utils/tree_utils.py, mlir_value_tree.py   -> mlir/dsl/util/*
+base_dsl/compiler.py, compile_backend.py          -> mlir/dsl/compiler/*
+base_dsl/cache_helpers.py, jit_executor.py         -> mlir/dsl/compiler/*
+base_dsl/runtime/jit_arg_adapters.py, tensor_descriptor.py, dlpack_types.py -> mlir/dsl/runtime/*
+base_dsl/export/*                                -> mlir/dsl/compiler/export/* (backend-neutral contracts)
+cutlass_dsl/cutlass.py + cutlass_ast_decorators.py  -> downstream CuTe plugin/policies; default scf emitters extracted separately
+cuda_tile_dsl/*                                  -> downstream Tile IR plugin/policies
+base_dsl/runtime/cuda.py, stream/device helpers   -> CUDA runtime plugin
+base_dsl/pyir_* / multi_stage_manager.py           -> Amir’s advanced mutation layer; not this 30-minute extraction walkthrough
+
+This map is an architecture proposal, not a statement these modules have already been upstreamed. Keep a provenance note: “Extraction design based on DkgDSL; tutorial examples use the mlir dsl namespace.” Distinguish source evidence from prototype execution in notes/verification manifests, not by scattering discouraging missing-feature footnotes across the talk.
+
+8. SPECIFIC V6 DECK FINDINGS
+Slide10: show proposed extraction interface, cite DKG BaseDSL and both real subclasses. Do not lead with prototype's required cubin-chip argument.
+Slide11: services correct; use DKG refs. Pipeline composition into plugin list is target design; existing DKG subclasses own _get_pipeline.
+Slide12: declarative plugin protocol is extraction packaging of real seams. Change label/notes accordingly.
+Slide13: show both Python->jit->kernel and Python->kernel choices; direct Tile launch already exists. Preserve nested helper trace-time behavior.
+Slide14: remove exact __slots__ claim from DKG explanation; show Numeric -> ArithValue -> arith.
+Slide15: local type inference story remains good, cite DKG typing.py.
+Slide16: avoid saying arithmetic plugin cannot exist because prototype lacks one. Present the explicit extraction hook at emitter boundary; acknowledge in notes it is refactoring.
+Slide17: show DKG DynamicExpression/JitArgument protocol or explain target register_leaf as protocol packaging.
+Slide21: replace prototype-only limitations with actual DKG Array + tensor descriptor/DLPack path and target m.Array naming.
+Slide22: restore compile[options] API + compile_to/artifacts as appropriate; current prototype syntax is not the intended tutorial contract.
+Slide24: cache mechanism source DKG compile_backend.py/cache_helpers.py; actual current CUDA Tile subclass sets no_cache=True, so do not claim that particular subclass already reuses binary cache.
+Slides33–37: make Tile showcase an extraction of existing CudaTileIR, not a hypothetical adapter newly invented because m.kernel cannot direct launch. Distinguish proposed cleaned CUDA Python API from current demonstrated CUDA-driver route. Existing Tile caching is explicitly absent (cuda_tile.py:645–646), so cache reuse remains extension design.
+
+VERIFICATION LIMITS
+Read-only source audit; no DKG execution attempted. Existing prototype smoke logs remain valid measurements of that prototype, but should be labeled accordingly and must not be used to set the extraction design's capability ceiling. No proprietary source implementation copied into the publishing clone. Slide snippets above are minimal interface/architecture explanations grounded in named local sources.

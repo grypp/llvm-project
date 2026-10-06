@@ -1,0 +1,264 @@
+Existing DKG CUDA Tile backend — source audit, 2026-10-05
+
+Correction to the earlier showcase recommendation
+The backend exists in DkgDSL. It is not present in the extracted mlir dsl
+checkout, but that does not make the backend a future design. Reframe the
+closing five slides as an existing sub-DSL that demonstrates what the shared
+core supplies and what a target overrides. Describe relocation/adaptation to
+mlir dsl as the extraction work. Do not mark the whole target “proposed”.
+
+Repository instructions
+Read /home/gozen/work/dkg4/AGENTS.md and the pyir-agent-workflow SKILL.md.
+No component AGENTS.md was found under DkgDSL. The skill-mentioned
+agent-rules/python.md and DkgDSL/CLAUDE.md are absent in this checkout.
+Read relevant DkgDSL/README.md sections. No production files modified.
+
+High-confidence findings with source references
+
+1. Existing concrete subclass:
+   DkgDSL/cuda_tile_dsl/cuda_tile.py:622 CudaTileIR(BaseDSL).
+   :627 selects CudaTileIREnvironmentManager.
+   :629–637 initializes name CUDA_TILE_DSL, package tile_ir,
+   compiler.Compiler(passmanager, execution_engine), target option
+   compute-capability, device_compilation_only=True, preprocess=True.
+   :599–619 environment subclass adds backend, line info, debug and preview.
+   :658–670 target mangling filters runtime IRValue/IRVariadic arguments,
+   then delegates to BaseDSL.mangle_name.
+
+2. Real import namespace and decorator:
+   DkgDSL/cuda_tile_dsl/__init__.py:19 imports Tile IR dialect operations.
+   :22 imports CudaTileIR, Backend, TensorView.
+   :25 re-exports shared type annotations.
+   :43 kernel = _dsl.kernel.
+   :53–62 exports range_dynamic, range_constexpr, const_expr and related
+   shared AST helpers.
+   Existing tests use `import tile_ir.cuda_tile_dsl as cuda_tile`.
+   This is the DKG namespace. Do not silently claim that
+   `import mlir.dsl.cuda_tile` exists or that its future package name is fixed.
+   Keep the extracted project's prose name “mlir dsl”.
+
+3. Real direct-kernel path:
+   DkgDSL/base_dsl/dsl.py:784 BaseDSL.kernel delegates jit_runner to
+   _kernel_helper, a target override (:799).
+   DkgDSL/cuda_tile_dsl/cuda_tile.py:1009 implements that override.
+   :706–709 rejects @jit and explicitly directs users to call @kernel
+   directly. Calling convention is target policy, not fixed by staging.
+   _backends.py:149–190 reads num_tiles, fixes block_size=(1,1,1), passes
+   stream and smem_size=0, and uses the shared _execute_by_cuda_driver
+   path unless programmatic dependent launch needs the target wrapper.
+   Direct-call argument is `num_tiles=`, not `grid=`.
+
+4. Target entry ops:
+   cuda_tile.py:689–695 _build_gpu_module creates cuda_tile.ModuleOp.
+   :1079–1108 kernel helper creates cuda_tile.entry with its function type
+   and target hints.
+   :1110–1115 terminates with cuda_tile.ret([]).
+   :1117–1120 appends typed entry block arguments.
+   This is what the target replaces; do not claim it emits gpu.func.
+
+5. Implemented custom native loop callback:
+   cuda_tile.py:245–252 installs the shared executor's callback table.
+   cuda_tile_ast_decorators.py:16–57 maps the dynamic loop callback to
+   cuda_tile.for_loop; its body invokes the captured region and emits
+   cuda_tile.loop_continue with updated carried values.
+   `write_args` become `init_values` for the Tile IR loop.
+   :60–68 native dynamic if callback is NOT IMPLEMENTED.
+   :71–78 native dynamic while callback is NOT IMPLEMENTED.
+   The dialect itself has if/loop; explicit builder APIs exist, e.g.
+   tile_ir/python/cuda_tile/dialects/cuda_tile_ops.py:5061 if_generate.
+   Its existence is not proof of native Python if capture implementation.
+   Show for as the completed native syntax example; notes can distinguish
+   explicit conditional builders from the unimplemented native callbacks.
+
+6. Type and runtime boundary:
+   cuda_tile.py:857–940 generates signature types and CUDA ABI storage.
+   Runtime scalar annotation is IRValue[Int32], not bare Int32.
+   Runtime values become rank-0 tiles; IRConst/Constexpr are omitted from
+   runtime ABI. Pointer/TensorView receive TensorDescriptor-compatible
+   values; the kernel pointer type is tile<ptr<element>>.
+   :809–827 describes the rank-0 pointer boundary.
+   tile_ir/python/cuda_tile/dialects/cuda_tile_ops.py:1125 Tile extends
+   ir.Value and overloads arithmetic (:1174 __add__, :1208 __mul__).
+   :6292 constant returns a Tile and emits cuda_tile.constant.
+   Thus use tile.constant(0) to create a staged Tile accumulator.
+   Bare tile.Int32(0) is not the appropriate target-value example.
+   :4506 store_ptr_tko is the actual store API, not tile.store.
+
+7. Compiler and CUDA driver paths are implemented:
+   _backends.py:45–69 _save_compiler_input uses writeBytecode for Tile IR
+   bytecode or textual get_asm for the alternate tool path.
+   :111–146 offline path invokes dsl._tileiras_compile_cubin, or the
+   alternate GPU tile compiler.
+   _compiler_tools.py:130 compile_with_tileiras uses --gpu-name (:156),
+   arch, compiler flags, debug/line information.
+   _backends.py:247–296 driver JIT path serializes bytecode, loads it with
+   CUDA driver library APIs, obtains the kernel/function, launches it,
+   and unloads the library.
+   BaseDSL's shared offline driver orchestration is
+   DkgDSL/base_dsl/dsl.py:3371–3398 _execute_by_cuda_driver.
+   CUDA Python helpers live in DkgDSL/base_dsl/runtime/cuda.py:
+   :561 load_cubin_module; :589 load_cubin_module_data;
+   :608 get_kernel_function; :741 launch_kernel -> cuLaunchKernel.
+   No host MLIR ExecutionEngine wrapper is required for that launch path.
+
+8. Do not promise cache reuse for this particular backend:
+   cuda_tile.py:646–647 explicitly says the current target lacks a cache
+   and sets self.no_cache=True. BaseDSL has cache infrastructure, but
+   the Tile IR subclass currently opts out. Mention this in notes when
+   presenting “shared services”; do not show a cached cubin as observed.
+
+9. The existing source is packaged with the shared components:
+   tile_ir/compiler/python/CMakeLists.txt:38–44 includes
+   DkgDSL/cuda_tile_dsl, base_dsl and _mlir_helpers.
+   This is direct evidence that the target has already been composed
+   from the common frontend/runtime machinery.
+
+Five-slide replacement proposal
+
+33 — Tile IR: an existing BaseDSL target
+Subtitle: “Reuse the frontend; specialize the target.”
+Code label: “Existing DKG backend · abridged”
+
+    class CudaTileIR(BaseDSL):
+        _env_class = CudaTileIREnvironmentManager
+
+        def __init__(self):
+            super().__init__(
+                name="CUDA_TILE_DSL",
+                dsl_package_name=["tile_ir"],
+                compiler_provider=compiler.Compiler(
+                    passmanager, execution_engine),
+                pass_sm_arch_name="compute-capability",
+                device_compilation_only=True,
+                preprocess=True)
+
+Side points: Shared: AST capture, staging, diagnostics, environment,
+name mangling, argument machinery. Target: Tile values, entry ops,
+compiler/serialization, CUDA launch policy.
+Takeaway: “Extract the common machinery; keep target choices downstream.”
+Notes: initializer excerpt deliberately omits tool discovery and no_cache;
+state source's caching opt-out in notes. Replacing BaseDSL import with
+mlir.dsl is the extraction boundary, not a backend invented from scratch.
+
+34 — The target supplies the region builder
+Code label: “Existing Tile IR loop callback · simplified names”
+
+    def build_loop():
+        def body(iv, *carried):
+            updated = captured_body(iv, *carried)
+            tile.loop_continue(tuple(updated))
+
+        return tile.for_loop(
+            body, lower_bound=start,
+            upper_bound=stop, step=step,
+            init_values=list(write_args))
+
+Side points: BaseDSL captures structure and carried values; target builds
+cuda_tile.for / cuda_tile.continue instead of scf.for / scf.yield.
+Takeaway: “Same capture protocol, different region operations.”
+Notes: source callback's zero-carry case explicitly passes (); abbreviated
+snippet is the nonempty-carry case used here. Native dynamic if/while are
+still unimplemented in this target, although explicit dialect builders
+exist. No need to put an extensive limitation list on screen.
+
+35 — One Python kernel, a Tile IR loop
+Code label: “Existing DKG API · source-grounded example”
+
+    import tile_ir.cuda_tile_dsl as tile
+
+    @tile.kernel
+    def sum_upto(n: tile.IRValue[tile.Int32]):
+        acc = tile.constant(0)
+        for i in tile.range_dynamic(n):
+            acc += i
+        tile.print_tko("sum=%i\n", [acc])
+
+Right IR excerpt (same proven syntax as existing FileCheck test):
+
+    %sum = for %i in (%zero to %n,
+                     step %one) : tile<i32>
+        iter_values(%acc = %zero)
+        -> (tile<i32>) {
+      %next = addi %acc, %i : tile<i32>
+      continue %next : tile<i32>
+    }
+
+Takeaway: “Python runs the generator; Tile IR carries the runtime value.”
+Notes: Existing tests are test_for_01.py (native range and carried values)
+and opt_hints.py (range_dynamic). Explicit range_dynamic is the source API
+closest to tutorial's namespace-capture principle. This adapted example
+has not been executed in this audit; label output on slide37 “expected”.
+
+36 — Compile through the target's toolchain
+Visual: trace -> cuda_tile.module -> Tile IR bytecode -> tileiras -> cubin.
+Secondary branch: bytecode -> CUDA driver JIT.
+Code label: “Existing backend flow · abridged”
+
+    # Offline path
+    writeBytecode(output, module.operation)
+    cubin = self._tileiras_compile_cubin(path)
+
+    # Driver JIT path
+    library = cuda_helpers.load_library_from_file(path)
+    kernel = cuda_helpers.get_library_kernel(library, name)
+
+Side points: Public Tile IR bytecode/toolchain is the target boundary;
+line info and compile options flow through target configuration.
+Takeaway: “Generation is shared; serialization and codegen are target policy.”
+Notes: The two branches have separate setup/lifetime, so the excerpt is
+two alternatives, not sequential operations. The public CLI remains valid
+as a reader-friendly explanation, but it is not how this Python backend
+serializes: it calls writeBytecode directly.
+
+37 — Direct @kernel calls are a target choice
+Visible user code:
+
+    sum_upto(10, num_tiles=[1, 1, 1])
+    # Expected: sum=45
+
+    sum_upto(10, num_tiles=[1, 1, 1],
+             backend=tile.Backend.GPU_DRIVER_JIT)
+
+Small implementation diagram:
+  Python call -> shared jit_runner -> CudaTileIR._kernel_helper
+              -> compile target -> CUDA driver launch
+
+Alternative code excerpt showing the existing helpers:
+
+    module = cuda_helpers.load_cubin_module(cubin)
+    kernel = cuda_helpers.get_kernel_function(module, name)
+    cuda_helpers.launch_kernel(
+        kernel, num_tiles, (1, 1, 1), stream,
+        smem_size=0, kernel_args=packed_args)
+
+Takeaway: “A common frontend supports different calling conventions.”
+Notes: This existing target deprecates @jit and launches @kernel directly.
+Default explicit source values: num_tiles defines grid, block=(1,1,1),
+smem=0. Caller-supplied streams preserve async behavior; default stream
+path synchronizes. Do not show ObjectCode.from_cubin as literal existing
+implementation: that is a public CUDA Python alternative/simplification,
+whereas this code uses the lower-level CUDA Python driver bindings.
+
+Source tests establishing APIs (read only; not rerun)
+- tile_ir/compiler/test/python/Integration/CudaTile/test_for_01.py:12–17,
+  :110–128: IRValue[Int32], staged constant, captured loop, iter_values.
+- tile_ir/compiler/test/python/Integration/CudaTile/test_hello_world.py:
+  :13–24 decorator/print/runtime annotation; :36–45 direct num_tiles calls.
+- tile_ir/compiler/test/python/dsl/opt_hints.py:127 range_dynamic.
+- tile_ir/compiler/test/python/Integration/CudaTile/test_if.py:
+  explicit if_generate callbacks; does not prove native if capture.
+- tile_ir/compiler/test/python/dsl/dlpack.py:10–25 framework tensor/view
+  passed straight to the target kernel.
+
+Public corroborating sources
+https://github.com/NVIDIA/cuda-tile
+https://docs.nvidia.com/cuda/tile-ir/13.1/sections/operations.html
+https://developer.nvidia.com/cuda/tile
+Public documentation confirms the dialect, for/if/loop ops, bytecode,
+tileiras and CUDA launch boundary. It does not document the private DKG
+package's exact Python API, which is established by the local source above.
+
+Verification scope
+Used rg, sed and numbered source reads only. No package import, installation,
+build, GPU execution or production-code changes were performed. The backend
+has CUDA context creation on import; a slide/content audit needs no import.

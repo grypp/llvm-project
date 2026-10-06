@@ -1,0 +1,145 @@
+Slide 15 type-conversion audit — 2026-10-05
+
+Scope: read-only audit of the current llvm-project working tree. This is
+evidence for the presentation, not a new implementation test. No source code
+was changed. DkgDSL behavior was source-reviewed; execution below exercised
+the extracted mlir.dsl package. No GPU execution was involved.
+
+Command executed successfully (exit 0):
+
+env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core /usr/bin/python3.12 - <<'PY'
+from mlir import ir
+from mlir.dialects import func
+import mlir.dsl as m
+print('SOURCE',m.__file__)
+with ir.Context(), ir.Location.unknown():
+    mod=ir.Module.create()
+    with ir.InsertionPoint(mod.body):
+        fn=func.FuncOp('types_demo',([ir.IntegerType.get_signless(32), ir.IntegerType.get_signless(64), ir.F32Type.get()],[]))
+        block=fn.add_entry_block()
+        with ir.InsertionPoint(block):
+            x=m.Int32(block.arguments[0]); y=m.Int64(block.arguments[1]); f=m.Float32(block.arguments[2])
+            seven=m.Int32(7)
+            print('LITERAL_PAYLOAD',type(seven.value).__name__)
+            seven.ir_value()
+            promoted=x+y
+            print('PROMOTED_DTYPE',promoted.dtype.__name__)
+            x.to(m.Int64)
+            y.to(m.Int32)
+            f.to(m.Int32)
+            x.to(m.Float32)
+            for label, op in [('staged_to_python',lambda:int(x)), ('different_fp8',lambda:m.Float8E5M2(1.0)+m.Float8E4M3FN(2.0)), ('nonnumeric',lambda:m.Int32('7'))]:
+                try:op()
+                except Exception as e:print('EXPECTED_ERROR',label,type(e).__name__,str(e))
+            func.ReturnOp([])
+    print(mod)
+    print('VERIFY',mod.operation.verify())
+print('PYTHON_DEFAULTS',[(repr(v),m.as_numeric(v).dtype.__name__) for v in (True,7,2**40,1.5)])
+print('MIXED_SIGN', (m.Int32(1)+m.Uint32(2)).dtype.__name__)
+PY
+
+Selected actual output (diagnostic ANSI formatting omitted):
+
+SOURCE /home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core/mlir/dsl/__init__.py
+LITERAL_PAYLOAD int
+PROMOTED_DTYPE Int64
+EXPECTED_ERROR staged_to_python DSLUserCodeError
+error[PHASE_DYNAMIC_INDEX]: Cannot use a runtime value as a list index or for loop range in plain Python code; only a Python `int` works there.
+EXPECTED_ERROR different_fp8 DSLUserCodeError
+error[TYPE_IMPLICIT_PROMOTION_UNSUPPORTED]: `Float8E5M2` and `Float8E4M3FN` cannot be combined by `add` without an explicit conversion: the DSL does not pick a common type for them.
+EXPECTED_ERROR nonnumeric DSLUserCodeError
+error[ARG_NOT_NUMERIC]: Argument `Int32(...)` expects a numeric value, but this call passes a value of type `str`.
+module {
+  func.func @types_demo(%arg0: i32, %arg1: i64, %arg2: f32) {
+    %c7_i32 = arith.constant 7 : i32
+    %0 = arith.extsi %arg0 : i32 to i64
+    %1 = arith.addi %0, %arg1 : i64
+    %2 = arith.extsi %arg0 : i32 to i64
+    %3 = arith.trunci %arg1 : i64 to i32
+    %4 = arith.fptosi %arg2 : f32 to i32
+    %5 = arith.sitofp %arg0 : i32 to f32
+    return
+  }
+}
+VERIFY True
+PYTHON_DEFAULTS [('True', 'Boolean'), ('7', 'Int32'), ('1099511627776', 'Int64'), ('1.5', 'Float32')]
+MIXED_SIGN Uint32
+
+Follow-up command executed successfully (exit 0); this checks the precise
+error spelling used by slide 15, x.to(int), rather than Python int(x):
+
+env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core /usr/bin/python3.12 - <<'PY'
+from mlir import ir
+from mlir.dialects import func
+import mlir.dsl as m
+for a,b in [(m.Int32(1),m.Float32(2)),(m.Int64(1),m.Float32(2)),(m.Float16(1),m.Float32(2)),(m.Boolean(True),m.Boolean(False)),(m.Float16(1),m.BFloat16(2))]:
+ print(type(a).__name__, '+',type(b).__name__,'->',type(a+b).__name__)
+with ir.Context(),ir.Location.unknown():
+ mod=ir.Module.create()
+ with ir.InsertionPoint(mod.body):
+  f=func.FuncOp('f',([ir.IntegerType.get_signless(32)],[]))
+  block=f.add_entry_block()
+  with ir.InsertionPoint(block):
+   x=m.Int32(block.arguments[0])
+   try:x.to(int)
+   except Exception as e: print(type(e).__name__,str(e))
+PY
+
+Selected actual output:
+
+Int32 + Float32 -> Float32
+Int64 + Float32 -> Float64
+Float16 + Float32 -> Float32
+Boolean + Boolean -> Boolean
+Float16 + BFloat16 -> Float16
+DSLUserCodeError
+error[PHASE_REQUIRES_CONSTANT]: `int(Int32)` requires a value known at compile time, but it received a runtime value.
+
+Presentation rules supported by this evidence:
+
+- m.Int32(7) initially carries a Python payload; capture/IR consumption emits
+  arith.constant. The constructor does not eagerly emit the constant.
+- A staged Int32 + Int64 promotes to Int64 via arith.extsi and arith.addi.
+- x.to(m.Int64) and m.Int64(x) both use the numeric conversion mechanism.
+- Staged Int64 -> Int32 narrows via arith.trunci; no runtime range check is
+  implied. Source review shows out-of-range Python literal casts can warn.
+- Int32 -> Float32 emits arith.sitofp; Float32 -> Int32 emits arith.fptosi.
+- Mixed signedness is supported and is not a suitable error example.
+- Different unsupported FP8 formats require an explicit common dtype.
+- x.to(int) rejects runtime SSA values with PHASE_REQUIRES_CONSTANT.
+- Scalar promotion rules are not a blanket promise for vectors/custom leaves.
+
+Source references (working-tree line numbers at audit time):
+
+/home/gozen/work/llvm-project/mlir/python/mlir/dsl/types/typing.py
+  493: scalar promotion entry point
+  617: signedness and width promotion
+  780: Numeric Python/SSA payload representation
+  829: Numeric.to, including the staging-boundary diagnostic
+  1096: literal inference
+  1399: integer constructors, narrowing and literal warnings
+  1666: floating-point constructors
+  1840: concrete scalar type families
+  2228: Pointer annotation metadata
+  2407: Pointer values
+  3278: immutable LLVM structs
+
+/home/gozen/work/llvm-project/mlir/python/mlir/dsl/_mlir_helpers/arith.py
+  128: floating-point width conversion
+  162: float-to-integer conversion
+  177: integer-to-float conversion
+  196: integer width/signedness conversion
+
+/home/gozen/work/llvm-project/mlir/python/mlir/dsl/types/vector.py
+  46: vector scalar coercion; no automatic mixed-lane common dtype
+
+/home/gozen/work/dkg4/DkgDSL/base_dsl/typing.py
+  849: source implementation promotion rules
+  1155: Numeric
+  1301: conversion API
+
+Limitations: module verification confirms these emitted operations are valid
+MLIR; it is not execution of each numeric conversion on machine code. No
+claim is made that all low-precision dtypes are host-ABI-marshallable or that
+all casts are lossless. The publishing clone's DSL source snapshot can differ
+from the working tree used by the commands above.

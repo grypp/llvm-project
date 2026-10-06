@@ -1,0 +1,26 @@
+loaded mlir.dsl.mlir_dsl: False
+loaded mlir.dsl.dialect_plugins: False
+loaded mlir.dsl.dialect_plugins.gpu: False
+loaded mlir.dialects.gpu: False
+loaded mlir.dialects.nvvm: False
+
+//===--- ------ Generated IR ------ ---====
+
+module {
+  llvm.func @scale_store(%arg0: i32, %arg1: !llvm.ptr) -> i32 {
+    %0 = arith.sitofp %arg0 : i32 to f32
+    %1 = llvm.getelementptr %arg1[0] : (!llvm.ptr) -> !llvm.ptr, f32
+    llvm.store %0, %1 {alignment = 4 : i64} : f32, !llvm.ptr
+    %c2_i32 = arith.constant 2 : i32
+    %2 = arith.muli %arg0, %c2_i32 : i32
+    %c1_i32 = arith.constant 1 : i32
+    %3 = arith.addi %2, %c1_i32 : i32
+    llvm.return %3 : i32
+  }
+}
+
+//===--- --- End of Generated IR -- ---====
+
+RESULT: ?
+pipeline: builtin.module(convert-scf-to-cf,convert-cf-to-llvm,convert-vector-to-llvm,convert-arith-to-llvm,convert-math-to-llvm,reconcile-unrealized-casts)
+gpu bindings loaded: False

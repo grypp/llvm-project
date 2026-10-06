@@ -1,0 +1,19 @@
+
+//===--- ------ Generated IR ------ ---====
+
+module {
+  llvm.func @cumsum(%arg0: i32) -> i32 {
+    %c0_i32 = arith.constant 0 : i32
+    %c0_i32_0 = arith.constant 0 : i32
+    %c1_i32 = arith.constant 1 : i32
+    %0 = scf.for %arg1 = %c0_i32_0 to %arg0 step %c1_i32 iter_args(%arg2 = %c0_i32) -> (i32)  : i32 {
+      %1 = arith.addi %arg2, %arg1 : i32
+      scf.yield %1 : i32
+    }
+    llvm.return %0 : i32
+  }
+}
+
+//===--- --- End of Generated IR -- ---====
+
+RESULT: ? Int32

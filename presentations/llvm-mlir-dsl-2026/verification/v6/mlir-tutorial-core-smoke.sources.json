@@ -1,0 +1,173 @@
+{
+  "source_root": "/home/gozen/work/llvm-project",
+  "git_head": "4ce5233989602bd84e07aa26a89f5491e6515340",
+  "note": "Fingerprint includes current working-tree Python source, which is newer than publishing clone. No production edits made by this audit.",
+  "python": "/usr/bin/python3.12",
+  "PYTHONPATH": "/home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core",
+  "files": [
+    {
+      "path": "/tmp/mlir-tutorial-core-smoke.py",
+      "sha256": "5fb5828e61a9c906a2f94b2440708b566fee51e1ee4cb7959f7b78afcbcc743f"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/__init__.py",
+      "sha256": "478e1684057d2f4b01b292ce40be6be67ef2bd993a821594220fa639dbd3bf4a"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/_mlir_helpers/__init__.py",
+      "sha256": "f206c6f45ecadce4538d320ae4b04bd7e2efb8e209c49dfa560c1da297c83d6d"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/_mlir_helpers/arith.py",
+      "sha256": "0052205dc1cde1da1994d750f4c2b9b23f52a496e33e74722d3c0393dfa656ed"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/_mlir_helpers/math.py",
+      "sha256": "260344629a513167cb404d2db260bf40f7eb66e480738b77cfb918c0a0dd9fe9"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/_mlir_helpers/op.py",
+      "sha256": "5cc7ae952f282bc06233f2530e4936c8f44ee7aaa5b78a52142929e00ec14bf9"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/compiler/__init__.py",
+      "sha256": "f206c6f45ecadce4538d320ae4b04bd7e2efb8e209c49dfa560c1da297c83d6d"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/compiler/cache_helpers.py",
+      "sha256": "abc5b3f200024b5521d6fa3f8cd5694a656685b62120ab74c7a797c5575d93a7"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/compiler/compiler.py",
+      "sha256": "f433d67ac8a432ee9cba657788fed5329bd334aeaf87a2044d91c899578fa50c"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/compiler/jit_executor.py",
+      "sha256": "22fd20124c63228385f2037a7bbc9b74cdab4b57a23b65ade2f64d2922f7799f"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/core/__init__.py",
+      "sha256": "f206c6f45ecadce4538d320ae4b04bd7e2efb8e209c49dfa560c1da297c83d6d"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/core/common.py",
+      "sha256": "b50e53ba7014bbaae7c41400e784421f97ad469cb6ab53b036accec0740da78e"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/core/diagnostics.py",
+      "sha256": "73e83e3628829add16b30f8b1e7eed395e852e6882736fdac803dca81292aec5"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/core/dsl.py",
+      "sha256": "6909a8787760e38785bbe13677afa6e08366b08aeeffebb98a211cd8c08488dd"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/core/env_manager.py",
+      "sha256": "459046109c514110152f6134271249beffe50d3fd3423c720207fbce8165c168"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/core/plugin.py",
+      "sha256": "73e35a7d755cc61d2889f0810d12960b460855c73315d09e5430ee09f0a1fc61"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/dialect_plugins/__init__.py",
+      "sha256": "b09ee2118cc2c904d87057a05e1655ce7fcac98e7d169479da953e7692368d37"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/dialect_plugins/gpu.py",
+      "sha256": "dbf4429423c5c72c5e5b09cf6919537b423b2d0f3d186f3b44570a18457e2ed4"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/dialect_plugins/tvm_ffi.py",
+      "sha256": "1deb7aca9ec0e6295b17c98d8aca90a24be2e26dbaee81fc2dc48ba8f5d4c3cf"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/frontend/__init__.py",
+      "sha256": "f206c6f45ecadce4538d320ae4b04bd7e2efb8e209c49dfa560c1da297c83d6d"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/frontend/ast_helpers.py",
+      "sha256": "95c03e181c1b6f0f3ab5fbe4d69025e082a4fb31cfc5ccb6522eb108d1925212"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/frontend/ast_preprocessor.py",
+      "sha256": "7b975413d0e31fa1bbadd6a942ce63307ef18f8f764d1782284dc5d385b3d81f"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/mlir_dsl/__init__.py",
+      "sha256": "dc1a6f26d15e809bb4061ecd672510b3e904c8dab9ffcee0ff682b5fda104ee2"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/mlir_dsl/mlir_dsl.py",
+      "sha256": "f44ccc67b393a15f023430cdd4e3d379ff4d6f3976975e9286dd645003bdb439"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/mlir_dsl/mlir_dsl_ast_decorators.py",
+      "sha256": "562be1d397d81bc8a54688ff27ea6717666cca7fda2aeedec19932815590e13d"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/runtime/__init__.py",
+      "sha256": "f206c6f45ecadce4538d320ae4b04bd7e2efb8e209c49dfa560c1da297c83d6d"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/runtime/jit_arg_adapters.py",
+      "sha256": "a5531a39223787fa8d1d8bc062a53bfcf3a3edb4b1cd257d3ac6db7e2f73fab5"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/tvm_ffi_builder/__init__.py",
+      "sha256": "122bbd14016c97c51136dbacad920995897248c83b00f69b75f1dffec9dc8949"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/tvm_ffi_builder/call_provider.py",
+      "sha256": "3def4d5f4eea68a89da75baab5fdb4b6f3c58be7ede5bf8c9cfcb8ccbe13a968"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/tvm_ffi_builder/mlir_builder.py",
+      "sha256": "b998fddd9eb5254e1957d0087ccb99097c39338b067b865dada05a4b1507e725"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/tvm_ffi_builder/spec.py",
+      "sha256": "16a10e541ac869e2585ac8b5697ff1cc25722f08a99e69e883f0469c9c0e2d8a"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/tvm_ffi_builder/tvm_ffi_builder.py",
+      "sha256": "ee27ef04e5bb24602c1b66f6e907a2906cf50473f9401342d54d1e1800628059"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/types/__init__.py",
+      "sha256": "f206c6f45ecadce4538d320ae4b04bd7e2efb8e209c49dfa560c1da297c83d6d"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/types/torch.py",
+      "sha256": "5e556d3113ed408accc224bae6cb846f8a7b39b0075adc6879ec3b426b6b2869"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/types/typing.py",
+      "sha256": "a450bbd0d3fb1b61d0c82933bb8aed77d98e154a90eeb3b95e3fa5ed5ae94952"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/types/vector.py",
+      "sha256": "01ed509dc0e409a02d774c04bbba239f2395a22dfc18439306ab3056e80fec60"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/util/__init__.py",
+      "sha256": "f206c6f45ecadce4538d320ae4b04bd7e2efb8e209c49dfa560c1da297c83d6d"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/util/logger.py",
+      "sha256": "27fda18d2c369c53b2be7a934005e430c7a74cb62bf62acff73e1dbd13d60db2"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/util/mlir_value_tree.py",
+      "sha256": "274497d9ddb34b316b6b4ede03942c1ef33536e21909a40428d7ac3e02a0d1ae"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/util/phase_profiler.py",
+      "sha256": "1f174651178298ee7706aef035e130e9be6b6b781fdaa57769e645f203181317"
+    },
+    {
+      "path": "/home/gozen/work/llvm-project/mlir/python/mlir/dsl/util/tree_utils.py",
+      "sha256": "bc069e0965a0b07ac8829fa8e855766f77ef03c8d642d6a9104a9a34ceef9f43"
+    }
+  ]
+}

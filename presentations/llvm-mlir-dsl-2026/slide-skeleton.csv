@@ -1,0 +1,48 @@
+slide,start,end,duration,speaker,section,title,teaching_point
+1,00:00,00:15,00:15,Guray Ozen,Introduction,How to build a Python DSL for MLIR,
+2,00:15,01:15,01:00,Guray Ozen,Introduction,Why a Python DSL for MLIR?,
+3,01:15,01:45,00:30,Guray Ozen,Introduction,Design principles,This leads to multi-stage programming.
+4,01:45,02:30,00:45,Guray Ozen,Introduction,What is multi-stage programming?,
+5,02:30,03:15,00:45,Guray Ozen,Introduction,Why multi-stage programming?,
+6,03:15,04:15,01:00,Guray Ozen,Introduction,How to build a Python DSL for MLIR,
+7,04:15,05:00,00:45,Guray Ozen,Introduction,One program. Two binding times.,
+8,05:00,05:15,00:15,Guray Ozen,Introduction,MLIR compilers make different choices,
+9,05:15,05:30,00:15,Guray Ozen,Introduction,What is a plugin?,
+10,05:30,06:15,00:45,Guray Ozen,Introduction,The shared core,
+11,06:15,07:00,00:45,Guray Ozen,Introduction,Plugins complete the DSL,
+12,07:00,07:15,00:15,Guray Ozen,Introduction,Agenda,
+13,07:15,08:00,00:45,Guray Ozen,mlir dsl core,Build your language from BaseDSL,
+14,08:00,08:30,00:30,Guray Ozen,mlir dsl core,Core API ≠ language namespace,
+15,08:30,09:00,00:30,Guray Ozen,mlir dsl core,Three plugin families,
+16,09:00,09:45,00:45,Guray Ozen,mlir dsl core,Extend a dialect—or replace its IR,
+17,09:45,10:45,01:00,Guray Ozen,mlir dsl core,A plugin follows the compilation lifecycle,
+18,10:45,11:45,01:00,Guray Ozen,mlir dsl core,@jit and @kernel,
+19,11:45,12:45,01:00,Guray Ozen,mlir dsl core,Types keep policy; emitters choose IR,Shown: the LLVM emitter
+20,12:45,13:15,00:30,Guray Ozen,mlir dsl core,"One emitter, three value families",Structs need no dialect-specific aggregate type.
+21,13:15,14:00,00:45,Guray Ozen,mlir dsl core,Local type inference,
+22,14:00,14:45,00:45,Guray Ozen,mlir dsl core,Same Python types. Different IR.,
+23,14:45,15:45,01:00,Guray Ozen,mlir dsl core,Install the emitter as a dialect plugin,
+24,15:45,16:45,01:00,Guray Ozen,mlir dsl core,Add mydialect.Tensor,
+25,16:45,17:30,00:45,Guray Ozen,mlir dsl core,Python values specialize the program,"scale, bias: Meta · x: Staged"
+26,17:30,18:30,01:00,Guray Ozen,mlir dsl core,Objects + dictionaries → arithmetic,No runtime dictionary or virtual dispatch.
+27,18:30,19:15,00:45,Guray Ozen,mlir dsl core,A GPU plugin supplies kernel + launch,
+28,19:15,20:00,00:45,Guray Ozen,mlir dsl core,DLPack is a boundary plugin,
+29,20:00,20:45,00:45,Guray Ozen,mlir dsl core,Compile now. Call later.,
+30,20:45,21:30,00:45,Guray Ozen,mlir dsl core,An export plugin wraps both sides,
+31,21:30,22:00,00:30,Guray Ozen,mlir dsl core,Errors + MLIR remarks,MLIR_DSL_DEBUGINFO=1 · MLIR_DSL_REMARKS=.*
+32,22:00,22:30,00:30,Guray Ozen,mlir dsl core,See what the compiler does,
+33,22:30,23:15,00:45,Guray Ozen,mlir dsl core,Cache compilation work,
+34,23:15,24:15,01:00,Guray Ozen,Control flow,"AST capture is a plugin, too",Syntax capture and IR emission are separate choices.
+35,24:15,25:15,01:00,Guray Ozen,Control flow,Assigned name → iter_arg,Flatten → build region → yield → rebuild
+36,25:15,26:15,01:00,Guray Ozen,Control flow,Records flatten into their fields,Frozen record · no aggregate SSA type
+37,26:15,27:15,01:00,Guray Ozen,Control flow,Swap the region callbacks,
+38,27:15,28:00,00:45,Guray Ozen,Control flow,Or build regions explicitly,
+39,28:00,29:00,01:00,Guray Ozen,Worked examples,Python → MLIR → 45,
+40,29:00,29:45,00:45,Guray Ozen,Worked examples,Fuse a Python recipe,Staged array loop · Meta recipe loop
+41,29:45,30:00,00:15,Guray Ozen,Mutation handoff,Richer mutation,Amir develops an advanced mutation tracking system.
+42,30:00,40:00,10:00,Amir Tavakkoli,Amir Tavakkoli,Advanced mutation tracking,
+43,40:00,41:00,01:00,Guray Ozen,Tile IR sub-DSL,Tile IR: compose a target,
+44,41:00,42:00,01:00,Guray Ozen,Tile IR sub-DSL,Tile IR: one emitter for its values,Direct types stay the same; the emitted IR changes.
+45,42:00,43:00,01:00,Guray Ozen,Tile IR sub-DSL,Tile IR: a typed Python kernel,
+46,43:00,44:00,01:00,Guray Ozen,Tile IR sub-DSL,Tile IR: entries + compiler are plugins,
+47,44:00,45:00,01:00,Guray Ozen,Tile IR sub-DSL,Tile IR: target-owned launch,Choose plugins. Reuse the language core.
