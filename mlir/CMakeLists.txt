@@ -193,6 +193,8 @@ set(MLIR_PYTHON_PACKAGE_PREFIX "mlir"
   embedded in a relocatable way).")
 set(MLIR_ENABLE_BINDINGS_PYTHON 0 CACHE BOOL
        "Enables building of Python bindings.")
+option(MLIR_ENABLE_PYTHON_DSL
+  "Build the mlir.dsl Python DSL base layer (requires MLIR_ENABLE_BINDINGS_PYTHON)." ON)
 set(MLIR_ENABLE_PYTHON_STABLE_ABI 0 CACHE BOOL
        "Build Python bindings against the stable ABI (abi3, PEP 384) for \
        cross-version compatibility. Requires Python 3.12+.")

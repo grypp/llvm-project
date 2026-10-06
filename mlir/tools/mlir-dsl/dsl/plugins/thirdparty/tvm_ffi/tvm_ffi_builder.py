@@ -1,0 +1,2123 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+"""The TVM-FFI wrapper builder: ``llvm.func @__tvm_ffi_<name>`` from a spec.
+
+:func:`attach_ffi_func` adds to a module a function with the TVM-FFI safe-call
+ABI, ``int32_t (void* handle, TVMFFIAny* args, int32_t num_args, TVMFFIAny*
+result)``, that checks the argument count, decodes and checks every argument
+against its :mod:`spec` (type index, integer range, divisibility, tensor
+``ndim``/``dtype``/device/shape/strides/alignment, compile-time constants),
+binds the symbolic variables, queries the environment stream when asked and
+hands the bindings to a :class:`CallProvider`. A failed check reports through
+``TVMFFIErrorSetRaisedFromCStrParts`` (the message is assembled at run time
+from shared global strings) and returns ``-1``; success returns ``0``.
+
+:class:`TVMFFIBuilder` knows the ``TVMFFIAny``/``TVMFFIObject``/``DLTensor``
+layouts and the error helper; :class:`TVMFFIFunctionBuilder` decodes the
+parameters. The ``tvm_ffi`` package is imported lazily (through
+:data:`spec.tvm_ffi`), only when a function is attached.
+"""
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from enum import IntEnum
+from typing import Any, Callable, Literal, Optional, Union
+
+from ..... import ir
+from .....dialects import llvm
+from ....core.common import DSLRuntimeError, DSLUserCodeError
+from ....core.diagnostics import DiagId
+from . import spec
+from .mlir_builder import MLIRBuilder
+from .spec import tvm_ffi
+
+
+def _is_bool_dtype(dtype: "tvm_ffi.dtype") -> bool:
+    """Whether ``dtype`` is the ``bool`` dtype (absent in older ``tvm_ffi``)."""
+    codes = tvm_ffi._dtype.DataTypeCode
+    return hasattr(codes, "BOOL") and dtype.type_code == codes.BOOL
+
+
+def _is_bfloat_dtype(dtype: "tvm_ffi.dtype") -> bool:
+    """Whether ``dtype`` is a ``bfloat`` dtype (absent in older ``tvm_ffi``)."""
+    codes = tvm_ffi._dtype.DataTypeCode
+    return hasattr(codes, "BFLOAT") and dtype.type_code == codes.BFLOAT
+
+
+def _is_integer_like_dtype(dtype: "tvm_ffi.dtype") -> bool:
+    """Whether ``dtype`` decodes from the ``v_int64`` slot (int, uint, bool)."""
+    codes = tvm_ffi._dtype.DataTypeCode
+    return dtype.type_code in (codes.INT, codes.UINT) or _is_bool_dtype(dtype)
+
+
+def _is_float_like_dtype(dtype: "tvm_ffi.dtype") -> bool:
+    """Whether ``dtype`` decodes from the ``v_float64`` slot (float, bfloat)."""
+    codes = tvm_ffi._dtype.DataTypeCode
+    return dtype.type_code == codes.FLOAT or _is_bfloat_dtype(dtype)
+
+
+@dataclass
+class ArgContext:
+    """Where a decoded value comes from, for the wrapper's error messages.
+
+    :ivar param_name: The name of the parameter
+    :ivar arg_index: The index of the argument in the call
+    :ivar tuple_indices: The index path inside a :class:`spec.TupleParam`
+        (``[0, 1]`` for ``tuple[0][1]``), empty for a top-level argument
+    """
+
+    param_name: str
+    arg_index: int
+    tuple_indices: list[int]
+
+    def get(self) -> list[str]:
+        """Get the context as a list of strings for error messages.
+
+        :returns: Context strings like ["on argument ", "#0"] or ["on my_tuple[0][1] in argument ", "#0"].
+        :rtype: list[str]
+        """
+        if not self.tuple_indices:
+            # Top-level argument: "on argument #0"
+            return ["on argument ", f"#{self.arg_index}"]
+        else:
+            # Nested tuple element: "on my_tuple[0][1] in argument #0"
+            indices_str = "".join(f"[{i}]" for i in self.tuple_indices)
+            return [
+                f"on {self.param_name}{indices_str} in argument ",
+                f"#{self.arg_index}",
+            ]
+
+    def get_field_name(self, field_suffix: str) -> str:
+        """Get the field name with tuple indices for shape/stride access.
+
+        :param field_suffix: The field suffix (e.g., ".shape", ".strides").
+        :type field_suffix: str
+        :returns: Field name like "my_param.shape" or "my_tuple[0][1].shape".
+        :rtype: str
+        """
+        if not self.tuple_indices:
+            return f"{self.param_name}{field_suffix}"
+        else:
+            indices_str = "".join(f"[{i}]" for i in self.tuple_indices)
+            return f"{self.param_name}{indices_str}{field_suffix}"
+
+    def get_element_context(self, element_index: int) -> "ArgContext":
+        """Create a nested context for a tuple element.
+
+        :param element_index: The index within the tuple.
+        :type element_index: int
+        :returns: New context for the nested element.
+        :rtype: ArgContext
+        """
+        return ArgContext(
+            param_name=self.param_name,
+            arg_index=self.arg_index,
+            tuple_indices=self.tuple_indices + [element_index],
+        )
+
+
+@dataclass
+class CallContext:
+    """What a :class:`CallProvider` gets once the arguments are decoded.
+
+    :ivar fn_name: The symbol name the wrapper was attached for
+    :ivar module: The module being built
+    :ivar entry_block: The wrapper's entry block; ``llvm.alloca`` goes at its
+        top (``ir.InsertionPoint(entry_block.operations[0])``)
+    :ivar params: The parameter specifications, in argument order
+    :ivar env_stream: The framework's current stream for the device of the
+        first non-CPU tensor (``TVMFFIEnvGetStream``), or None
+    :ivar matched_var_binding: Every :class:`spec.Var` and its decoded value,
+        narrowed to the ``Var``'s type
+    :ivar raw_args: The ``TVMFFIAny*`` argument array
+    :ivar raw_num_args: The argument count (``i32``)
+    :ivar raw_result: The ``TVMFFIAny*`` result slot
+    :ivar builder: The function builder, so a provider can emit globals or
+        helpers into the same module
+    """
+
+    fn_name: str
+    module: ir.Module
+    entry_block: ir.Block
+    params: list[spec.Param]
+    env_stream: Optional[ir.Value]
+    matched_var_binding: dict[spec.Var, ir.Value]
+    raw_args: list[ir.Value]
+    raw_num_args: ir.Value
+    raw_result: ir.Value
+    builder: Optional["TVMFFIFunctionBuilder"] = None
+
+
+class CallProvider:
+    """The calling convention between the wrapper and the callee.
+
+    A subclass emits the call in :meth:`__call__`; the result slot is its to
+    fill (the default leaves it ``None``).
+    """
+
+    def __call__(self, current_block: ir.Block, context: CallContext) -> ir.Block:
+        """Emit the call at the end of ``current_block``.
+
+        :param current_block: The block to emit the call into
+        :param context: The decoded arguments and the wrapper's values
+        :return: The block to continue in (``current_block`` unless the
+            provider ended it)
+        :raises DSLRuntimeError: The base class emits nothing
+        """
+        raise DSLRuntimeError("Call provider not implemented")
+
+
+class TVMFFITypeIndex(IntEnum):
+    """The ``TVMFFITypeIndex`` enumerators of ``tvm_ffi/c_api.h``, by C name."""
+
+    kTVMFFINone = 0
+    kTVMFFIInt = 1
+    kTVMFFIBool = 2
+    kTVMFFIFloat = 3
+    kTVMFFIOpaquePtr = 4
+    kTVMFFIDataType = 5
+    kTVMFFIDevice = 6
+    kTVMFFIDLTensorPtr = 7
+    kTVMFFIRawStr = 8
+    kTVMFFIByteArrayPtr = 9
+    kTVMFFIObjectRValueRef = 10
+    kTVMFFISmallStr = 11
+    kTVMFFISmallBytes = 12
+    kTVMFFIStaticObjectBegin = 64
+    kTVMFFIObject = 64
+    kTVMFFIStr = 65
+    kTVMFFIBytes = 66
+    kTVMFFIError = 67
+    kTVMFFIFunction = 68
+    kTVMFFIShape = 69
+    kTVMFFITensor = 70
+    kTVMFFIArray = 71
+    kTVMFFIMap = 72
+    kTVMFFIModule = 73
+    kTVMFFIOpaquePyObject = 74
+
+
+class TVMFFIBuilder(MLIRBuilder):
+    """The TVM-FFI runtime layouts, their accessors and the error helper."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Every error call goes through one helper taking this many string
+        # parts (unused slots are null), so the helpers stay few.
+        self.set_raised_from_cstr_parts_max_num_parts = 8
+        self.set_raised_from_cstr_parts_cache: dict[int, str] = {}
+        self.tvm_ffi_any_type = self.struct_type(
+            name="TVMFFIAny",
+            fields=[
+                # type_index: i32
+                self.i32_type,
+                # padding: i32
+                self.i32_type,
+                # v_int64: i64
+                self.i64_type,
+            ],
+        )
+        self.tvm_ffi_object_type = self.struct_type(
+            name="TVMFFIObject",
+            fields=[
+                # combined_ref_count: i64
+                self.i64_type,
+                # type_index: i32
+                self.i32_type,
+                # padding: i32
+                self.i32_type,
+                # deleter: i64 (use i64 to ensure 64-bit alignment)
+                self.i64_type,
+                # cell: i64 (this is a placeholder so we can get ptr of cell)
+                self.i64_type,
+            ],
+        )
+        self.dl_device_type = self.struct_type(
+            name="DLDevice",
+            fields=[
+                # device_type: i32 (DLDeviceType enum)
+                self.i32_type,
+                # device_id: i32
+                self.i32_type,
+            ],
+        )
+        # DLDataType: {code: i8, bits: i8, lanes: i16}
+        self.dl_data_type = self.struct_type(
+            name="DLDataType",
+            fields=[
+                # code: i8 (DLDataTypeCode enum)
+                self.i8_type,
+                # bits: i8
+                self.i8_type,
+                # lanes: i16
+                self.i16_type,
+            ],
+        )
+        self.dltensor_type = self.struct_type(
+            name="DLTensor",
+            fields=[
+                # 0 - data: void*
+                self.ptr_type,
+                # 1 - device: DLDevice
+                self.dl_device_type,
+                # 2 - ndim: i32
+                self.i32_type,
+                # 3 - dtype: DLDataType
+                self.dl_data_type,
+                # 4 - shape: i64*
+                self.ptr_type,
+                # 5 - strides: i64*
+                self.ptr_type,
+                # 6 - byte_offset: i64
+                self.i64_type,
+            ],
+        )
+        self.tvm_ffi_shape_cell_type = self.struct_type(
+            name="TVMFFIShapeCell",
+            fields=[
+                # shape: i64*
+                self.ptr_type,
+                # size: usize -- we use ptr type as it is same as usize
+                # we can load ptr then use ptrtoint to get usize
+                self.ptr_type,
+            ],
+        )
+        self.tvm_ffi_array_cell_type = self.struct_type(
+            name="TVMFFIArrayCell",
+            fields=[
+                # data: void*
+                self.ptr_type,
+                # size: i64
+                self.i64_type,
+            ],
+        )
+
+    def get_object_cell_ptr(self, obj: ir.Value) -> ir.Value:
+        """Get the cell from the tvm_ffi_object struct.
+
+        :param obj: The object ptr
+        :return: The pointer to the cell following the object header.
+        """
+        return self.getelementptr(
+            obj,
+            [0, 4],
+            elem_type=self.tvm_ffi_object_type,
+        )
+
+    def load_ffi_any_array_item_type_index(
+        self, args: ir.Value, index: int
+    ) -> ir.Value:
+        """Get the type index from the index-th field of tvm_ffi_any_type struct.
+
+        Semantics as follows:
+
+        .. code-block:: c
+            int32_t get_type_index(void* args, const int index) {
+                return ((TVMFFIAny*)args)[index].type_index;
+            }
+
+        :param args: The args pointer.
+        :param index: The index of the args array.
+        :return: The type index.
+        """
+        # Single GEP: args[index].type_index
+        # Indices: [index, 0] = access index-th element, then first field
+        type_index_ptr = self.getelementptr(
+            args,
+            [index, 0],
+            elem_type=self.tvm_ffi_any_type,
+        )
+        return llvm.load(self.i32_type, type_index_ptr)
+
+    def _load_ffi_any_array_item_value(
+        self, args: ir.Value, index: int, load_type: ir.Type
+    ) -> ir.Value:
+        """Load the union value field (field 2) of ``args[index]`` as ``load_type``.
+
+        All three TVMFFIAny value accessors read the same struct field and differ
+        only in the load type (v_int64/v_float64/v_ptr are a C union).
+        """
+        value_ptr = self.getelementptr(
+            args,
+            [index, 2],
+            elem_type=self.tvm_ffi_any_type,
+        )
+        return llvm.load(load_type, value_ptr)
+
+    def load_ffi_any_array_item_v_int64(self, args: ir.Value, index: int) -> ir.Value:
+        """Get the v_int64 from the index-th field of tvm_ffi_any_type struct.
+
+        Semantics: ``((TVMFFIAny*)args)[index].v_int64``.
+        """
+        return self._load_ffi_any_array_item_value(args, index, self.i64_type)
+
+    def load_ffi_any_array_item_v_float64(self, args: ir.Value, index: int) -> ir.Value:
+        """Get the v_float64 from the index-th field of tvm_ffi_any_type struct.
+
+        Semantics: ``((TVMFFIAny*)args)[index].v_float64``.
+        """
+        return self._load_ffi_any_array_item_value(args, index, self.f64_type)
+
+    def load_ffi_any_array_item_v_ptr(
+        self, args: ir.Value, index: int, address_space: Optional[int] = None
+    ) -> ir.Value:
+        """Get the v_ptr from the index-th field of tvm_ffi_any_type struct.
+
+        Semantics: ``((TVMFFIAny*)args)[index].v_ptr``.
+        """
+        ptr_type = self.ptr_type_with_address_space(address_space)
+        return self._load_ffi_any_array_item_value(args, index, ptr_type)
+
+    def _gep_load(
+        self,
+        obj: ir.Value,
+        indices: list[int],
+        elem_type: ir.Type,
+        load_type: ir.Type,
+    ) -> ir.Value:
+        """GEP into ``obj`` at ``indices`` (as ``elem_type``) and load ``load_type``.
+
+        Shared body for the shape-cell / array-cell / DLTensor field accessors,
+        which all do a getelementptr followed by an llvm.load and differ only in
+        the index path, struct type, and loaded type.
+        """
+        ptr = self.getelementptr(obj, indices, elem_type=elem_type)
+        return llvm.load(load_type, ptr)
+
+    def load_shape_cell_data_ptr(self, shape_cell: ir.Value) -> ir.Value:
+        """Get the data pointer from the shape cell."""
+        return self._gep_load(
+            shape_cell, [0, 0], self.tvm_ffi_shape_cell_type, self.ptr_type
+        )
+
+    def load_shape_cell_size_as_i64(self, shape_cell: ir.Value) -> ir.Value:
+        """Get the size from the shape cell as i64."""
+        size_as_ptr_type = self._gep_load(
+            shape_cell, [0, 1], self.tvm_ffi_shape_cell_type, self.ptr_type
+        )
+        return llvm.ptrtoint(self.i64_type, size_as_ptr_type)
+
+    def load_array_cell_data_ptr(self, array_cell: ir.Value) -> ir.Value:
+        """Get the data pointer from the array cell."""
+        return self._gep_load(
+            array_cell, [0, 0], self.tvm_ffi_array_cell_type, self.ptr_type
+        )
+
+    def load_array_cell_size_as_i64(self, array_cell: ir.Value) -> ir.Value:
+        """Get the size from the array cell as i64."""
+        return self._gep_load(
+            array_cell, [0, 1], self.tvm_ffi_array_cell_type, self.i64_type
+        )
+
+    def load_i64_array_item(self, data: ir.Value, index: int) -> ir.Value:
+        """Load a shape value at the given index from the shape pointer."""
+        return self._gep_load(data, [index], self.i64_type, self.i64_type)
+
+    def load_dltensor_data_ptr(self, dltensor: ir.Value) -> ir.Value:
+        """Get the data pointer from the DLTensor struct (field 0)."""
+        return self._gep_load(dltensor, [0, 0], self.dltensor_type, self.ptr_type)
+
+    def load_dltensor_device_type(self, dltensor: ir.Value) -> ir.Value:
+        """Get the device type from the DLTensor struct (device[1].device_type[0])."""
+        return self._gep_load(dltensor, [0, 1, 0], self.dltensor_type, self.i32_type)
+
+    def load_dltensor_device_id(self, dltensor: ir.Value) -> ir.Value:
+        """Get the device id from the DLTensor struct (device[1].device_id[1])."""
+        return self._gep_load(dltensor, [0, 1, 1], self.dltensor_type, self.i32_type)
+
+    def load_dltensor_dtype_code(self, dltensor: ir.Value) -> ir.Value:
+        """Get the dtype code from the DLTensor struct (dtype[3].code[0])."""
+        return self._gep_load(dltensor, [0, 3, 0], self.dltensor_type, self.i8_type)
+
+    def load_dltensor_dtype_bits(self, dltensor: ir.Value) -> ir.Value:
+        """Get the dtype bits from the DLTensor struct (dtype[3].bits[1])."""
+        return self._gep_load(dltensor, [0, 3, 1], self.dltensor_type, self.i8_type)
+
+    def load_dltensor_dtype_lanes(self, dltensor: ir.Value) -> ir.Value:
+        """Get the dtype lanes from the DLTensor struct (dtype[3].lanes[2])."""
+        return self._gep_load(dltensor, [0, 3, 2], self.dltensor_type, self.i16_type)
+
+    def load_dltensor_ndim(self, dltensor: ir.Value) -> ir.Value:
+        """Get the number of dimensions from the DLTensor struct (field 2)."""
+        return self._gep_load(dltensor, [0, 2], self.dltensor_type, self.i32_type)
+
+    def load_dltensor_shape(self, dltensor: ir.Value) -> ir.Value:
+        """Get the shape pointer from the DLTensor struct (field 4)."""
+        return self._gep_load(dltensor, [0, 4], self.dltensor_type, self.ptr_type)
+
+    def load_dltensor_strides(self, dltensor: ir.Value) -> ir.Value:
+        """Get the strides pointer from the DLTensor struct (field 5)."""
+        return self._gep_load(dltensor, [0, 5], self.dltensor_type, self.ptr_type)
+
+    def load_dltensor_byte_offset(self, dltensor: ir.Value) -> ir.Value:
+        """Get the byte offset from the DLTensor struct (field 6)."""
+        return self._gep_load(dltensor, [0, 6], self.dltensor_type, self.i64_type)
+
+    def downcast_i64_to_lower_bits(
+        self, v_int64: ir.Value, target_dtype: "tvm_ffi.dtype"
+    ) -> ir.Value:
+        """Narrow the decoded ``i64`` to the integer type of ``target_dtype``.
+
+        A ``bool`` (and a 1-bit integer) becomes ``i1`` by comparing with zero.
+
+        :raises DSLUserCodeError: ``UNSUP_TVM_FFI_PARAM`` for a width that is
+            not 1, 8, 16, 32 or 64
+        """
+        overflow_flags = llvm.IntegerOverflowFlags.none
+        if _is_bool_dtype(target_dtype):
+            return llvm.icmp(llvm.ICmpPredicate.ne, v_int64, self.i64(0))
+        if target_dtype.bits == 64:
+            return v_int64
+        if target_dtype.bits == 32:
+            return llvm.trunc(
+                res=self.i32_type, arg=v_int64, overflow_flags=overflow_flags
+            )
+        if target_dtype.bits == 16:
+            return llvm.trunc(
+                res=self.i16_type, arg=v_int64, overflow_flags=overflow_flags
+            )
+        if target_dtype.bits == 8:
+            return llvm.trunc(
+                res=self.i8_type, arg=v_int64, overflow_flags=overflow_flags
+            )
+        if target_dtype.bits == 1:
+            return llvm.icmp(llvm.ICmpPredicate.ne, v_int64, self.i64(0))
+        raise DSLUserCodeError(
+            DiagId.UNSUP_TVM_FFI_PARAM, detail=f"Unsupported Var dtype: {target_dtype}"
+        )
+
+    def is_contiguous(
+        self,
+        expected_shape: list[Union[spec.Var, int]],
+        loaded_shape: list[ir.Value],
+        loaded_strides: list[ir.Value],
+    ) -> ir.Value:
+        """Whether the loaded strides describe a row-major contiguous layout.
+
+        A dimension of extent 1 is exempt (frameworks normalise its stride);
+        the expected strides are folded as constants while the leading extents
+        are static.
+
+        :return: The ``i1`` condition
+        """
+        expected_stride: Union[int, ir.Value] = 1
+        cond: ir.Value = self.i1(1)
+
+        for index in reversed(range(len(loaded_shape))):
+            # strides[i] == expected_stride or shape[i] == 1
+            # still constant
+            if isinstance(expected_stride, int):
+                stride_cond = self.equal(
+                    loaded_strides[index], self.i64(expected_stride)
+                )
+            else:
+                stride_cond = self.equal(loaded_strides[index], expected_stride)
+
+            cond = self.and_(
+                cond,
+                self.or_(
+                    stride_cond,
+                    self.equal(loaded_shape[index], self.i64(1)),
+                ),
+            )
+            if index > 0:
+                # try to stay in constant compute as much as possible
+                expected_shape_i = expected_shape[index]
+                if isinstance(expected_shape_i, int) and isinstance(
+                    expected_stride, int
+                ):
+                    expected_stride = expected_shape_i * expected_stride
+                else:
+                    if isinstance(expected_stride, int):
+                        expected_stride = self.i64(expected_stride)
+                    # Handle case where expected_shape[index] might be a Var
+                    if isinstance(expected_shape[index], int):
+                        shape_as_i64 = self.i64(expected_shape[index])  # type: ignore[arg-type]
+                        expected_stride = self.mul(shape_as_i64, expected_stride)
+                    else:
+                        # expected_shape[index] is a spec.Var, use loaded_shape[index]
+                        expected_stride = self.mul(loaded_shape[index], expected_stride)
+        return cond
+
+    def find_or_declare_extern_func(
+        self, name: str, params: Sequence[ir.Type], ret: ir.Type
+    ) -> None:
+        """Declare the external ``llvm.func`` ``name`` unless the module has it."""
+        existing_func = self.find_func_in_module(self.module, name)
+        if existing_func is not None:
+            return
+
+        # Function declarations are module-level symbols. Avoid relying on
+        # whichever insertion point is active at the call site.
+        with ir.InsertionPoint(self.module.body):  # type: ignore[union-attr]
+            self.declare_extern_func(name, params, ret)
+
+    def get_or_create_set_raised_from_cstr_parts(self, num_parts: int) -> str:
+        r"""Get or create a helper function to call TVMFFIErrorSetRaisedFromCStrParts.
+
+        The expected generated function is as follows:
+
+        .. code-block:: c
+
+            void __tvm_ffi__set_error_from_parts_n(
+                const char* kind,
+                int32_t num_actual_parts,
+                const char* p0,
+                const char* p1,
+                ...
+                const char* pN-1
+            ) {
+                const char* message_parts[n];
+                message_parts[0] = p0;
+                message_parts[1] = p1;
+                ...
+                message_parts[n-1] = pN-1;
+                TVMFFIErrorSetRaisedFromCStrParts(kind, message_parts, num_actual_parts);
+            }
+
+        :param num_parts: The number of string parts needed.
+        :return: The name of the helper function.
+        """
+        # Check cache first
+        if num_parts in self.set_raised_from_cstr_parts_cache:
+            return self.set_raised_from_cstr_parts_cache[num_parts]
+
+        helper_name = f"__tvm_ffi__set_error_from_parts_{num_parts}"
+
+        # Check if function already exists in the module
+        if self.find_func_in_module(self.module, helper_name):
+            self.set_raised_from_cstr_parts_cache[num_parts] = helper_name
+            return helper_name
+
+        # Build the parameter list: kind, num_actual_parts, p0, p1, ..., pN-1
+        param_types = [self.ptr_type]  # kind
+        param_types.append(self.i32_type)  # num_actual_parts
+        for _ in range(num_parts):
+            param_types.append(self.ptr_type)  # p0, p1, ..., pN-1
+
+        # Create the helper function
+        # Mark as noinline since error handling is a slow path and benefits from not inlining
+        with ir.InsertionPoint(self.module.body):  # type: ignore[union-attr]
+            params, entry_block = self.function(
+                name=helper_name,
+                params_type=param_types,
+                ret_type=self.void_type,
+                internal=True,
+                llvm_func_attrs=["noinline"],
+            )
+
+            kind_param = params[0]
+            num_actual_parts_param = params[1]
+            part_params = params[2:]
+
+            with ir.InsertionPoint(entry_block):
+                # Allocate array of pointers to hold the message parts
+                message_parts_array = llvm.alloca(
+                    res=self.ptr_type,
+                    elem_type=self.ptr_type,
+                    array_size=self.i32(num_parts),
+                    alignment=8,
+                )
+
+                # Store each part in the array
+                for i, part_param in enumerate(part_params):
+                    part_ptr = self.getelementptr(
+                        message_parts_array,
+                        [i],
+                        elem_type=self.ptr_type,
+                    )
+                    llvm.store(value=part_param, addr=part_ptr)
+
+                # Call TVMFFIErrorSetRaisedFromCStrParts(kind, message_parts, num_actual_parts)
+                llvm.call(
+                    result=None,
+                    callee="TVMFFIErrorSetRaisedFromCStrParts",
+                    callee_operands=[
+                        kind_param,
+                        message_parts_array,
+                        num_actual_parts_param,
+                    ],
+                    op_bundle_sizes=[],
+                    op_bundle_operands=[],
+                )
+
+                # Return void
+                self.return_()
+
+        self.set_raised_from_cstr_parts_cache[num_parts] = helper_name
+        return helper_name
+
+    def raise_error_and_return(
+        self, error_kind: str, error_message_parts: list[Union[str, ir.Value]]
+    ) -> None:
+        """Report ``error_kind`` with the concatenated parts and return ``-1``.
+
+        Each string part is a global the module shares between messages (the
+        parameter name, the call context, ...); the parts are concatenated by
+        ``TVMFFIErrorSetRaisedFromCStrParts`` at run time through the helper
+        of :meth:`get_or_create_set_raised_from_cstr_parts`.
+
+        :param error_kind: The Python exception name (``"TypeError"``,
+            ``"ValueError"``)
+        :param error_message_parts: The message, as string literals or
+            ``!llvm.ptr`` values of NUL-terminated strings
+        """
+        error_kind_symbol = self.define_global_string(content=error_kind)
+
+        # Calculate actual_num_parts (max(self.set_raised_from_cstr_parts_max_num_parts, num_parts))
+        call_num_parts = max(
+            self.set_raised_from_cstr_parts_max_num_parts, len(error_message_parts)
+        )
+
+        # Get or create the helper function for this number of parts
+        helper_name = self.get_or_create_set_raised_from_cstr_parts(
+            num_parts=call_num_parts
+        )
+
+        # Build the call operands: kind, num_actual_parts, p0, p1, ..., pN-1, (nulls...)
+        call_operands = [self.address_of(error_kind_symbol, self.ptr_type)]
+        call_operands.append(self.i32(len(error_message_parts)))  # num_actual_parts
+
+        # Add non-null part pointers
+        # Define global strings for each part, or forward ir.Values directly
+        for part in error_message_parts:
+            if isinstance(part, str):
+                part_symbol = self.define_global_string(content=part)
+                call_operands.append(self.address_of(part_symbol, self.ptr_type))
+            else:
+                call_operands.append(part)
+
+        # Pad with null pointers for unused slots
+        # Create null pointer constant once and reuse it
+        if call_num_parts > len(error_message_parts):
+            null_ptr = llvm.inttoptr(self.ptr_type, self.i64(0))
+            for _ in range(call_num_parts - len(error_message_parts)):
+                call_operands.append(null_ptr)
+
+        # Call the helper function
+        llvm.call(
+            result=None,
+            callee=helper_name,
+            callee_operands=call_operands,
+            op_bundle_sizes=[],
+            op_bundle_operands=[],
+        )
+
+        self.return_(self.i32(-1))
+
+    def check_condition(
+        self,
+        current_block: ir.Block,
+        fcond: Callable[[], ir.Value],
+        error_kind: str,
+        error_message_parts: list[str],
+    ) -> ir.Block:
+        """Branch on a condition; the false branch reports an error and returns.
+
+        :param current_block: The block the condition is computed in
+        :param fcond: Builds the ``i1`` condition at the end of ``current_block``
+        :param error_kind: The Python exception name of the error
+        :param error_message_parts: The message parts of the error
+        :return: The block the true branch continues in
+        """
+        error_block = current_block.create_after()
+        subsequent_block = error_block.create_after()
+        with ir.InsertionPoint(current_block):
+            self.cond_br(
+                cond=fcond(),
+                true_block=subsequent_block,
+                false_block=error_block,
+                # likely to be true
+                branch_weights=self.BRANCH_WEIGHTS_LIKELY,
+            )
+        with ir.InsertionPoint(error_block):
+            self.raise_error_and_return(error_kind, error_message_parts)
+        return subsequent_block
+
+
+class TVMFFIFunctionBuilder(TVMFFIBuilder):
+    """Decodes the parameters of one wrapper and tracks the variable bindings.
+
+    ``matched_var_binding`` holds each :class:`spec.Var`'s narrowed value,
+    ``matched_var_source`` the ``i64``/pointer it was decoded from (a second
+    occurrence of the ``Var`` is compared against it) and
+    ``matched_var_arg_field_name`` where it came from, for the message.
+
+    :param module: The module the wrapper is added to
+    """
+
+    module: ir.Module
+    current_fn_signature: str
+    _fn_call_context: str
+    matched_var_binding: dict[spec.Var, ir.Value]
+    matched_var_source: dict[spec.Var, ir.Value]
+    matched_var_arg_field_name: dict[spec.Var, str]
+
+    def __init__(self, module: ir.Module) -> None:
+        super().__init__()
+        self.module = module
+        self.current_fn_signature: str = ""
+        self._fn_call_context: str = ""
+        self.matched_var_binding = {}
+        self.matched_var_source = {}
+        self.matched_var_arg_field_name = {}
+
+    def _arg_err(
+        self, prefix: str, arg_context: "ArgContext", suffix: str | None = None
+    ) -> list:
+        """The message parts of a decode error.
+
+        Every ``decode_param_*`` error reads ``[prefix, *arg_context.get(),
+        self._fn_call_context, suffix?]``; ``suffix`` is omitted when the
+        message ends at the call context (the ``"value "`` binding messages).
+        """
+        parts = [prefix, *arg_context.get(), self._fn_call_context]
+        if suffix is not None:
+            parts.append(suffix)
+        return parts
+
+    def decode_param_int(
+        self,
+        current_block: ir.Block,
+        param: spec.Var,
+        args: ir.Value,
+        arg_index: int,
+        arg_context: ArgContext,
+    ) -> ir.Block:
+        """Decode the integer parameter at the given index."""
+        # read the type index
+        with ir.InsertionPoint(current_block):
+            type_index: ir.Value = self.load_ffi_any_array_item_type_index(
+                args, arg_index
+            )
+            # Check if type is int or bool (both use v_int64, bool can be converted to int)
+            is_int = self.equal(type_index, self.i32(TVMFFITypeIndex.kTVMFFIInt))
+            is_bool = self.equal(type_index, self.i32(TVMFFITypeIndex.kTVMFFIBool))
+            is_int_or_bool = self.or_(is_int, is_bool)
+
+        current_block = self.check_condition(
+            current_block,
+            lambda: is_int_or_bool,
+            "TypeError",
+            self._arg_err("Mismatched type ", arg_context, ", expected int"),
+        )
+        with ir.InsertionPoint(current_block):
+            v_int64: ir.Value = self.load_ffi_any_array_item_v_int64(args, arg_index)
+            if param.dtype.lanes != 1:
+                raise DSLUserCodeError(
+                    DiagId.UNSUP_TVM_FFI_PARAM,
+                    detail=f"Unsupported Var dtype: {param.dtype}",
+                )
+
+        return self.set_or_check_matched_var_binding(
+            current_block,
+            param,
+            v_int64,
+            self._arg_err("value ", arg_context),
+            arg_context.get_field_name(""),
+        )
+
+    def decode_param_float(
+        self,
+        current_block: ir.Block,
+        param: spec.Var,
+        args: ir.Value,
+        arg_index: int,
+        arg_context: ArgContext,
+    ) -> ir.Block:
+        """Decode the float parameter at the given index."""
+        # read the type index
+        with ir.InsertionPoint(current_block):
+            type_index: ir.Value = self.load_ffi_any_array_item_type_index(
+                args, arg_index
+            )
+            # Check if type is float, int, or bool (int and bool can be converted to float)
+            is_float = self.equal(type_index, self.i32(TVMFFITypeIndex.kTVMFFIFloat))
+            is_int = self.equal(type_index, self.i32(TVMFFITypeIndex.kTVMFFIInt))
+            is_bool = self.equal(type_index, self.i32(TVMFFITypeIndex.kTVMFFIBool))
+            is_int_or_bool = self.or_(is_int, is_bool)
+
+        if param.dtype.lanes != 1:
+            raise DSLUserCodeError(
+                DiagId.UNSUP_TVM_FFI_PARAM,
+                detail=f"Unsupported Var dtype: {param.dtype}",
+            )
+
+        # Determine result type
+        if param.dtype.bits == 64:
+            result_type = self.f64_type
+        elif param.dtype.bits == 32:
+            result_type = self.f32_type
+        elif _is_bfloat_dtype(param.dtype):
+            result_type = self.bf16_type
+        elif param.dtype.bits == 16:
+            result_type = self.f16_type
+        else:
+            raise DSLUserCodeError(
+                DiagId.UNSUP_TVM_FFI_PARAM,
+                detail=f"Unsupported Var dtype: {param.dtype}",
+            )
+
+        # Create all blocks in the control flow
+        error_block = current_block.create_after()
+        float_block = error_block.create_after()
+        int_bool_check_block = float_block.create_after()
+        int_bool_block = int_bool_check_block.create_after()
+        result_block = int_bool_block.create_after()
+
+        # Add block arguments to the result block
+        result_block.add_argument(result_type, ir.Location.unknown())
+
+        # Branch directly to float or int/bool check
+        with ir.InsertionPoint(current_block):
+            # First check if it's float
+            self.cond_br(
+                cond=is_float,
+                true_block=float_block,
+                false_block=int_bool_check_block,
+            )
+
+        # Handle float type
+        with ir.InsertionPoint(float_block):
+            v_float64: ir.Value = self.load_ffi_any_array_item_v_float64(
+                args, arg_index
+            )
+            float_result = self.fptrunc(v_float64, result_type)
+            self.br(result_block, args=[float_result])
+
+        # In int/bool check block, verify it's actually int or bool
+        with ir.InsertionPoint(int_bool_check_block):
+            self.cond_br(
+                cond=is_int_or_bool,
+                true_block=int_bool_block,
+                false_block=error_block,
+                branch_weights=self.BRANCH_WEIGHTS_LIKELY,
+            )
+
+        # Handle int or bool type (convert to float)
+        with ir.InsertionPoint(int_bool_block):
+            v_int64: ir.Value = self.load_ffi_any_array_item_v_int64(args, arg_index)
+            v_float64_from_int = llvm.sitofp(res=self.f64_type, arg=v_int64)
+            int_bool_result = self.fptrunc(v_float64_from_int, result_type)
+            self.br(result_block, args=[int_bool_result])
+
+        # Error block
+        with ir.InsertionPoint(error_block):
+            self.raise_error_and_return(
+                "TypeError",
+                self._arg_err("Mismatched type ", arg_context, ", expected float"),
+            )
+
+        # Merge the results using block argument
+        with ir.InsertionPoint(result_block):
+            result = result_block.arguments[0]
+            self.matched_var_binding[param] = result
+            self.matched_var_source[param] = v_float64
+            self.matched_var_arg_field_name[param] = arg_context.get_field_name("")
+
+        return result_block
+
+    def decode_param_opaque_handle(
+        self,
+        current_block: ir.Block,
+        param: spec.Var,
+        args: ir.Value,
+        arg_index: int,
+        arg_context: ArgContext,
+        *,
+        allow_int_as_ptr: bool = False,
+        address_space: Optional[int] = None,
+    ) -> ir.Block:
+        """Decode the opaque handle parameter at the given index."""
+        # read the type index
+        with ir.InsertionPoint(current_block):
+            type_index: ir.Value = self.load_ffi_any_array_item_type_index(
+                args, arg_index
+            )
+            # Check if type is opaque pointer
+            is_opaque_ptr = self.equal(
+                type_index, self.i32(TVMFFITypeIndex.kTVMFFIOpaquePtr)
+            )
+            # Check if type is a nullptr
+            is_nullptr = self.equal(type_index, self.i32(TVMFFITypeIndex.kTVMFFINone))
+            is_opaque_ptr_or_nullptr = self.or_(is_opaque_ptr, is_nullptr)
+            if allow_int_as_ptr:
+                is_int = self.equal(type_index, self.i32(TVMFFITypeIndex.kTVMFFIInt))
+                is_opaque_ptr_or_nullptr = self.or_(is_opaque_ptr_or_nullptr, is_int)
+
+        expect_message = ", expected handle"
+        if allow_int_as_ptr:
+            expect_message += " or int"
+
+        current_block = self.check_condition(
+            current_block,
+            lambda: is_opaque_ptr_or_nullptr,
+            "TypeError",
+            self._arg_err("Mismatched type ", arg_context, expect_message),
+        )
+
+        with ir.InsertionPoint(current_block):
+            # Load the opaque handle (v_ptr field contains the void*)
+            v_ptr: ir.Value = self.load_ffi_any_array_item_v_ptr(
+                args, arg_index, address_space=address_space
+            )
+            # For opaque handles, we store the pointer directly
+            self.matched_var_binding[param] = v_ptr
+            self.matched_var_source[param] = v_ptr
+            self.matched_var_arg_field_name[param] = arg_context.get_field_name("")
+
+        return current_block
+
+    def decode_param_const(
+        self,
+        current_block: ir.Block,
+        param: spec.Param,
+        args: ir.Value,
+        arg_index: int,
+        arg_context: ArgContext,
+    ) -> ir.Block:
+        """Assert that a ``Const*`` argument repeats the compile-time value.
+
+        Two checks, shared by the four kinds: the type index (``TypeError``,
+        ``expected <kind>``) and, except for ``ConstNone``, the payload
+        (``ValueError``, ``expected <value>``). The slot is not forwarded: it
+        exists so the exported arity matches the Python signature and a call
+        with another compile-time value fails early.
+
+        :raises DSLRuntimeError: ``param`` is not a ``Const*`` kind
+        """
+        # Per-kind: accepted FFI type indices, kind name for the error
+        # message, how to load + compare the payload, and how to render the
+        # expected literal in the error message. ``expected_repr`` is paired
+        # with ``payload_kind`` so the display value tracks the Python type
+        # (e.g. bool → True/False) rather than the wire value (int 1/0).
+        accepted: tuple[TVMFFITypeIndex, ...]
+        payload_kind: tuple[Literal["int"], int] | tuple[Literal["float"], float] | None
+        expected_repr: bool | int | float
+        if isinstance(param, spec.ConstNone):
+            accepted = (TVMFFITypeIndex.kTVMFFINone,)
+            kind_name = "None"
+            payload_kind = None
+        elif isinstance(param, spec.ConstBool):
+            # bool is strict: reject kTVMFFIInt even when the value would match
+            accepted = (TVMFFITypeIndex.kTVMFFIBool,)
+            kind_name = "bool"
+            # True→1, False→0 via int(bool) — same wire format as ConstInt
+            payload_kind = ("int", int(param.value))
+            expected_repr = bool(param.value)
+        elif isinstance(param, spec.ConstInt):
+            # int/bool share the v_int64 payload — accept either
+            accepted = (TVMFFITypeIndex.kTVMFFIInt, TVMFFITypeIndex.kTVMFFIBool)
+            kind_name = "int"
+            payload_kind = ("int", int(param.value))
+            expected_repr = int(param.value)
+        elif isinstance(param, spec.ConstFloat):
+            accepted = (TVMFFITypeIndex.kTVMFFIFloat,)
+            kind_name = "float"
+            payload_kind = ("float", float(param.value))
+            expected_repr = float(param.value)
+        else:
+            raise DSLRuntimeError(
+                f"decode_param_const: unsupported Const param: {type(param).__name__}"
+            )
+
+        # Step 1 — type-index check.
+        with ir.InsertionPoint(current_block):
+            type_index: ir.Value = self.load_ffi_any_array_item_type_index(
+                args, arg_index
+            )
+            type_ok: ir.Value = self.equal(type_index, self.i32(accepted[0]))
+            for tx in accepted[1:]:
+                type_ok = self.or_(type_ok, self.equal(type_index, self.i32(tx)))
+        current_block = self.check_condition(
+            current_block,
+            lambda: type_ok,
+            "TypeError",
+            self._arg_err("Mismatched type ", arg_context, f", expected {kind_name}"),
+        )
+
+        # Step 2 — value check (None has no payload).
+        if payload_kind is None:
+            return current_block
+        value_ok: ir.Value
+        with ir.InsertionPoint(current_block):
+            if payload_kind[0] == "int":
+                expected_int = payload_kind[1]
+                v_int64: ir.Value = self.load_ffi_any_array_item_v_int64(
+                    args, arg_index
+                )
+                value_ok = self.equal(v_int64, self.i64(expected_int))
+            else:  # "float"
+                expected_float = payload_kind[1]
+                v_float64: ir.Value = self.load_ffi_any_array_item_v_float64(
+                    args, arg_index
+                )
+                expected_const = llvm.ConstantOp(
+                    self.f64_type,
+                    ir.FloatAttr.get(self.f64_type, expected_float),
+                ).res
+                value_ok = llvm.fcmp(llvm.FCmpPredicate.oeq, v_float64, expected_const)
+        return self.check_condition(
+            current_block,
+            lambda: value_ok,
+            "ValueError",
+            self._arg_err(
+                "Mismatched Meta value ",
+                arg_context,
+                f", expected {expected_repr}",
+            ),
+        )
+
+    def check_int_value_dtype_bound(
+        self,
+        current_block: ir.Block,
+        value: ir.Value,
+        dtype: "tvm_ffi.dtype",
+        error_msg_context: list[str],
+    ) -> ir.Block:
+        """Assert that the ``i64`` ``value`` fits the integer ``dtype``.
+
+        A 64-bit dtype needs no check.
+
+        :return: The block to continue in
+        """
+        if dtype.bits == 64:
+            return current_block
+
+        is_uint = dtype.type_code == tvm_ffi._dtype.DataTypeCode.UINT
+
+        # compute out the upper and lower bounds
+        if is_uint:
+            lower_bound = 0
+            upper_bound = (1 << dtype.bits) - 1
+        else:
+            lower_bound = -(1 << (dtype.bits - 1))
+            upper_bound = (1 << (dtype.bits - 1)) - 1
+
+        error_msg = [
+            "Out of bound ",
+            *error_msg_context,
+            f", expected to be in {str(dtype)} range [{lower_bound}, {upper_bound}]",
+        ]
+
+        # Check bounds using appropriate comparison predicates
+        with ir.InsertionPoint(current_block):
+            lower_bound_value = self.i64(lower_bound)
+            upper_bound_value = self.i64(upper_bound)
+            if is_uint:
+                is_above_lower = llvm.icmp(
+                    llvm.ICmpPredicate.uge, value, lower_bound_value
+                )
+                is_below_upper = llvm.icmp(
+                    llvm.ICmpPredicate.ule, value, upper_bound_value
+                )
+            else:
+                is_above_lower = llvm.icmp(
+                    llvm.ICmpPredicate.sge, value, lower_bound_value
+                )
+                is_below_upper = llvm.icmp(
+                    llvm.ICmpPredicate.sle, value, upper_bound_value
+                )
+
+            in_bounds = self.and_(is_above_lower, is_below_upper)
+
+        return self.check_condition(
+            current_block, lambda: in_bounds, "ValueError", error_msg
+        )
+
+    def check_int_value_divisibility(
+        self,
+        current_block: ir.Block,
+        value: ir.Value,
+        divisibility: int,
+        error_msg_context: list[str],
+        *,
+        skip_check_predicate: Optional[ir.Value] = None,
+    ) -> ir.Block:
+        """Assert that the ``i64`` ``value`` is a multiple of ``divisibility``.
+
+        :param current_block: The block to insert the check into
+        :param value: The ``i64`` value
+        :param divisibility: The required divisor
+        :param error_msg_context: The message parts naming the value
+        :param skip_check_predicate: An ``i1`` that, when set, skips the check
+        :return: The block to continue in
+        """
+
+        def check_divisibility() -> ir.Value:
+            cond = self.i64_divisible_const(value, divisibility)
+            if skip_check_predicate is not None:
+                cond = self.or_(skip_check_predicate, cond)
+            return cond
+
+        error_msg = [
+            "Invalid ",
+            *error_msg_context,
+            f", expected to be divisible by {divisibility}",
+        ]
+
+        return self.check_condition(
+            current_block, check_divisibility, "ValueError", error_msg
+        )
+
+    def set_or_check_matched_var_binding(
+        self,
+        current_block: ir.Block,
+        var: Union[spec.Var, int],
+        value: ir.Value,
+        error_msg_context: list[str],
+        arg_field_name: str,
+        *,
+        skip_check_predicate: Optional[ir.Value] = None,
+        skip_cast_and_check: bool = False,
+    ) -> ir.Block:
+        """Bind ``var`` to ``value`` or assert the earlier binding (or an int).
+
+        A first occurrence of a :class:`spec.Var` is range-checked (and
+        divisibility-checked when declared), narrowed and recorded; a later
+        one, or an ``int`` expectation, is compared with ``value``.
+
+        :param current_block: The block to insert the checks into
+        :param var: The variable to bind, or the integer the value must equal
+        :param value: The decoded ``i64`` (or pointer) value
+        :param error_msg_context: The message parts naming the value
+        :param arg_field_name: Where the value came from (``x.shape[0]``)
+        :param skip_check_predicate: An ``i1`` that, when set, skips the checks
+        :param skip_cast_and_check: Record ``value`` as is, without the range
+            check and narrowing (device indices, handles)
+        :return: The block to continue in
+        :raises DSLRuntimeError: ``var`` is neither a ``Var`` nor an ``int``
+        """
+        error_kind = "ValueError"
+        expected_value: ir.Value
+        error_prefix_mismatch = "Mismatched "
+
+        if isinstance(var, spec.Var):
+            if var not in self.matched_var_binding:
+                if not skip_cast_and_check:
+                    current_block = self.check_int_value_dtype_bound(
+                        current_block, value, var.dtype, error_msg_context
+                    )
+                    # check divisibility if specified
+                    if var.divisibility is not None:
+                        current_block = self.check_int_value_divisibility(
+                            current_block,
+                            value,
+                            var.divisibility,
+                            error_msg_context,
+                            skip_check_predicate=skip_check_predicate,
+                        )
+                    with ir.InsertionPoint(current_block):
+                        target_value = self.downcast_i64_to_lower_bits(value, var.dtype)
+                else:
+                    target_value = value
+                self.matched_var_source[var] = value
+                self.matched_var_binding[var] = target_value
+                self.matched_var_arg_field_name[var] = arg_field_name
+                return current_block
+            # A second occurrence: the value must match the first.
+            expected_value = self.matched_var_source[var]
+            prev_arg_field_name = self.matched_var_arg_field_name[var]
+            error_msg_mismatch = [
+                error_prefix_mismatch,
+                *error_msg_context,
+                f", expected to match {prev_arg_field_name}",
+            ]
+        elif isinstance(var, int):
+            with ir.InsertionPoint(current_block):
+                expected_value = self.i64(var)
+
+            error_msg_mismatch = [
+                error_prefix_mismatch,
+                *error_msg_context,
+                f", expected to be {var}",
+            ]
+        else:
+            raise DSLRuntimeError(
+                f"set_or_check_matched_var_binding: expected a Var or an int, "
+                f"got {type(var).__name__}"
+            )
+
+        def check_value_mismatch() -> ir.Value:
+            cond = self.equal(value, expected_value)
+            if skip_check_predicate is not None:
+                cond = self.or_(skip_check_predicate, cond)
+            return cond
+
+        return self.check_condition(
+            current_block,
+            check_value_mismatch,
+            error_kind,
+            error_msg_mismatch,
+        )
+
+    def set_or_check_matched_var_binding_from_shape(
+        self,
+        current_block: ir.Block,
+        var: Union[spec.Var, int],
+        value: ir.Value,
+        field_suffix: str,
+        shape_index: int,
+        arg_context: ArgContext,
+        *,
+        skip_check_predicate: Optional[ir.Value] = None,
+    ) -> ir.Block:
+        """Load the shape value from the argument or match the shape value from the parameter."""
+        field_name = arg_context.get_field_name(field_suffix)
+        arg_field_name = f"{field_name}[{shape_index}]"
+        error_msg = [
+            field_name,
+            f"[{shape_index}] ",
+            *arg_context.get(),
+            self._fn_call_context,
+        ]
+        return self.set_or_check_matched_var_binding(
+            current_block,
+            var,
+            value,
+            error_msg,
+            arg_field_name,
+            skip_check_predicate=skip_check_predicate,
+        )
+
+    def decode_param_shape_from_ffi_array(
+        self,
+        current_block: ir.Block,
+        param: spec.Shape,
+        arg_context: ArgContext,
+        array_cell: ir.Value,
+    ) -> tuple[ir.Block, list[ir.Value]]:
+        """Decode the shape parameter from the TVMFFIArrayCell."""
+        with ir.InsertionPoint(current_block):
+            array_data = self.load_array_cell_data_ptr(array_cell)
+            array_size = self.load_array_cell_size_as_i64(array_cell)
+
+        # Check that the array size matches the expected shape size
+        current_block = self.check_condition(
+            current_block,
+            lambda: self.equal(array_size, self.i64(len(param.shape))),
+            "ValueError",
+            self._arg_err(
+                "Mismatched Shape ",
+                arg_context,
+                f", expected shape size={len(param.shape)}",
+            ),
+        )
+
+        # Load and validate each element of the array
+        load_shapes = []
+
+        def validate_and_load_shape_element(
+            block: ir.Block, index: int
+        ) -> tuple[ir.Block, ir.Value]:
+            """Validate and load a single shape element from the array."""
+            with ir.InsertionPoint(block):
+                type_index: ir.Value = self.load_ffi_any_array_item_type_index(
+                    array_data, index
+                )
+                # Check if type is int or bool (both use v_int64, bool can be converted to int)
+                is_int_val = self.equal(
+                    type_index, self.i32(TVMFFITypeIndex.kTVMFFIInt)
+                )
+
+            # Check that the element is an integer
+            field_name = arg_context.get_field_name("")
+            block = self.check_condition(
+                block,
+                lambda: is_int_val,
+                "TypeError",
+                [
+                    "Invalid shape element type ",
+                    f"{field_name}[{index}]",
+                    " ",
+                    *arg_context.get(),
+                    self._fn_call_context,
+                    ", expected int",
+                ],
+            )
+
+            with ir.InsertionPoint(block):
+                v_int64: ir.Value = self.load_ffi_any_array_item_v_int64(
+                    array_data, index
+                )
+
+            return block, v_int64
+
+        for i in range(len(param.shape)):
+            current_block, v_int64 = validate_and_load_shape_element(current_block, i)
+            load_shapes.append(v_int64)
+
+        return (current_block, load_shapes)
+
+    def decode_param_shape_from_ffi_shape(
+        self,
+        current_block: ir.Block,
+        param: spec.Shape,
+        arg_context: ArgContext,
+        shape_cell: ir.Value,
+    ) -> tuple[ir.Block, list[ir.Value]]:
+        """Decode the shape parameter from the TVMFFIShapeCell."""
+        with ir.InsertionPoint(current_block):
+            shape_data = self.load_shape_cell_data_ptr(shape_cell)
+            shape_size = self.load_shape_cell_size_as_i64(shape_cell)
+
+        current_block = self.check_condition(
+            current_block,
+            lambda: self.equal(shape_size, self.i64(len(param.shape))),
+            "ValueError",
+            self._arg_err(
+                "Mismatched Shape ",
+                arg_context,
+                f", expected shape size={len(param.shape)}",
+            ),
+        )
+
+        with ir.InsertionPoint(current_block):
+            load_shapes = [
+                self.load_i64_array_item(shape_data, i) for i in range(len(param.shape))
+            ]
+
+        return (current_block, load_shapes)
+
+    def decode_param_shape(
+        self,
+        current_block: ir.Block,
+        param: spec.Shape,
+        args: ir.Value,
+        arg_index: int,
+        arg_context: ArgContext,
+    ) -> ir.Block:
+        """Decode the shape parameter at the given index."""
+        with ir.InsertionPoint(current_block):
+            type_index: ir.Value = self.load_ffi_any_array_item_type_index(
+                args, arg_index
+            )
+            # Check if type is ffi.Shape or ffi.Array
+            is_ffi_shape = self.equal(
+                type_index, self.i32(TVMFFITypeIndex.kTVMFFIShape)
+            )
+            is_ffi_array = self.equal(
+                type_index, self.i32(TVMFFITypeIndex.kTVMFFIArray)
+            )
+
+        # Create error block and subsequent blocks
+        error_block = current_block.create_after()
+        ffi_shape_block = error_block.create_after()
+        ffi_array_check_block = ffi_shape_block.create_after()
+        ffi_array_block = ffi_array_check_block.create_after()
+        # Create subsequent_block with i64 arguments for each shape dimension
+        subsequent_block = ffi_array_block.create_after(
+            *[self.i64_type] * len(param.shape)
+        )
+
+        # Branch from current_block: check FFI shape first
+        with ir.InsertionPoint(current_block):
+            self.cond_br(is_ffi_shape, ffi_shape_block, ffi_array_check_block)
+
+        # ffi shape block
+        with ir.InsertionPoint(ffi_shape_block):
+            shape_cell = self.get_object_cell_ptr(
+                self.load_ffi_any_array_item_v_ptr(args, arg_index)
+            )
+        ffi_shape_block, load_shapes = self.decode_param_shape_from_ffi_shape(
+            ffi_shape_block, param, arg_context, shape_cell
+        )
+        with ir.InsertionPoint(ffi_shape_block):
+            self.br(subsequent_block, args=load_shapes)
+
+        # ffi array check block: verify it's actually an Array
+        with ir.InsertionPoint(ffi_array_check_block):
+            self.cond_br(
+                is_ffi_array,
+                ffi_array_block,
+                error_block,
+                branch_weights=self.BRANCH_WEIGHTS_LIKELY,
+            )
+
+        # ffi array block
+        with ir.InsertionPoint(ffi_array_block):
+            array_cell_ptr = self.get_object_cell_ptr(
+                self.load_ffi_any_array_item_v_ptr(args, arg_index)
+            )
+        ffi_array_block, load_shapes = self.decode_param_shape_from_ffi_array(
+            ffi_array_block, param, arg_context, array_cell_ptr
+        )
+        with ir.InsertionPoint(ffi_array_block):
+            self.br(subsequent_block, args=load_shapes)
+
+        # error block
+        with ir.InsertionPoint(error_block):
+            self.raise_error_and_return(
+                "TypeError",
+                self._arg_err(
+                    "Mismatched type ", arg_context, ", expected ffi.Shape or ffi.Array"
+                ),
+            )
+
+        # Set or check the matched variable bindings for each dimension
+        with ir.InsertionPoint(subsequent_block):
+            shape_values = list(subsequent_block.arguments)
+            for i, dim in enumerate(param.shape):
+                subsequent_block = self.set_or_check_matched_var_binding_from_shape(
+                    subsequent_block, dim, shape_values[i], "", i, arg_context
+                )
+
+        return subsequent_block
+
+    def decode_param_tensor_dltensor_ptr(
+        self,
+        current_block: ir.Block,
+        param: spec.Tensor,
+        args: ir.Value,
+        arg_index: int,
+        arg_context: ArgContext,
+    ) -> tuple[ir.Block, ir.Value]:
+        """Decode tensor step0: check index and find out DLTensor*."""
+        # read the type index
+        with ir.InsertionPoint(current_block):
+            type_index: ir.Value = self.load_ffi_any_array_item_type_index(
+                args, arg_index
+            )
+            is_ffi_tensor = self.equal(
+                type_index, self.i32(TVMFFITypeIndex.kTVMFFITensor)
+            )
+            is_dl_tensor = self.equal(
+                type_index, self.i32(TVMFFITypeIndex.kTVMFFIDLTensorPtr)
+            )
+
+        # Create error block and subsequent block
+        error_block = current_block.create_after()
+        ffi_tensor_block = error_block.create_after()
+        dl_tensor_check_block = ffi_tensor_block.create_after()
+        dl_tensor_block = dl_tensor_check_block.create_after()
+        subsequent_block = dl_tensor_block.create_after(self.ptr_type)
+
+        # Branch from current_block: check FFI tensor first
+        with ir.InsertionPoint(current_block):
+            self.cond_br(is_ffi_tensor, ffi_tensor_block, dl_tensor_check_block)
+
+        # ffi tensor block
+        with ir.InsertionPoint(ffi_tensor_block):
+            ffi_tensor_ptr: ir.Value = self.load_ffi_any_array_item_v_ptr(
+                args, arg_index
+            )
+            dl_tensor_ptr = self.get_object_cell_ptr(ffi_tensor_ptr)
+            self.br(subsequent_block, args=[dl_tensor_ptr])
+
+        # dltensor check block: verify it's actually a DLTensor
+        with ir.InsertionPoint(dl_tensor_check_block):
+            self.cond_br(
+                is_dl_tensor,
+                dl_tensor_block,
+                error_block,
+                branch_weights=self.BRANCH_WEIGHTS_LIKELY,
+            )
+
+        # dltensor block
+        with ir.InsertionPoint(dl_tensor_block):
+            dltensor_ptr: ir.Value = self.load_ffi_any_array_item_v_ptr(args, arg_index)
+            self.br(subsequent_block, args=[dltensor_ptr])
+
+        # error block
+        with ir.InsertionPoint(error_block):
+            self.raise_error_and_return(
+                "TypeError",
+                self._arg_err("Mismatched type ", arg_context, ", expected Tensor"),
+            )
+
+        # subsequent block: receive DLTensor pointer and set it to parameter
+        with ir.InsertionPoint(subsequent_block):
+            dl_tensor_ptr = subsequent_block.arguments[0]
+
+        return (subsequent_block, dl_tensor_ptr)
+
+    def decode_param_tensor(
+        self,
+        current_block: ir.Block,
+        param: spec.Tensor,
+        args: ir.Value,
+        arg_index: int,
+        arg_context: ArgContext,
+    ) -> ir.Block:
+        """Decode the tensor parameter at the given index."""
+        current_block, dl_tensor_ptr = self.decode_param_tensor_dltensor_ptr(
+            current_block, param, args, arg_index, arg_context
+        )
+        with ir.InsertionPoint(current_block):
+            data = self.load_dltensor_data_ptr(dl_tensor_ptr)
+            dtype_code = self.load_dltensor_dtype_code(dl_tensor_ptr)
+            dtype_bits = self.load_dltensor_dtype_bits(dl_tensor_ptr)
+            dtype_lanes = self.load_dltensor_dtype_lanes(dl_tensor_ptr)
+            device_type = self.load_dltensor_device_type(dl_tensor_ptr)
+            device_id = self.load_dltensor_device_id(dl_tensor_ptr)
+            ndim = self.load_dltensor_ndim(dl_tensor_ptr)
+            byte_offset = self.load_dltensor_byte_offset(dl_tensor_ptr)
+            data = self.offset_ptr_bytes(data, byte_offset)
+
+        # check data alignment if specified
+        if param.data_alignment is not None:
+
+            def check_alignment() -> ir.Value:
+                # Convert pointer to integer
+                data_as_int = llvm.ptrtoint(self.i64_type, data)
+                # Check if data pointer is divisible by alignment
+                # (uses fast path for power-of-two alignments)
+                return self.i64_divisible_const(data_as_int, param.data_alignment)  # type: ignore[arg-type]
+
+            current_block = self.check_condition(
+                current_block,
+                check_alignment,
+                "ValueError",
+                self._arg_err(
+                    "Misaligned Tensor data ",
+                    arg_context,
+                    f", expected data alignment={param.data_alignment} bytes",
+                ),
+            )
+
+        # The data pointer needs no check; it is bound directly.
+        self.matched_var_binding[param.data] = data
+        self.matched_var_source[param.data] = data
+        self.matched_var_arg_field_name[param.data] = arg_context.get_field_name(
+            ".data"
+        )
+
+        # check device_id constraint if user specifies a device_id variable
+        current_block = self.set_or_check_matched_var_binding(
+            current_block,
+            param.device_id,
+            device_id,
+            self._arg_err("device index ", arg_context),
+            arg_context.get_field_name(".device.index"),
+            skip_cast_and_check=True,
+        )
+
+        # check ndim
+        expected_ndim = len(param.shape)
+        current_block = self.check_condition(
+            current_block,
+            lambda: self.equal(ndim, self.i32(expected_ndim)),
+            "ValueError",
+            self._arg_err(
+                "Mismatched Tensor ", arg_context, f", expected ndim={expected_ndim}"
+            ),
+        )
+        # check device_type
+        current_block = self.check_condition(
+            current_block,
+            lambda: self.equal(device_type, self.i32(param.dlpack_device_type)),
+            "ValueError",
+            self._arg_err(
+                "Mismatched Tensor ",
+                arg_context,
+                f", expected device_type={param.device_type_name}",
+            ),
+        )
+
+        # check dtype
+        def dtype_equal() -> ir.Value:
+            # MLIR integers are signless (i8, i16, i32, i64), so a function compiled
+            # for int8 is bit-identical to one compiled for uint8. Accept both signed
+            # (kDLInt=0) and unsigned (kDLUInt=1) integer dtype codes so that cached
+            # compiled functions work regardless of which signedness first populated
+            # the JIT cache.
+            if param.dtype.type_code in (
+                tvm_ffi._dtype.DataTypeCode.INT,
+                tvm_ffi._dtype.DataTypeCode.UINT,
+            ):
+                dtype_code_match = self.or_(
+                    self.equal(dtype_code, self.i8(tvm_ffi._dtype.DataTypeCode.INT)),
+                    self.equal(dtype_code, self.i8(tvm_ffi._dtype.DataTypeCode.UINT)),
+                )
+            else:
+                dtype_code_match = self.equal(
+                    dtype_code, self.i8(param.dtype.type_code)
+                )
+            dtype_bits_match = self.equal(dtype_bits, self.i8(param.dtype.bits))
+            dtype_lanes_match = self.equal(dtype_lanes, self.i16(param.dtype.lanes))
+            return self.and_(
+                dtype_code_match, self.and_(dtype_bits_match, dtype_lanes_match)
+            )
+
+        current_block = self.check_condition(
+            current_block,
+            dtype_equal,
+            "ValueError",
+            self._arg_err(
+                "Mismatched Tensor ", arg_context, f", expected dtype={param.dtype}"
+            ),
+        )
+
+        with ir.InsertionPoint(current_block):
+            shape = self.load_dltensor_shape(dl_tensor_ptr)
+            load_shapes = [
+                self.load_i64_array_item(shape, index) for index in range(expected_ndim)
+            ]
+            strides = self.load_dltensor_strides(dl_tensor_ptr)
+            load_strides = [
+                self.load_i64_array_item(strides, index)
+                for index in range(expected_ndim)
+            ]
+
+        # check the shapes
+        for index in range(expected_ndim):
+            current_block = self.set_or_check_matched_var_binding_from_shape(
+                current_block,
+                param.shape[index],
+                load_shapes[index],
+                ".shape",
+                index,
+                arg_context,
+            )
+
+        if param.strides is not None:
+            for index in range(expected_ndim):
+                # if shape[index] == 1 then, stride value constraint does not matter
+                # this is specifically to avoid some corner cases where pytorch normalizes
+                # stride value to 1 when shape[index] == 1
+                with ir.InsertionPoint(current_block):
+                    skip_check_predicate = self.equal(load_shapes[index], self.i64(1))
+                current_block = self.set_or_check_matched_var_binding_from_shape(
+                    current_block,
+                    param.strides[index],
+                    load_strides[index],
+                    ".strides",
+                    index,
+                    arg_context,
+                    skip_check_predicate=skip_check_predicate,
+                )
+        else:
+            current_block = self.check_condition(
+                current_block,
+                lambda: self.is_contiguous(param.shape, load_shapes, load_strides),
+                "ValueError",
+                self._arg_err(
+                    "Mismatched Tensor ", arg_context, ", expected contiguous"
+                ),
+            )
+        return current_block
+
+    def decode_param_stream(
+        self,
+        current_block: ir.Block,
+        param: spec.Stream,
+        args: ir.Value,
+        arg_index: int,
+        arg_context: ArgContext,
+    ) -> ir.Block:
+        """Decode the stream parameter at the given index."""
+        # stream is decoded as opaque handle
+        return self.decode_param_opaque_handle(
+            current_block,
+            param.var,
+            args,
+            arg_index,
+            arg_context,
+            allow_int_as_ptr=True,
+        )
+
+    def decode_param_cuda_event(
+        self,
+        current_block: ir.Block,
+        param: spec.CudaEvent,
+        args: ir.Value,
+        arg_index: int,
+        arg_context: ArgContext,
+    ) -> ir.Block:
+        """Decode the CUDA event parameter at the given index."""
+        # event is decoded as opaque handle
+        return self.decode_param_opaque_handle(
+            current_block,
+            param.var,
+            args,
+            arg_index,
+            arg_context,
+            allow_int_as_ptr=True,
+        )
+
+    def decode_param_cuda_graph_generic_handle(
+        self,
+        current_block: ir.Block,
+        param: spec.CudaGraph | spec.CudaGraphNode,
+        args: ir.Value,
+        arg_index: int,
+        arg_context: ArgContext,
+    ) -> ir.Block:
+        """Decode the CUDA graph / graph node parameter at the given index."""
+        # graph and graph node are decoded as opaque handles
+        return self.decode_param_opaque_handle(
+            current_block,
+            param.var,
+            args,
+            arg_index,
+            arg_context,
+            allow_int_as_ptr=True,
+        )
+
+    def decode_param_data_pointer(
+        self,
+        current_block: ir.Block,
+        param: spec.DataPointer,
+        args: ir.Value,
+        arg_index: int,
+        arg_context: ArgContext,
+    ) -> ir.Block:
+        """Decode the data pointer parameter at the given index."""
+        # data pointer is decoded as opaque handle
+        return self.decode_param_opaque_handle(
+            current_block,
+            param.var,
+            args,
+            arg_index,
+            arg_context,
+            allow_int_as_ptr=True,
+            address_space=param.address_space,
+        )
+
+    def find_env_stream(self, params: list[spec.Param]) -> Optional[ir.Value]:
+        """``TVMFFIEnvGetStream`` for the device of the first non-CPU tensor.
+
+        :param params: The parameters (tuples are searched recursively)
+        :return: The stream handle, or None when every tensor is on the CPU
+        """
+        for param in params:
+            if isinstance(param, spec.TupleParam):
+                # Recursively check tuples
+                result = self.find_env_stream(param.params)
+                if result is not None:
+                    return result
+            elif (
+                isinstance(param, spec.Tensor)
+                and param.dlpack_device_type != tvm_ffi.DLDeviceType.kDLCPU
+            ):
+                device_type = self.i32(param.dlpack_device_type)
+                device_id = self.matched_var_binding[param.device_id]
+                return llvm.call(
+                    result=self.ptr_type,
+                    callee="TVMFFIEnvGetStream",
+                    callee_operands=[device_type, device_id],
+                    op_bundle_sizes=[],
+                    op_bundle_operands=[],
+                )
+        return None
+
+    def get_expected_num_args(self, params: list[spec.Param]) -> int:
+        """The argument count the wrapper demands: every param but ``EnvStream``."""
+        expected_num_args = 0
+        for param in params:
+            if not isinstance(param, spec.EnvStream):
+                expected_num_args += 1
+        return expected_num_args
+
+    def decode_param_tuple(
+        self,
+        current_block: ir.Block,
+        param: spec.TupleParam,
+        args: ir.Value,
+        arg_index: int,
+        arg_context: ArgContext,
+    ) -> ir.Block:
+        """Decode the tuple parameter at the given index."""
+        # Check if type is kTVMFFIArray
+        with ir.InsertionPoint(current_block):
+            type_index: ir.Value = self.load_ffi_any_array_item_type_index(
+                args, arg_index
+            )
+            is_ffi_array = self.equal(
+                type_index, self.i32(TVMFFITypeIndex.kTVMFFIArray)
+            )
+
+        # Check that the type is an array
+        current_block = self.check_condition(
+            current_block,
+            lambda: is_ffi_array,
+            "TypeError",
+            self._arg_err(
+                "Mismatched type ", arg_context, ", expected ffi.Array for tuple"
+            ),
+        )
+
+        # Load the array cell
+        with ir.InsertionPoint(current_block):
+            array_cell_ptr = self.get_object_cell_ptr(
+                self.load_ffi_any_array_item_v_ptr(args, arg_index)
+            )
+            array_data = self.load_array_cell_data_ptr(array_cell_ptr)
+            array_size = self.load_array_cell_size_as_i64(array_cell_ptr)
+
+        # Check that the array size matches the expected tuple size
+        current_block = self.check_condition(
+            current_block,
+            lambda: self.equal(array_size, self.i64(len(param.params))),
+            "ValueError",
+            self._arg_err(
+                "Mismatched tuple size ",
+                arg_context,
+                f", expected tuple size={len(param.params)}",
+            ),
+        )
+
+        # Recursively decode each element of the tuple
+        for i, tuple_param in enumerate(param.params):
+            # Create nested context for the tuple element
+            nested_context = arg_context.get_element_context(i)
+            current_block = self.decode_param(
+                current_block, tuple_param, array_data, i, nested_context
+            )
+
+        return current_block
+
+    def decode_param(
+        self,
+        current_block: ir.Block,
+        param: spec.Param,
+        args: ir.Value,
+        arg_index: int,
+        arg_context: ArgContext,
+    ) -> ir.Block:
+        """Decode ``args[arg_index]`` as ``param``, dispatching on its kind.
+
+        :param current_block: The block to continue from
+        :param param: The parameter specification
+        :param args: The ``TVMFFIAny*`` array
+        :param arg_index: The slot in ``args``
+        :param arg_context: Where the value comes from, for error messages
+        :return: The block to continue in
+        :raises DSLUserCodeError: ``UNSUP_TVM_FFI_PARAM`` for an unknown kind or
+            a ``Var`` dtype that is not an integer, a float or a handle
+        """
+        if isinstance(param, spec.Var):
+            if _is_integer_like_dtype(param.dtype):
+                return self.decode_param_int(
+                    current_block, param, args, arg_index, arg_context
+                )
+            if _is_float_like_dtype(param.dtype):
+                return self.decode_param_float(
+                    current_block, param, args, arg_index, arg_context
+                )
+            if param.dtype.type_code == tvm_ffi._dtype.DataTypeCode.HANDLE:
+                return self.decode_param_opaque_handle(
+                    current_block, param, args, arg_index, arg_context
+                )
+            raise DSLUserCodeError(
+                DiagId.UNSUP_TVM_FFI_PARAM,
+                detail=f"Unsupported Var dtype: {param.dtype}",
+            )
+        elif isinstance(param, spec.Shape):
+            return self.decode_param_shape(
+                current_block, param, args, arg_index, arg_context
+            )
+        elif isinstance(param, spec.Tensor):
+            return self.decode_param_tensor(
+                current_block, param, args, arg_index, arg_context
+            )
+        elif isinstance(param, spec.Stream):
+            return self.decode_param_stream(
+                current_block, param, args, arg_index, arg_context
+            )
+        elif isinstance(param, spec.CudaEvent):
+            return self.decode_param_cuda_event(
+                current_block, param, args, arg_index, arg_context
+            )
+        elif isinstance(param, (spec.CudaGraph, spec.CudaGraphNode)):
+            return self.decode_param_cuda_graph_generic_handle(
+                current_block, param, args, arg_index, arg_context
+            )
+        elif isinstance(param, spec.EnvStream):
+            # Bound after every argument is decoded (setup_env_stream_params).
+            return current_block
+        elif isinstance(param, spec.DataPointer):
+            return self.decode_param_data_pointer(
+                current_block, param, args, arg_index, arg_context
+            )
+        elif isinstance(
+            param,
+            (spec.ConstNone, spec.ConstBool, spec.ConstInt, spec.ConstFloat),
+        ):
+            return self.decode_param_const(
+                current_block, param, args, arg_index, arg_context
+            )
+        elif isinstance(param, spec.TupleParam):
+            return self.decode_param_tuple(
+                current_block, param, args, arg_index, arg_context
+            )
+        else:
+            raise DSLUserCodeError(
+                DiagId.UNSUP_TVM_FFI_PARAM,
+                detail=f"Unsupported parameter type: {type(param)}",
+            )
+
+    def setup_env_stream_params(
+        self,
+        current_block: ir.Block,
+        params: list[spec.Param],
+        env_stream: Optional[ir.Value],
+    ) -> ir.Block:
+        """Bind every ``EnvStream`` parameter to the queried ``env_stream``.
+
+        :raises DSLUserCodeError: ``UNSUP_TVM_FFI_PARAM`` when an ``EnvStream``
+            is declared but no parameter is a non-CPU tensor
+        """
+        for param in params:
+            if isinstance(param, spec.EnvStream):
+                if env_stream is None:
+                    raise DSLUserCodeError(
+                        DiagId.UNSUP_TVM_FFI_PARAM,
+                        detail=f"EnvStream cannot be detected in `{self.current_fn_signature}`"
+                        " we need parameters to contain GPU Tensors",
+                    )
+                self.matched_var_binding[param.var] = env_stream
+                self.matched_var_source[param.var] = env_stream
+                self.matched_var_arg_field_name[param.var] = param.name
+
+        return current_block
+
+    def attach_ffi_func(
+        self,
+        symbol_name: str,
+        params: Sequence[spec.Param],
+        call_provider: CallProvider,
+        fn_display_name: Optional[str] = None,
+    ) -> None:
+        """Add ``llvm.func @__tvm_ffi_<symbol_name>`` to the module.
+
+        :param symbol_name: The wrapper's name, after the ``__tvm_ffi_`` prefix
+        :param params: The parameter specifications, in argument order
+        :param call_provider: Emits the call once the arguments are decoded
+        :param fn_display_name: The name shown in error messages (defaults to
+            ``symbol_name``)
+        """
+        params_list: list[spec.Param] = list(params)
+        self.get_or_create_set_raised_from_cstr_parts(
+            num_parts=self.set_raised_from_cstr_parts_max_num_parts
+        )
+        fn_display_name = (
+            fn_display_name if fn_display_name is not None else symbol_name
+        )
+        self.current_fn_signature = spec.signature(fn_display_name, params_list)
+        self._fn_call_context = f" when calling: `{self.current_fn_signature}`"
+
+        with ir.InsertionPoint(self.module.body):
+            # void TVMFFIErrorSetRaisedFromCStrParts(
+            #    const char* error_kind, const char* messages, int32_t num_parts);
+            self.find_or_declare_extern_func(
+                "TVMFFIErrorSetRaisedFromCStrParts",
+                [self.ptr_type, self.ptr_type, self.i32_type],
+                self.void_type,
+            )
+            # void* TVMFFIEnvGetStream(int32_t device_type, int32_t device_id);
+            self.find_or_declare_extern_func(
+                "TVMFFIEnvGetStream",
+                [self.i32_type, self.i32_type],
+                self.ptr_type,
+            )
+
+            (handle, args, num_args, result), entry_block = self.function(
+                name=f"__tvm_ffi_{symbol_name}",
+                params_type=[
+                    self.ptr_type,
+                    self.ptr_type,
+                    self.i32_type,
+                    self.ptr_type,
+                ],
+                ret_type=self.i32_type,
+            )
+            expected_num_args = self.get_expected_num_args(params_list)
+
+            current_block = entry_block
+            current_block = self.check_condition(
+                current_block,
+                lambda: self.equal(num_args, self.i32(expected_num_args)),
+                "TypeError",
+                [
+                    f"Expects {expected_num_args} parameters",
+                    self._fn_call_context,
+                ],
+            )
+
+            # The argument index runs over the slots only: an EnvStream has none.
+            ffi_arg_index = 0
+            for param in params_list:
+                if isinstance(param, spec.EnvStream):
+                    continue
+
+                arg_context = ArgContext(
+                    param_name=param.name,  # type: ignore[attr-defined]
+                    arg_index=ffi_arg_index,
+                    tuple_indices=[],
+                )
+                current_block = self.decode_param(
+                    current_block, param, args, ffi_arg_index, arg_context
+                )
+                ffi_arg_index += 1
+
+            with ir.InsertionPoint(current_block):
+                env_stream = self.find_env_stream(params_list)
+
+            current_block = self.setup_env_stream_params(
+                current_block, params_list, env_stream
+            )
+
+            context = CallContext(
+                fn_name=symbol_name,
+                module=self.module,
+                entry_block=entry_block,
+                params=params_list,
+                env_stream=env_stream,
+                matched_var_binding=self.matched_var_binding,
+                raw_args=args,
+                raw_num_args=num_args,
+                raw_result=result,
+                builder=self,
+            )
+
+            current_block = call_provider(current_block, context)
+
+            with ir.InsertionPoint(current_block):
+                self.return_(self.i32(0))
+
+
+def attach_ffi_func(
+    module: ir.Module,
+    symbol_name: str,
+    params: Sequence[spec.Param],
+    call_provider: CallProvider,
+    fn_display_name: Optional[str] = None,
+) -> None:
+    """Add ``llvm.func @__tvm_ffi_<symbol_name>`` with the TVM-FFI ABI to ``module``.
+
+    The wrapper checks the argument count, decodes and checks each argument
+    against ``params`` and hands the bindings to ``call_provider``. It is
+    emitted inside ``module``'s context and location.
+
+    :param module: The module to attach the function to
+    :param symbol_name: The wrapper's name, after the ``__tvm_ffi_`` prefix
+    :param params: The parameter specifications, in argument order
+    :param call_provider: The calling convention towards the callee
+    :param fn_display_name: The name shown in error messages (defaults to
+        ``symbol_name``)
+    """
+    builder = TVMFFIFunctionBuilder(module)
+    builder.attach_ffi_func(symbol_name, params, call_provider, fn_display_name)
+
+
+def rename_tvm_ffi_function(
+    module: ir.Module,
+    old_name: str,
+    new_name: str,
+) -> None:
+    """Rename ``@__tvm_ffi_<old_name>`` to ``@__tvm_ffi_<new_name>`` in ``module``.
+
+    :param module: The module holding the wrapper
+    :param old_name: The current name, after the ``__tvm_ffi_`` prefix
+    :param new_name: The new name, after the ``__tvm_ffi_`` prefix
+    :raises DSLRuntimeError: No such wrapper in the module
+    """
+    with module.context:
+        builder = TVMFFIFunctionBuilder(module)
+        old_symbol = f"__tvm_ffi_{old_name}"
+        fun = builder.find_func_in_module(module, old_symbol)
+        if fun is None:
+            raise DSLRuntimeError(f"Function '@{old_symbol}' not found in the module.")
+        fun.attributes["sym_name"] = ir.StringAttr.get(f"__tvm_ffi_{new_name}")
