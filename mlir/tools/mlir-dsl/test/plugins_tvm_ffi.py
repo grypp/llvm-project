@@ -2,10 +2,11 @@
 # RUN: env MLIR_DSL_ENABLE_TVM_FFI=1 %PYTHON %s 2>&1 | FileCheck %s --check-prefix=EXEC
 # RUN: %PYTHON %s 2>&1 | FileCheck %s --check-prefix=OFF
 # REQUIRES: host-supports-jit, tvm_ffi
-# The TVM-FFI export plugin (Design 11.6, `plugins/thirdparty/tvm_ffi/`) and the
+# The TVM-FFI export plugin (`plugins/adapters/tvm_ffi/`) and the
 # builder it drives (`tvm_ffi_builder`, DSL-owned MLIR emission). The plugin is
-# listed when the `tvm_ffi` package is importable, never imports it at import
-# time and is inert unless MLIR_DSL_ENABLE_TVM_FFI is set. Enabled, it maps the
+# installed when the `tvm_ffi` package is importable (the record drops it
+# otherwise), never imports it at import time and is inert unless
+# MLIR_DSL_ENABLE_TVM_FFI is set. Enabled, it maps the
 # Python signature of each host entry to `spec` parameters (scalar annotations
 # through NumericToTVMFFIDtype to `Var`, pointers to `DataPointer`, Meta values
 # to `Const*`), adds `llvm.func @__tvm_ffi_<name>` with the TVM-FFI ABI that
@@ -15,19 +16,20 @@
 # UNSUP_TVM_FFI_PARAM path are the builder's own.
 import os
 import sys
+from dataclasses import replace
 
 import numpy as np
 
 import mlir.mlir_dsl as m
 from mlir import ir
-from mlir.dsl.plugins.thirdparty import tvm_ffi as plugin_module
-from mlir.dsl.plugins.thirdparty.tvm_ffi import NumericToTVMFFIDtype, TvmFfiPlugin
-from mlir.dsl.plugins.thirdparty.tvm_ffi import (
+from mlir.dsl.plugins.adapters import tvm_ffi as plugin_module
+from mlir.dsl.plugins.adapters.tvm_ffi import NumericToTVMFFIDtype, TvmFfiPlugin
+from mlir.dsl.plugins.adapters.tvm_ffi import (
     DirectCallProvider,
     NopCallProvider,
     spec,
 )
-from mlir.dsl.plugins.thirdparty.tvm_ffi import attach_ffi_func, rename_tvm_ffi_function
+from mlir.dsl.plugins.adapters.tvm_ffi import attach_ffi_func, rename_tvm_ffi_function
 
 available = plugin_module.available
 DRYRUN = bool(os.environ.get("MLIR_DSL_DRYRUN"))
@@ -55,8 +57,9 @@ print("TABLE:", ", ".join(f"{k.__name__}={v}" for k, v in NumericToTVMFFIDtype.i
 # CHECK: SYMBOL: __tvm_ffi_axpy
 # CHECK: TABLE: Boolean=bool, Int8=int8, Int16=int16, Int32=int32, Int64=int64, Uint8=uint8, Uint16=uint16, Uint32=uint32, Uint64=uint64, Float16=float16, BFloat16=bfloat16, Float32=float32, Float64=float64
 
-# With the package hidden, a DSL whose variable is set cannot be constructed;
-# one without the variable installs the inert plugin.
+# With the package hidden the plugin is not available: the record drops it at
+# construction and remembers it, with or without the variable set (the
+# CONFIG_INVALID check of `install` is reached only with the package present).
 saved_module, saved_var = sys.modules.get("tvm_ffi"), os.environ.get(
     "MLIR_DSL_ENABLE_TVM_FFI"
 )
@@ -64,27 +67,27 @@ sys.modules["tvm_ffi"] = None
 os.environ["MLIR_DSL_ENABLE_TVM_FFI"] = "1"
 
 
-class MissingDSL(m.MlirDSL):
-    plugins = [TvmFfiPlugin()]
+class MissingDSL(m.MlirTestDSL):
+    plugins = replace(m.MlirTestDSL.plugins, adapters=[TvmFfiPlugin()])
 
 
 expect("MISSING", MissingDSL)
-# CHECK: MISSING CONFIG_MISSING_TVM_FFI
-# CHECK: error[CONFIG_MISSING_TVM_FFI]:{{.*}} `MLIR_DSL_ENABLE_TVM_FFI` is set, but the `tvm_ffi` package is not installed
-# CHECK: suggestion:{{.*}} Install it with `pip install apache-tvm-ffi`.
-# CHECK: suggestion:{{.*}} Or unset `MLIR_DSL_ENABLE_TVM_FFI` to compile without the TVM-FFI export.
-# OFF:   MISSING CONFIG_MISSING_TVM_FFI
+print("DROPPED:", list(MissingDSL().plugins.adapters), MissingDSL().unavailable_plugins)
+# CHECK: MISSING no error
+# CHECK: DROPPED: [] {'adapters[tvm_ffi]': 'TvmFfiPlugin'}
+# OFF:   MISSING no error
+# OFF:   DROPPED: [] {'adapters[tvm_ffi]': 'TvmFfiPlugin'}
 del os.environ["MLIR_DSL_ENABLE_TVM_FFI"]
 
 
-class InertDSL(m.MlirDSL):
-    plugins = [TvmFfiPlugin()]
+class InertDSL(m.MlirTestDSL):
+    plugins = replace(m.MlirTestDSL.plugins, adapters=[TvmFfiPlugin()])
 
 
-inert = InertDSL().plugins[0]
-print("HIDDEN:", available(), inert.enabled, inert.shared_libs())
-# CHECK: HIDDEN: False False []
-# OFF:   HIDDEN: False False []
+inert = InertDSL()
+print("HIDDEN:", available(), list(inert.plugins.adapters), inert.unavailable_plugins)
+# CHECK: HIDDEN: False [] {'adapters[tvm_ffi]': 'TvmFfiPlugin'}
+# OFF:   HIDDEN: False [] {'adapters[tvm_ffi]': 'TvmFfiPlugin'}
 if saved_module is None:
     del sys.modules["tvm_ffi"]
 else:
@@ -92,9 +95,9 @@ else:
 if saved_var is not None:
     os.environ["MLIR_DSL_ENABLE_TVM_FFI"] = saved_var
 
-listed = [p for p in m.MlirDSL.plugins if p.name == "tvm_ffi"]
-dsl = m.MlirDSL()
-installed = [p for p in dsl.plugins if p.name == "tvm_ffi"][0]
+listed = [p for p in m.MlirTestDSL.plugins.adapters if p.name == "tvm_ffi"]
+dsl = m.MlirTestDSL()
+installed = [p for p in dsl.plugins.adapters if p.name == "tvm_ffi"][0]
 print(
     "PLUGIN:",
     len(listed),

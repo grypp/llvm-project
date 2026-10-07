@@ -59,7 +59,7 @@ def is_less(a: m.Int32, x: m.Float32) -> m.Boolean:
 
 def check(call, r, expected):
     """Assert one host result. Under MLIR_DSL_DRYRUN results are staged (`?`)."""
-    if m.is_dynamic_expr(r):
+    if m.is_mlir_op(r):
         return
     # A host result is a Numeric: `.value` is the Python payload, `int()` and
     # `float()` convert it, `repr()` names the dtype.

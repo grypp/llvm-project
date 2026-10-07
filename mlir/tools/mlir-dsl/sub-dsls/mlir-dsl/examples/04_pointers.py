@@ -52,7 +52,7 @@ def check(label, actual, expected):
 
 
 def main():
-    dsl = m.MlirDSL()
+    dsl = m.MlirTestDSL()
     for n in (0, 1, 17, 257):
         x = np.arange(n, dtype=np.float32)
         y = np.full(n, 3.0, dtype=np.float32)

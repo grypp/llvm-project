@@ -1,8 +1,8 @@
 # RUN: env MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR=1 %PYTHON %s 2>&1 | FileCheck %s
 # RUN: %PYTHON %s 2>&1 | FileCheck %s --check-prefix=EXEC
 # REQUIRES: host-supports-jit
-# The explicit builders `for_`/`if_`/`while_`/`yield_` (Design 7.7) under
-# `preprocess=False`, and the executors behind the rewrite (Design 7.3-7.5):
+# The explicit builders `for_`/`if_`/`while_`/`yield_` under
+# `preprocess=False`, and the executors behind the rewrite:
 # the bound promotion table, the rejection of loop options, the join checks
 # every region applies to its write_args (`PHASE_MUTATE_PYTHON`,
 # `TYPE_UNSTABLE_JOIN`, `CONTAINER_STRUCTURE_CHANGED`) with the diagnostics
@@ -13,8 +13,9 @@ import numpy as np
 
 import mlir.mlir_dsl as m
 from mlir import ir
-from mlir.dsl.plugins.dialects.scf import executors, in_
+from mlir.dsl.plugins.ast_preprocessor.scf import executors
 from mlir.dsl.plugins.ast_preprocessor.scf import _builtin_redirector
+from mlir.dsl.plugins.ast_preprocessor.scf import in_
 
 
 def report(fn, *args):
@@ -248,7 +249,7 @@ def while_wrong_yield(n: m.Int32) -> m.Int32:
 report(while_wrong_yield, 3)
 
 
-# --- Bound promotion of the staged loop (Design 7.3) ------------------------
+# --- Bound promotion of the staged loop ------------------------
 
 
 @m.jit
@@ -283,8 +284,8 @@ def unknown_option(n: m.Int32) -> m.Int32:
     return acc
 
 
-# CHECK: ERROR: unknown_option CALL_UNEXPECTED_KWARG
-# CHECK: error[CALL_UNEXPECTED_KWARG]:{{.*}}This call passes a keyword argument `pipelining`
+# CHECK: ERROR: unknown_option CALL_ARGUMENTS
+# CHECK: error[CALL_ARGUMENTS]:{{.*}}The call to `range` does not match its parameters: no loop option is named `pipelining`
 report(unknown_option, 4)
 
 
@@ -331,7 +332,7 @@ with ir.Context():  # `unroll=1` means "do not unroll": the attribute says so
 # CHECK: LOOP_UNROLL: #llvm.loop_annotation<unroll = <disable = true, count = 1 : i32>>
 
 
-# --- The join checks (`ScfGenerator`, Design 4, 7.5, 8) ----------------------
+# --- The join checks (`ScfGenerator`) ----------------------
 
 
 @m.jit
@@ -459,6 +460,33 @@ def ternary_lists(n: m.Int32) -> m.Int32:
 report(ternary_lists, 3)  # xs[0] = 4, pair[1] = 6
 
 
+@m.jit
+def record_condition(n: m.Int32) -> m.Int32:
+    # A record of MLIR ops is an MLIR op to `is_mlir_op`, but not a condition:
+    # the `if` names the record instead of taking Python truthiness.
+    p = Pair(lo=n, hi=n)
+    acc = n
+    if p:
+        acc = n + 1
+    return acc
+
+
+# CHECK: ERROR: record_condition ARG_NOT_NUMERIC
+# CHECK: error[ARG_NOT_NUMERIC]:{{.*}}Argument `if condition` expects a numeric value, but this call passes a value of type `Pair`.
+report(record_condition, 1)
+
+
+@m.jit
+def record_ternary(n: m.Int32) -> m.Int32:
+    p = Pair(lo=n, hi=n)
+    return n if p else n + 1
+
+
+# CHECK: ERROR: record_ternary ARG_NOT_NUMERIC
+# CHECK: error[ARG_NOT_NUMERIC]:{{.*}}Argument `if condition` expects a numeric value, but this call passes a value of type `Pair`.
+report(record_ternary, 1)
+
+
 # CHECK: ERROR: turns_staged PHASE_DYNAMIC_TO_STATIC_BOOL
 # CHECK: = note:{{.*}}the `while` condition was a Python value on the first evaluation and a runtime value on a later one
 report(turns_staged, 3)
@@ -527,7 +555,7 @@ def ternary_meta_arm(a: m.Int32) -> m.Int32:
 report(ternary_meta_arm, 3)
 
 
-# --- `and_`/`or_`/`not_`/`any_`/`all_`/`in_` (Design 7.5) -------------------
+# --- `and_`/`or_`/`not_`/`any_`/`all_`/`in_` -------------------
 
 # On Meta values they are Python's operators; `any_`/`all_` always answer a
 # folded `Boolean`.
@@ -573,12 +601,12 @@ def in_non_sequence(a: m.Int32) -> m.Boolean:
     return a in 5  # `in` needs a sequence when an operand is staged
 
 
-# CHECK: ERROR: in_non_sequence UNSUP_COMPARISON_OPERATOR
-# CHECK: error[UNSUP_COMPARISON_OPERATOR]:{{.*}}The comparison operator `in` is not supported in compiled code.
+# CHECK: ERROR: in_non_sequence UNSUP_SYNTAX
+# CHECK: error[UNSUP_SYNTAX]:{{.*}}The comparison operator `in` is not supported in a compiled function: use one of
 report(in_non_sequence, 3)
 
 
-# --- `max`/`min`/`any`/`all` through `_builtin_redirector` (Design 7.3) ------
+# --- `max`/`min`/`any`/`all` through `_builtin_redirector` ------
 
 
 @m.jit
@@ -633,8 +661,8 @@ def max_keyword(a: m.Int32, b: m.Int32) -> m.Int32:
     return max(a, b, key=abs)
 
 
-# CHECK: ERROR: max_keyword CALL_BUILTIN_KWARGS_UNSUPPORTED
-# CHECK: error[CALL_BUILTIN_KWARGS_UNSUPPORTED]:{{.*}}`max` does not accept keyword arguments when one of its arguments is a runtime value.
+# CHECK: ERROR: max_keyword UNSUP_SYNTAX
+# CHECK: error[UNSUP_SYNTAX]:{{.*}}`max` with keyword arguments is not supported in a compiled function when one of its arguments is a runtime value: pass positional arguments only.
 report(max_keyword, 3, 4)
 
 
@@ -643,6 +671,6 @@ def other_builtin(a: m.Int32) -> m.Int32:
     return _builtin_redirector(len)([a])  # any other builtin with a staged argument
 
 
-# CHECK: ERROR: other_builtin UNSUP_BUILTIN
-# CHECK: error[UNSUP_BUILTIN]:{{.*}}The built-in function `len` is not allowed in compiled code when one of its arguments is a runtime value.
+# CHECK: ERROR: other_builtin UNSUP_SYNTAX
+# CHECK: error[UNSUP_SYNTAX]:{{.*}}The built-in function `len` is not supported in a compiled function when one of its arguments is a runtime value
 report(other_builtin, 3)

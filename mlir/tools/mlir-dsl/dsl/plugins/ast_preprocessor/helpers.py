@@ -8,13 +8,13 @@ Trace-time helpers referenced by the code the AST preprocessor generates.
 ``DSLPreprocessor`` rewrites native ``for``/``if``/``while`` statements into
 region functions decorated with the selectors below (``loop_selector``,
 ``if_selector``, ``while_selector``) and routes expressions through the
-executors (``if_executor``, ``ifExp_executor``, ``compare_executor``,
+executors (``if_executor``, ``ifexp_executor``, ``compare_executor``,
 ``assert_executor``, ...). The selectors forward to the :class:`Executor` of
 the DSL that is tracing, which the DSL fills through
-:meth:`Executor.set_functions` (Design 7.3). The module also holds the loop
+:meth:`Executor.set_functions`. The module also holds the loop
 iterables (``range``) and the trace-time dispatch helpers
 (``materialize_for_iter``, ``is_dynamic_range``) that choose between a staged
-loop and a native Python loop (Design 7.4).
+loop and a native Python loop.
 """
 
 import builtins
@@ -25,17 +25,15 @@ from functools import wraps
 from types import BuiltinFunctionType
 from typing import Any, Optional
 
-from ...core.common import DSLRuntimeError, DSLUserCodeError, get_current_dsl
-from ...core.diagnostics import DiagId, _is_dsl_module
-from ...core.executor import (
+from ...core.common import DSLRuntimeError, DSLUserCodeError
+from ...core.diagnostics import DiagId
+from ...core.staging import (
     Executor,
     _active_executor,
-    _is_dynamic,
     executor,
-    is_dynamic_expr,
+    is_mlir_op,
 )
 from ...util.logger import log
-from ...core.executor import is_dynamic_expression
 
 __all__ = [
     "Executor",
@@ -45,19 +43,18 @@ __all__ = [
     "while_selector",
     "if_executor",
     "while_executor",
-    "ifExp_executor",
+    "ifexp_executor",
     "range",
     "is_dynamic_range",
     "materialize_for_iter",
     "register_deferred_for_error",
     "raise_deferred_for_error",
     "discard_deferred_for_error",
-    "is_dynamic_expr",
+    "is_mlir_op",
     "assert_executor",
     "bool_short_circuits",
     "bool_cast",
     "compare_executor",
-    "cf_symbol_check",
     "redirect_builtin_function",
     "get_locals_or_none",
     "closure_check",
@@ -106,7 +103,7 @@ def loop_selector(
     unroll_full: bool = False,
     **options: Any,
 ) -> Callable[..., Any]:
-    """Decorator the preprocessor puts on a staged loop body (Design 7.2).
+    """Decorator the preprocessor puts on a staged loop body.
 
     The decorated body function is executed immediately through
     ``Executor.for_execute`` and the decoration evaluates to the loop's
@@ -222,7 +219,7 @@ def if_executor(
     )
 
 
-def ifExp_executor(
+def ifexp_executor(
     *,
     pred: Any,
     block_args: tuple[Any, ...],
@@ -240,7 +237,7 @@ def ifExp_executor(
     if branch_weights is None:
         branch_weights = wrapped_branch_weights
 
-    if not _is_dynamic(pred):
+    if not is_mlir_op(pred):
         return then_block(*block_args) if pred else else_block(*block_args)
     return executor.ifexp_execute(
         pred, block_args, then_block, else_block, branch_weights=branch_weights
@@ -258,7 +255,7 @@ class range:
     Accepts ``range(stop)``, ``range(start, stop)`` and ``range(start, stop,
     step)``; ``unroll``/``unroll_full`` become the loop annotation of the
     ``scf.for``; any other keyword is forwarded untouched to the DSL's loop
-    executor, which consumes or rejects it (``CALL_UNEXPECTED_KWARG`` in the
+    executor, which consumes or rejects it (``CALL_ARGUMENTS`` in the
     base). Iterating it directly is an error: only the preprocessor's rewrite
     consumes it.
     """
@@ -271,7 +268,11 @@ class range:
         **options: Any,
     ) -> None:
         if len(args) not in (1, 2, 3):
-            raise DSLUserCodeError(DiagId.UNSUP_RANGE_ARGS)
+            raise DSLUserCodeError(
+                DiagId.UNSUP_SYNTAX,
+                what="`range(...)` with this number of positional arguments",
+                detail=": call it as `range(stop)`, `range(start, stop)` or `range(start, stop, step)`, with loop options such as `unroll=` by keyword",
+            )
         self.start = 0 if len(args) == 1 else args[0]
         self.stop = args[0] if len(args) == 1 else args[1]
         self.step = args[2] if len(args) == 3 else 1
@@ -338,7 +339,7 @@ def discard_deferred_for_error(error_id: int) -> None:
 
 
 def materialize_for_iter(factory: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Build the iterable of a dispatched ``for`` (Design 7.4).
+    """Build the iterable of a dispatched ``for``.
 
     A ``builtins.range`` stages (becomes the DSL :class:`range`) only when one
     of its bounds is a staged value of the active DSL; otherwise, and outside
@@ -348,18 +349,13 @@ def materialize_for_iter(factory: Callable[..., Any], *args: Any, **kwargs: Any)
     factory is called as written.
     """
     if factory is builtins.range:
-        if _is_dynamic(args):
+        if is_mlir_op(args):
             return range(*args, **kwargs)
         return builtins.range(*args)
     if factory is range:
         return range(*args, **kwargs)
 
     return factory(*args, **kwargs)
-
-
-# =============================================================================
-# If expressions
-# =============================================================================
 
 
 # =============================================================================
@@ -375,7 +371,7 @@ def assert_executor(test: Any, msg: str | None = None) -> None:
     """
     # A staged value must not be converted to bool implicitly, hence the
     # explicit None check before asking the DSL.
-    if test is not None and _is_dynamic(test):
+    if test is not None and is_mlir_op(test):
         raise DSLUserCodeError(
             DiagId.PHASE_REQUIRES_CONSTANT,
             what="`assert`",
@@ -393,7 +389,7 @@ def bool_short_circuits(value: Any, short_circuit_value: bool) -> bool:
 
 def bool_cast(value: Any) -> bool:
     """The rewrite of ``bool(value)``: ``PHASE_REQUIRES_CONSTANT`` on a staged value."""
-    if _is_dynamic(value):
+    if is_mlir_op(value):
         raise DSLUserCodeError(
             DiagId.PHASE_REQUIRES_CONSTANT,
             what="Explicit boolean conversion",
@@ -414,30 +410,13 @@ def compare_executor(left: Any, comparators: list[Any], ops: list[Any]) -> Any:
 
 
 # =============================================================================
-# Control flow checks
+# Builtin redirection
 # =============================================================================
-def cf_symbol_check(symbol: Any) -> None:
-    """
-    Check if the symbol is control flow symbol from a DSL package.
-
-    A symbol qualifies when it is a registered DSL package (``mlir.dsl`` or a
-    sub-DSL that called ``register_dsl_package``) or is defined in one.
-    """
-    name = symbol.__name__
-    module = symbol if inspect.ismodule(symbol) else inspect.getmodule(symbol)
-    module_name = module.__name__ if module is not None else ""
-    if not _is_dsl_module(module_name):
-        raise DSLUserCodeError(
-            DiagId.CALL_WRONG_IMPORT,
-            name=name,
-        )
-
-
 def redirect_builtin_function(fcn: Any) -> Any:
     """Map a builtin the rewritten code calls to the DSL's replacement.
 
     ``bool`` becomes :func:`bool_cast`; ``exec``/``eval`` are rejected
-    (``UNSUP_BUILTIN``); any other builtin function goes through the active
+    (``UNSUP_SYNTAX``); any other builtin function goes through the active
     DSL's ``builtin_redirector``; anything else is returned unchanged.
     """
     if fcn is builtins.bool:
@@ -446,8 +425,9 @@ def redirect_builtin_function(fcn: Any) -> Any:
     if isinstance(fcn, BuiltinFunctionType):
         if fcn in (builtins.exec, builtins.eval):
             raise DSLUserCodeError(
-                DiagId.UNSUP_BUILTIN,
-                name=fcn.__name__,
+                DiagId.UNSUP_SYNTAX,
+                what=f"The built-in function `{fcn.__name__}`",
+                detail=": do that work in plain Python before the call and pass the result in",
             )
         redirector = executor._builtin_redirector
         if redirector is not None:
@@ -458,7 +438,7 @@ def redirect_builtin_function(fcn: Any) -> Any:
 def get_locals_or_none(locals: dict[str, Any], symbols: list[str]) -> list[Any]:
     """The values of ``symbols`` in a ``locals()`` dict, ``None`` for an unbound one.
 
-    This seeds the ``write_args`` of a generated region (Design 7.2): a name
+    This seeds the ``write_args`` of a generated region: a name
     first bound inside the region enters as ``None``.
     """
     return [locals.get(symbol) for symbol in symbols]
@@ -485,7 +465,7 @@ def early_exit_predicate(
     :param kind: ``"return"``, ``"raise"``, ``"break"`` or ``"continue"``
     :param where: The function the exit would leave, for the message
     """
-    if _is_dynamic(predicate):
+    if is_mlir_op(predicate):
         raise DSLUserCodeError(
             DiagId.UNSUP_EARLY_EXIT,
             filename=filename,
@@ -506,11 +486,9 @@ def closure_check(
     Captured modules are fine and captured functions are checked recursively;
     any other captured name raises ``SCOPE_CLOSURE_CAPTURE``. The preprocessor
     emits ``closure_check([...])`` before a region that calls nested
-    definitions; a AST preprocessor plugin with ``closure_check=False`` skips the check.
+    definitions; with ``closure_check=False`` on the AST preprocessor plugin the
+    preprocessor emits no such call.
     """
-    plugin = getattr(get_current_dsl(), "ast_preprocessor", None)
-    if plugin is not None and not plugin.closure_check:
-        return
     if _visited is None:
         _visited = set()
 

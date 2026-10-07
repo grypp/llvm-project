@@ -21,7 +21,7 @@ os.environ.setdefault("MLIR_DSL_ENABLE_TVM_FFI", "1")
 import numpy as np
 
 import mlir.mlir_dsl as m
-from mlir.dsl.plugins.thirdparty.tvm_ffi import available
+from mlir.dsl.plugins.adapters.tvm_ffi import available
 
 
 @m.jit

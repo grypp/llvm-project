@@ -8,10 +8,10 @@ A ``Vector`` wraps one ``vector<N x T>`` value whose element type is a
 ``Numeric`` dtype from the type registry. Vectors live in registers, are
 immutable and have no Python invocation ABI: extract a lane or reduce to
 return a scalar from a JIT entry point. The SSA type and every op come from
-the active dialect's emitter (``vector_type``, ``from_elements``,
+the tracing DSL's ``type_ops`` plugin (``vector_type``, ``from_elements``,
 ``broadcast``, ``extract``, ``reduce``, and the element-wise arithmetic on the
 vector-typed operands): ``vector<N x T>`` and the ``vector`` dialect under the
-LLVM world, a rank-1 tile under a tile dialect. ``util/tree_utils.py``
+builtin type ops, a rank-1 tile under a tile dialect. ``util/tree_utils.py``
 registers ``Vector`` as a leaf at import, so a raw vector result
 (``Pointer.load(count=N)``, a dialect call) is wrapped by ``wrap_ir_value``.
 """
@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from typing import Any, Callable, Optional, Type, Union
 
 from ... import ir
-from ..core.common import DSLRuntimeError, DSLUserCodeError
+from ..core.common import DSLUserCodeError
 from ..core.diagnostics import DiagId
 from ..core.mlir_op import current_emitter as _emitter
 from ..core.user_op import dsl_user_op
@@ -52,7 +52,7 @@ def _scalar(value: Any, arg_name: str = "elements") -> Numeric:
     :return: The ``Numeric`` view of ``value``.
     """
     if isinstance(value, ir.Value):
-        dtype = _lookup_mlir_type(value.type)  # the dialect's notion of a scalar
+        dtype = _lookup_mlir_type(value.type)  # the type ops' notion of a scalar
         if dtype is not None:
             return dtype(value)
     if isinstance(value, (bool, int, float, Numeric)):
@@ -90,13 +90,21 @@ def _coerce_scalar(value: Any, dtype: Type[Numeric], op: str) -> Numeric:
 
 
 def _static_int(
-    value: Any, arg_name: str, num: int, expected: str, ok: Callable[[int], bool]
+    value: Any,
+    arg_name: str,
+    num: int,
+    expected: str,
+    ok: Callable[[int], bool],
+    *,
+    staged_diag: DiagId = DiagId.PHASE_DYNAMIC_INDEX,
+    **staged_fields: Any,
 ) -> int:
     """Return ``value`` as a compile-time Python ``int`` satisfying ``ok``.
 
     A ``Numeric`` with a Python payload is unwrapped; a staged one is
-    ``PHASE_DYNAMIC_INDEX``; anything else that is not an ``int`` passing
-    ``ok`` is ``ARG_ANNOTATION_MISMATCH``.
+    ``staged_diag`` (``PHASE_DYNAMIC_INDEX`` for a lane index, filled with
+    ``staged_fields``); anything else that is not an ``int`` passing ``ok`` is
+    ``ARG_ANNOTATION_MISMATCH``.
 
     :param value: The lane count or lane index given by the user.
     :param arg_name: The argument name reported in the diagnostic.
@@ -107,7 +115,7 @@ def _static_int(
     """
     if isinstance(value, Numeric):
         if isinstance(value.value, ir.Value):
-            raise DSLUserCodeError(DiagId.PHASE_DYNAMIC_INDEX)
+            raise DSLUserCodeError(staged_diag, **staged_fields)
         value = value.value
     if type(value) is not int or not ok(value):
         got = repr(value) if type(value) is int else type(value).__name__
@@ -139,7 +147,15 @@ def _vector_dtype(value: ir.Value, dtype: Optional[Type[Numeric]]) -> Type[Numer
             raise DSLUserCodeError(DiagId.TYPE_UNSUPPORTED_MLIR_TYPE, mlir_type=str(ty))
         return found
     if not isinstance(dtype, NumericMeta) or dtype.scalar_mlir_type != elem:
-        raise DSLRuntimeError(f"Vector dtype {dtype} does not match {ty}")
+        raise DSLUserCodeError(
+            DiagId.ARG_ANNOTATION_MISMATCH,
+            num=2,
+            arg_name="dtype",
+            expected=f"the element dtype of `{ty}`",
+            got=dtype.__name__
+            if isinstance(dtype, NumericMeta)
+            else type(dtype).__name__,
+        )
     return dtype
 
 
@@ -184,9 +200,9 @@ class Vector:
                 )
             if len(v) == 0:
                 raise DSLUserCodeError(
-                    DiagId.CALL_MISSING_ARG,
+                    DiagId.CALL_ARGUMENTS,
                     function_name="Vector",
-                    missing="at least one element",
+                    detail="at least one element is required",
                 )
             if dtype is None:
                 typed = [x for x in v if isinstance(x, (Numeric, ir.Value))]
@@ -229,12 +245,14 @@ class Vector:
         :param lanes: The lane count, a positive Python ``int``.
         :return: A ``Vector`` of ``lanes`` copies of ``value`` (the emitter's ``broadcast``).
         """
-        if isinstance(lanes, Numeric) and isinstance(lanes.value, ir.Value):
-            raise DSLUserCodeError(
-                DiagId.PHASE_REQUIRES_CONSTANT, what="The lane count of `Vector.splat`"
-            )
         lanes = _static_int(
-            lanes, "lanes", 2, "a positive Python `int`", lambda n: n > 0
+            lanes,
+            "lanes",
+            2,
+            "a positive Python `int`",
+            lambda n: n > 0,
+            staged_diag=DiagId.PHASE_REQUIRES_CONSTANT,
+            what="The lane count of `Vector.splat`",
         )
         value = _scalar(value, "value")
         vec_type = _emitter().vector_type(type(value), lanes)
@@ -264,7 +282,7 @@ class Vector:
 
     @property
     def mlir_type(self) -> ir.Type:
-        """The SSA type of the value (``vector<N x T>`` under the LLVM world)."""
+        """The SSA type of the value (``vector<N x T>`` under the builtin type ops)."""
         return self._value.type
 
     @property

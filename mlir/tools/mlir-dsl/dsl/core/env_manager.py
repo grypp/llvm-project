@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from typing import Any, Callable, Union, get_args, get_origin
 
-from ..util import phase_profiler
+from ..util import profiler
 from ..util.logger import setup_log
 from .common import DSLRuntimeError, DSLWarning
 
@@ -427,7 +427,6 @@ class EnvironmentVarManager(LogEnvironmentManager):
     - [DSL_NAME]_LIBS: Path to dependent shared libraries (default: None)
     - [DSL_NAME]_LOC_TRACEBACKS: Maximum depth of location tracebacks (default: 0)
     - [DSL_NAME]_PIPELINE: MLIR pipeline, replacing the composed default (default: None)
-    - [DSL_NAME]_COMPILER_OPT: Compact compiler option string handed to the compiler (default: "")
     - [DSL_NAME]_ENABLE_TVM_FFI: Also export compiled functions under the TVM-FFI ABI (default: False)
     - [DSL_NAME]_REMARKS: Regular expression over remark categories to emit (default: "", remarks off)
     - [DSL_NAME]_REMARKS_POLICY: Remark policy, "all" or "final" (default: "all")
@@ -500,7 +499,6 @@ class EnvironmentVarManager(LogEnvironmentManager):
     enable_tvm_ffi: bool = env_var(
         "ENABLE_TVM_FFI", affects_compile=True, default=False
     )
-    compiler_opt: str = env_var("COMPILER_OPT", affects_compile=True, default="")
     pipeline: str | None = env_var("PIPELINE", affects_compile=True, default=None)
     # MLIR runtime libraries linked by the JIT.
     shared_libs: str | None = env_var("LIBS", affects_compile=True)
@@ -509,16 +507,8 @@ class EnvironmentVarManager(LogEnvironmentManager):
     def __init__(self, prefix: str = "DSL") -> None:
         super().__init__(prefix)
 
-        phase_profiler.configure(
+        profiler.configure(
             f"{prefix}_PROFILE_COMPILER", get_str_env_var(f"{prefix}_PROFILE_COMPILER")
-        )
-
-    @property
-    def missing_shared_libs_message(self) -> str:
-        """Explain how to configure this DSL's runtime libraries."""
-        return (
-            f"{self.prefix}_LIBS environment variable is not set. Set "
-            f"{self.prefix}_LIBS explicitly for this DSL runtime."
         )
 
     @property

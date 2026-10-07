@@ -3,19 +3,19 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 """
-The DSL base class :class:`BaseDSL` and its kernel launch driver.
+The DSL base class :class:`BaseDSL`.
 
-A sub-DSL inherits :class:`BaseDSL`, sets its ``ClassVar`` knobs and its
-``plugins`` list and passes its compiler provider to ``__init__``. The base
-handles the mechanics that are the same for every dialect: the ``@jit`` and
-``@kernel`` decorators, the AST preprocessor run, the host argument boundary,
-tracing the body into the host entry the dialect plugin builds (``func.func`` in the LLVM world),
-the pass pipeline, the in-memory and on-disk compile caches, the packed
-invocation through the ``ExecutionEngine`` and the kernel launch driver that a
-``gpu`` plugin's kernel generation helper fills in.
+A sub-DSL inherits :class:`BaseDSL` and names its plugins in one ``Plugins``
+record on the class. The base owns what is the same for every DSL: the
+``@jit`` decorator and the decorator machinery plugins build on
+(:meth:`BaseDSL.make_decorator`, :meth:`BaseDSL.jit_runner`), the AST
+preprocessor run, the host argument boundary, tracing the body into the entry
+the ``func_entry`` plugin builds, the pass pipeline, the in-memory and on-disk
+compile caches and the invocation through the ``compiler`` plugin, and the
+services a decorator plugin traces with (:meth:`BaseDSL.bind_arguments`,
+:meth:`BaseDSL.trace_body`).
 """
 
-import copy
 import hashlib
 import inspect
 import io
@@ -24,54 +24,40 @@ import os
 import re
 import threading
 import warnings
-from abc import ABC, abstractmethod
-from collections import OrderedDict, namedtuple
-from collections.abc import Callable, Generator, Iterable, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from functools import wraps
 from types import UnionType
-from typing import Annotated, Any, ClassVar, NamedTuple, Union, get_args, get_origin
+from typing import Annotated, Any, ClassVar, Union, get_args, get_origin
 
 from ... import ir
 from ..core.common import DSLBaseError, DSLRuntimeError, DSLUserCodeError, active_dsl
-from ..core.diagnostics import DiagId, find_user_source_location
+from ..core.diagnostics import DiagId
 from ..core.env_manager import EnvironmentVarManager
-from ..core.plugin import DialectPlugin, ASTPreprocessorPlugin, Plugin
+from .plugin import FuncEntryPlugin, Plugins, _NoRemarkSession
 from ..types import typing as t
-from ..util import phase_profiler
+from ..util import profiler
+from ..util.profiler import timer
 from ..util import tree_utils
 from ..util.logger import log
-from ..runtime.jit_arg_adapters import (
-    JitArgAdapterRegistry,
-    adapt_pointer_address,
-    is_argument_meta,
-)
-from .executor import Executor
-from ..util.cache_helpers import (
+from .arguments import JitArgAdapterRegistry, adapt_pointer_address
+from .staging import Executor, _is_mlir_op_leaf, is_argument_meta
+from .user_op import enter_traceback_locations
+from ..util.cache import (
     dump_cache_to_path,
     get_default_generated_ir_path,
+    JitCacheDict,
     load_cache_from_path,
     read_bytecode_and_check_crc32,
+    toolchain_identity,
     write_bytecode_with_crc32,
 )
-from ..compiler.jit_executor import (
-    JitCacheDict,
-    JitCompiledFunction,
-    lookup_packed_function,
-)
-from ..util.cache_key import toolchain_identity
-from ..util.timing import timer
 
 __all__ = [
     "BaseDSL",
     "DSLLocation",
     "DSLSingletonMeta",
     "JitFuncArgs",
-    "KernelLauncher",
-    "KernelReturns",
-    "LaunchConfig",
-    "_KernelGenHelper",
 ]
 
 # =============================================================================
@@ -82,19 +68,6 @@ __all__ = [
 # translation table (mangle_name runs per compile, plus once per kernel trace).
 _MANGLE_UNWANTED_CHARS = r"'-![]#,.<>()\":{}=%?@;"
 _MANGLE_TRANSLATION_TABLE = str.maketrans("", "", _MANGLE_UNWANTED_CHARS)
-
-# The pass list of the host entry itself: the dialect plugins (and the DSL's
-# default dialects) lower the IR they emit, host entry included, in install
-# order; the core
-# then lowers the ``func`` entry and reconciles the casts.
-_CORE_PIPELINE_PASSES: tuple[str, ...] = ("reconcile-unrealized-casts",)
-
-
-class KernelReturns(NamedTuple):
-    """Result of ``kernel_launcher``'s ``kernel_wrapper``."""
-
-    kernel_func_ret: Any
-    launch_op_ret: Any
 
 
 def _normalize_shared_library_paths(paths: Iterable[str]) -> tuple[str, ...]:
@@ -155,18 +128,12 @@ class DSLSingletonMeta(type):
 
 @dataclass(frozen=True)
 class DSLLocation:
-    """
-    Python source location of DSL code, used to annotate the generated IR.
-
-    ``caller_locs`` is an optional tuple of (filename, lineno) pairs for the
-    callsite chain.
-    """
+    """Python source location of DSL code, used to annotate the generated IR."""
 
     filename: str
     lineno: int
     col_offset: int
     function_name: str
-    caller_locs: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -189,269 +156,51 @@ class JitFuncArgs:
 @dataclass(frozen=True)
 class _ResultSpec:
     """How the result of a compiled function maps back to Python: the flattened
-    shape of the traced return and the host-side slot descriptor of the dialect
-    plugin's host helper (the LLVM world: a ``ctypes`` type)."""
+    shape of the traced return and the host-side slot descriptor of the
+    ``func_entry`` plugin (the test DSL's ``func.Entry``: a ``ctypes`` type)."""
 
     treedef: Any
     slot: Any
 
 
-@dataclass
-class LaunchConfig:
-    """Grid, block and optional cluster dimensions plus dynamic shared memory
-    of one kernel launch.
+class _PluginDecorator:
+    """A plugin's decorator as a class attribute: ``__get__`` binds the DSL
+    class it is accessed on, one function per class (so ``Sub.kernel is
+    Sub.kernel`` and ``m.kernel is MyDSL.kernel`` hold)."""
 
-    Dimensions accept Python ints or staged integers and are padded to three
-    entries; their type and count are validated by the kernel generation
-    helper that emits the launch. ``async_deps`` is kept for signature
-    fidelity and must be empty: launches are synchronous.
-    """
-
-    cluster: list[Any] | None = None
-    grid: list[Any] = field(default_factory=lambda: [1, 1, 1])
-    block: list[Any] = field(default_factory=lambda: [1, 1, 1])
-    smem: int | None = None
-    async_deps: list[Any] = field(default_factory=list)
-
-    @staticmethod
-    def _check_and_canonicalize_dim(dim: Any, name: str) -> list[Any]:
-        """Return ``dim`` (a scalar or a sequence) as a list padded with 1s to
-        three entries; a longer list is left for the launch to diagnose under
-        ``name``."""
-        if not isinstance(dim, (list, tuple)):
-            dim = [dim]
-        return list(dim) + [1] * (3 - len(dim))
-
-    def __post_init__(self) -> None:
-        self.grid = self._check_and_canonicalize_dim(self.grid, "grid")
-        self.block = self._check_and_canonicalize_dim(self.block, "block")
-        if self.cluster is not None:
-            self.cluster = self._check_and_canonicalize_dim(self.cluster, "cluster")
-
-
-class _KernelGenHelper(ABC):
-    """Generates the kernel function op, its terminator and the launch op.
-
-    A dialect plugin subclasses it and installs the subclass as the DSL's
-    ``kernel_gen_helper``; ``kernel_launcher`` instantiates one per kernel
-    trace. ``diag_ids`` names the plugin's namespaced diagnostic catalogue
-    (the ``LAUNCH_*`` codes): the launch driver of this module raises those
-    codes through it, so the core imports no plugin catalogue.
-    """
-
-    diag_ids: ClassVar[Any] = None
-
-    def __init__(self) -> None:
-        self.func_op: Any = None
-        self.func_type: Any = None
-
-    @abstractmethod
-    def generate_func_op(
-        self,
-        arg_types: list[Any],
-        arg_attrs: list[Any],
-        kernel_name: str,
-        loc: Any = None,
-    ) -> Any:
-        if arg_types is None:
-            raise DSLRuntimeError("Invalid arg_types!")
-        if not kernel_name:
-            raise DSLRuntimeError("kernel name is empty")
-
-    @abstractmethod
-    def generate_func_ret_op(self) -> None:
-        pass
-
-    @abstractmethod
-    def generate_launch_op(self, *args: Any, **kwargs: Any) -> Any:
-        pass
-
-    @abstractmethod
-    def get_func_body_start(self) -> Any:
-        pass
-
-    # -- the kernel container ------------------------------------------------
-
-    @classmethod
-    def build_container(cls, attrs: dict[str, Any], loc: Any = None) -> Any:
-        """Create the op holding this target's kernels at the current
-        insertion point (the gpu plugin: ``gpu.module @kernels`` plus the
-        ``gpu.container_module`` marker on the host module), or None when
-        the target's kernels live in the host module itself."""
-        return None
-
-    @classmethod
-    def container_insertion_point(
-        cls, container: Any, module: Any
-    ) -> ir.InsertionPoint:
-        """Where a kernel of this trace is emitted: inside ``container`` when
-        there is one, else at the start of the host ``module``."""
-        return ir.InsertionPoint.at_block_begin(module.body)
-
-    @classmethod
-    def prune_empty_containers(cls, module: Any) -> None:
-        """Drop a container that received no kernel, after the trace."""
-
-    @classmethod
-    def kernel_symbol(cls, kernel_name: str) -> ir.Attribute:
-        """The symbol a launch refers to."""
-        return ir.FlatSymbolRefAttr.get(kernel_name)
-
-
-class _NoRemarkSession:
-    """The remark session of a DSL that has no compiler: collects nothing."""
-
-    remarks: list[dict[str, Any]] = []
-
-    def __enter__(self) -> "_NoRemarkSession":
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        return None
-
-
-class _HostGenHelper(ABC):
-    """Builds the host entry of a ``@jit`` function and its result slot.
-
-    A dialect plugin subclasses it and installs the subclass as the DSL's
-    ``host_gen_helper``; one instance serves one trace. The core decides what
-    is returned (the leaves of the traced return value, numeric only); the
-    helper decides the function op, how several leaves travel back to the
-    host (the LLVM world packs them into one ``!llvm.struct`` read through
-    ``ctypes``) and how a raw slot value becomes each leaf's Python value.
-    """
-
-    def __init__(self) -> None:
-        self.func_op: Any = None
-
-    @abstractmethod
-    def generate_func_op(
-        self, name: str, arg_types: list[Any], arg_attrs: list[Any], loc: Any = None
-    ) -> Any:
-        """Create the entry with ``arg_types`` and no results; return its entry block."""
-
-    @abstractmethod
-    def generate_return(self, values: list[Any], loc: Any = None) -> None:
-        """Emit the terminator returning ``values`` and fix the entry's result types."""
-
-    @abstractmethod
-    def pack_results(
-        self, values: list[Any], prototypes: list[Any], loc: Any = None
-    ) -> tuple[list[Any], Any]:
-        """The values the entry returns for the result leaves ``values`` (of
-        dtypes ``prototypes``) and the host-side slot descriptor, None for no
-        result."""
-
-    @abstractmethod
-    def unpack_result(self, slot: Any, raw: Any, prototypes: list[Any]) -> list[Any]:
-        """The Python value of each result leaf from the filled slot ``raw``."""
-
-
-class KernelLauncher:
-    """Bound kernel arguments awaiting their launch inside a ``@jit`` body::
-
-    kernel(arg1, arg2).launch(LaunchConfig(grid=[1, 1, 1], block=[1, 1, 1]))
-    kernel(arg1, arg2).launch(grid=[1, 1, 1], block=[1, 1, 1])
-    """
-
-    def __init__(
-        self,
-        dsl: "BaseDSL",
-        kernelGenHelper: type[_KernelGenHelper],
-        funcBody: Callable[..., None],
-        /,
-        *func_args: Any,
-        **func_kwargs: Any,
-    ) -> None:
-        self.dsl = dsl
-        self.kernelGenHelper = kernelGenHelper
-        self.funcBody = funcBody
-        self.func_args = func_args
-        self.func_kwargs = func_kwargs
-        self._launch_name: str | None = None
-
-        # While a host body is being traced, register so an un-launched call is
-        # reported (see `_track_deferred_kernel_launches`); capture the call
-        # site now, while the user's frame is live, for the diagnostic's caret.
-        self._launched = False
-        self._creation_loc: tuple[Any, Any, Any, Any] = (None, None, None, None)
-        if dsl._pending_launches is not None:
-            self._creation_loc = find_user_source_location()
-            dsl._pending_launches.append(self)
-
-        self._check_func_args(funcBody, *func_args, **func_kwargs)
-
-    def _check_func_args(
-        self, funcBody: Any, *func_args: Any, **func_kwargs: Any
-    ) -> None:
-        # func_args and func_kwargs should match funcBody's signature.
-        try:
-            inspect.signature(funcBody).bind(*func_args, **func_kwargs)
-        except TypeError as e:
-            raise DSLUserCodeError(
-                DiagId.CALL_SIGNATURE_MISMATCH,
-                provided=len(func_args),
-                provided_kw=len(func_kwargs),
-                cause=e,
-            ) from e
-
-    def launch(self, *args: Any, **kwargs: Any) -> Any:
-        """Emit the kernel and its launch at the current insertion point.
-
-        Accepts one :class:`LaunchConfig` or its constructor arguments.
-        """
-        kernel_name = getattr(self.funcBody, "__name__", "<kernel>")
-        # No active MLIR context means there is no @jit compilation in
-        # progress to emit the launch into.
-        if ir.Context.current is None:
-            raise DSLUserCodeError(
-                self.dsl._launch_diag("LAUNCH_OUTSIDE_JIT"), kernel_name=kernel_name
-            )
-        if self._launched:
-            raise DSLUserCodeError(
-                self.dsl._launch_diag("LAUNCH_ALREADY_ISSUED"), kernel_name=kernel_name
-            )
-        # A launch is being issued: this launcher is no longer a dangling
-        # `my_kernel(...)` call (see `_track_deferred_kernel_launches`).
-        self._launched = True
-
-        if len(args) == 1 and not kwargs and isinstance(args[0], LaunchConfig):
-            config = args[0]
-        else:
-            config = self.dsl.LaunchConfig(*args, **kwargs)
-        if config.async_deps:
-            raise DSLUserCodeError(
-                self.dsl._launch_diag("LAUNCH_STREAM_UNSUPPORTED"),
-                kernel_name=kernel_name,
-            )
-
-        kernel_generator = self.dsl.kernel_launcher(
-            requiredArgs=["config"], kernelGenHelper=self.kernelGenHelper
-        )(self.funcBody)
-        ret, name = kernel_generator(*self.func_args, **self.func_kwargs, config=config)
-        self.dsl.kernel_info[name] = config
-        self.dsl.launch_inner_count += 1
-        self._launch_name = name
-        return ret.launch_op_ret
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        return self.launch(*args, **kwargs)
-
-
-class _DefaultDialects:
-    """Descriptor resolving ``BaseDSL.default_dialects`` once, on first access,
-    so the core imports the default dialect plugins only when a DSL is built."""
+    def __init__(self, kind: str, on_call: Callable[..., Any]) -> None:
+        self.kind = kind
+        self.on_call = on_call
+        self._bound: dict[type, Callable[..., Any]] = {}
 
     def __set_name__(self, owner: type, name: str) -> None:
-        self.owner, self.attr = owner, name
+        self.kind = name
 
-    def __get__(self, obj: Any, cls: type | None = None) -> tuple[DialectPlugin, ...]:
-        from ..plugins.dialects.llvm import LlvmDialectPlugin
-        from ..plugins.dialects.scf import ScfDialectPlugin
+    def __get__(self, obj: Any, owner: type | None = None) -> Callable[..., Any]:
+        cls = owner if owner is not None else type(obj)
+        bound = self._bound.get(cls)
+        if bound is None:
+            kind, on_call = self.kind, self.on_call
 
-        defaults = (ScfDialectPlugin(), LlvmDialectPlugin())
-        setattr(self.owner, self.attr, defaults)
-        return defaults
+            def decorator(*decorator_args: Any, **decorator_kwargs: Any) -> Any:
+                return BaseDSL.jit_runner(
+                    cls,
+                    kind,
+                    on_call,
+                    BaseDSL.get_location_from_frame(
+                        inspect.currentframe().f_back  # type: ignore[union-attr]
+                    ),
+                    *decorator_args,
+                    **decorator_kwargs,
+                )
+
+            decorator.__name__ = kind
+            decorator.__qualname__ = f"{cls.__name__}.{kind}"
+            decorator.__doc__ = (
+                f"The ``@{kind}`` decorator of ``{cls.__name__}``, added by a plugin."
+            )
+            bound = self._bound[cls] = decorator
+        return bound
 
 
 class BaseDSL(metaclass=DSLSingletonMeta):
@@ -459,60 +208,56 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
     The class attributes below are the sub-DSL knobs; the instance attributes
     set in ``__init__`` are the per-DSL state (environment manager, caches,
-    executors, installed plugins). ``@MyDSL.jit`` and ``@MyDSL.kernel``
-    decorate functions for the subclass; both dispatch through
-    :meth:`jit_runner` to the instance's ``_func`` or ``_kernel_helper``.
+    executors, installed plugins). ``@MyDSL.jit`` is the core's decorator;
+    the decorators a DSL's plugins add (``@MyDSL.kernel``) are installed on
+    the class by ``__init_subclass__``. All dispatch through :meth:`jit_runner`
+    to their launcher (``_func`` for ``@jit``).
     """
 
-    # The op holding the kernels of the current trace (the kernel helper's
-    # ``build_container``) and the module being traced.
-    kernel_container: Any = None
-    current_module: Any = None
     _env_class: type[EnvironmentVarManager] = EnvironmentVarManager
-    _jit_arg_adapter_scope: ClassVar[str] = JitArgAdapterRegistry.GPU_DIALECT_SCOPE
+    _jit_arg_adapter_scope: ClassVar[str | None] = None
     # Optional compiler-recognized component inserted by a DSL's name mangler.
     _name_mangling_prefix: ClassVar[str] = ""
-    # Plugins listed on the class; ``__init__`` installs a shallow copy of
-    # each on the instance as its last step.
-    plugins: ClassVar[Sequence[Plugin]] = ()
-    # The AST preprocessor used when ``plugins`` lists no ``ASTPreprocessorPlugin``: the DSL's
-    # own AST preprocessor (``MlirDSL``: the scf preprocessor). None preprocesses
-    # nothing, so such a DSL uses the explicit builders only.
-    default_ast_preprocessor: ClassVar[ASTPreprocessorPlugin | None] = None
-    # The dialect plugins installed when ``plugins`` lists none with an
-    # ``emitter``: the IR world of the DSL's types. The core's default is
-    # MLIR's own, ``scf`` for control flow and the LLVM world for the types,
-    # resolved on first use so the core imports no plugin at import time. A
-    # sub-DSL whose dialect plugin brings an emitter gets none of them.
-    default_dialects: ClassVar[Sequence[DialectPlugin]] = _DefaultDialects()  # type: ignore[assignment]
+    #: What the DSL is made of: one plugin per role (``type_ops``,
+    #: ``func_entry``, ``ast_preprocessor``, ``compiler``) and
+    #: the families (``decorators``, ``adapters``). ``__init__``
+    #: resolves the record once per
+    #: instance: a plugin whose ``available()`` is False is dropped (and listed
+    #: in ``unavailable_plugins``), the rest are copied and installed in record
+    #: order. The base names nothing; a sub-DSL assembles itself here.
+    plugins: ClassVar[Plugins] = Plugins()
 
-    LaunchConfig = LaunchConfig
-    _KernelGenHelper = _KernelGenHelper
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Install the decorators the class's plugins add (``@MyDSL.kernel``):
+        every plugin of a record defined on the class itself is asked for its
+        ``decorators``; an inherited record was installed on the parent."""
+        super().__init_subclass__(**kwargs)
+        record = cls.__dict__.get("plugins")
+        if isinstance(record, Plugins):
+            for plugin in record.decorators:
+                for name, decorator in plugin.decorators(cls).items():
+                    if name not in cls.__dict__:
+                        setattr(cls, name, decorator)
 
     def _remark_session(self, context: ir.Context) -> Any:
-        """The compiler provider's remark session for ``context`` under the
+        """The compiler plugin's remark session for ``context`` under the
         ``REMARKS``/``REMARKS_POLICY``/``REMARKS_OUTPUT`` settings; a session
         collecting nothing for a DSL without a compiler (a trace-only DSL)."""
-        if self.compiler_provider is None:
+        compiler = self.plugins.compiler
+        if compiler is None:
             return _NoRemarkSession()
-        return self._compiler.remark_session(
+        return compiler.remark_session(
             context,
             remark_filter=self.envar.remarks,
             remark_policy=self.envar.remarks_policy,
             remark_output=self.envar.remarks_output,
         )
 
-    def _is_supported_arch(self) -> None:
-        return
-
     def __init__(
         self,
         *,
         name: str,
-        dsl_package_name: list[str],
-        pass_sm_arch_name: str,
-        compiler_provider: Any = None,
-        device_compilation_only: bool = False,
+        dsl_package_name: list[str] | None = None,
         preprocess: bool = False,
     ) -> None:
         """
@@ -521,32 +266,29 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         :param name: Name of the DSL; the environment variable prefix
             (``<name>_DRYRUN``, ...) and the logging label
         :param dsl_package_name: The DSL's package path, used by the
-            preprocessor to recognise its own symbols
-        :param compiler_provider: The compiler running the pass pipeline and
-            executing the module; the first dialect plugin bringing one
-            (the LLVM world's ``Compiler``) when None
-        :param pass_sm_arch_name: The pipeline option that names the target
-            architecture (appended to ``<name>_PIPELINE``)
-        :param device_compilation_only: Trace device code only
+            preprocessor to recognise its own symbols; required only with
+            ``preprocess=True``
         :param preprocess: Enable the AST preprocessor
 
         Reads the environment through ``EnvironmentVarManager``, configures
-        warnings and logging, and installs the plugins listed on the class
-        last, so the subclass's own ``__init__`` still runs after them and wins.
+        warnings and logging, and installs the class's ``plugins`` record last,
+        so the subclass's own ``__init__`` still runs after them and wins.
         """
         # Enforcing initialization of instance variables
-        if not all([name, pass_sm_arch_name]):
+        if not name:
+            raise DSLRuntimeError("a DSL needs a name: its environment prefix")
+        if preprocess and not dsl_package_name:
             raise DSLRuntimeError(
-                "All required parameters must be provided and non-empty"
+                "a DSL that preprocesses (preprocess=True) needs `dsl_package_name`, "
+                "the package the rewrite imports its helpers from"
             )
 
         self.name: str = name
-        self.compiler_provider: Any = compiler_provider
-        self.pass_sm_arch_name: str = pass_sm_arch_name
+        # The pipeline option naming the target architecture, appended to a
+        # ``<PREFIX>_PIPELINE`` override when ``<PREFIX>_ARCH`` is set; the gpu
+        # kernels decorator plugin sets it at install (its ``chip_option``).
+        self.pass_sm_arch_name: str | None = None
         self.decorator_location: DSLLocation | None = None
-        self.no_cache: bool = False
-        self.device_compilation_only: bool = device_compilation_only
-        self.num_kernels: int = 0
         # Read environment variables
         self.envar: EnvironmentVarManager = self._create_environment_manager()
         self.enable_preprocessor: bool = preprocess and bool(
@@ -559,208 +301,111 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         self.cache_hits: int = 0
         self.cache_misses: int = 0
         self.file_cache_hits: int = 0
-        # The structured remarks of the last compile (``_RemarkSession.remarks``).
+        # The structured remarks of the last compile (``RemarkSession.remarks``).
         self.collected_remarks: list[dict[str, Any]] = []
-
-        self.host_jit_decorator_name: str = f"@{BaseDSL.jit.__name__}"
-        self.device_jit_decorator_name: str = f"@{BaseDSL.kernel.__name__}"
 
         # set warning
         if self.envar.warnings_ignore:
             warnings.filterwarnings("ignore")
 
-        # kernel info contains per kernel info including symbol string and
-        # launch config. It's valid until the compilation is done.
-        self.kernel_info: OrderedDict[str, Any] = OrderedDict()
-        # used to generate unique name for gpu.launch
-        self.launch_inner_count: int = 0
         # Path of the dumped MLIR file; set by build_module when KEEP_IR is active.
         self.dump_mlir_path: Any = None
         # The function being traced; set on every path that reaches the
-        # argument boundary (``_prepare_compilation``, ``kernel_launcher``).
-        self.funcBody: Callable[..., Any] | None = None
-        # KernelLaunchers built during the current host trace (see
-        # `_track_deferred_kernel_launches`); None when no host body is traced.
-        self._pending_launches: list[KernelLauncher] | None = None
-        # The control-flow executors of this instance, filled from the AST preprocessor plugin
-        # plugin's ``executors`` once the plugins are installed.
+        # argument boundary (``_prepare_compilation``, ``bind_arguments``).
+        self.traced_function: Callable[..., Any] | None = None
+        # The control-flow executors of this instance, filled from the AST
+        # preprocessor plugin's ``executors`` once the plugins are installed.
         self.executor: Executor = Executor()
-        # The kernel generation helper class a plugin installs; None until then.
-        self.kernel_gen_helper: type[_KernelGenHelper] | None = None
-        self.host_gen_helper: type[_HostGenHelper] | None = None
         log().info("Initializing %s DSL", name)
 
         if self.envar.jit_time_profiling:
             self.profiler: Any = timer(enable=True)
 
-        # Install a per-instance shallow copy of every plugin listed on the
-        # class, last: a plugin instance listed on two classes must not carry
-        # another DSL's back-reference, and the subclass's own ``__init__``
-        # (its ``set_functions`` call) resumes after this and wins.
-        self.plugins: tuple[Plugin, ...] = tuple(
-            copy.copy(plugin) for plugin in type(self).plugins
-        )
+        # Resolve the class's plugin record for this instance: a copy of every
+        # available plugin, installed in record order (roles, then families), so
+        # the subclass's own ``__init__`` resumes after them and wins.
+        self.plugins, self.unavailable_plugins = type(self).plugins.resolve()
         for plugin in self.plugins:
             plugin.install(self)
-        # A listed dialect plugin with an emitter owns the IR of the type system;
-        # otherwise the class's default dialects are installed alongside.
-        self.default_dialect_plugins: tuple[DialectPlugin, ...] = ()
-        if not any(
-            isinstance(plugin, DialectPlugin) and plugin.emitter is not None
-            for plugin in self.plugins
-        ):
-            self.default_dialect_plugins = tuple(
-                copy.copy(plugin) for plugin in type(self).default_dialects
-            )
-            for plugin in self.default_dialect_plugins:
-                plugin.install(self)
-        # The emitter the scalar types ask for their SSA types and ops.
-        self.emitter: Any = next(
-            (
-                plugin.emitter
-                for plugin in self._dialect_plugins()
-                if plugin.emitter is not None
-            ),
-            None,
-        )
-        # The first dialect plugin with kernels serves ``@kernel``, the first
-        # with a host entry serves ``@jit``, the first with a compiler compiles
-        # (unless the constructor was given one).
-        self.kernel_gen_helper = next(
-            (
-                plugin.kernel_gen_helper
-                for plugin in self._dialect_plugins()
-                if plugin.kernel_gen_helper is not None
-            ),
-            None,
-        )
-        self.host_gen_helper = next(
-            (
-                plugin.host_gen_helper
-                for plugin in self._dialect_plugins()
-                if plugin.host_gen_helper is not None
-            ),
-            None,
-        )
-        if self.compiler_provider is None:
-            self.compiler_provider = next(
-                (
-                    plugin.compiler_provider
-                    for plugin in self._dialect_plugins()
-                    if plugin.compiler_provider is not None
-                ),
-                None,
-            )
-        # The first listed AST preprocessor plugin (else the class's default AST preprocessor)
-        # supplies the executors and the preprocessor.
-        self.ast_preprocessor: ASTPreprocessorPlugin | None = next(
-            (
-                plugin
-                for plugin in self.plugins
-                if isinstance(plugin, ASTPreprocessorPlugin)
-            ),
-            None,
-        )
-        if (
-            self.ast_preprocessor is None
-            and type(self).default_ast_preprocessor is not None
-        ):
-            self.ast_preprocessor = copy.copy(type(self).default_ast_preprocessor)
-            self.ast_preprocessor.install(self)
-        if self.ast_preprocessor is not None:
-            self.executor.set_functions(**self.ast_preprocessor.executors(self))
+        for adapter in self.plugins.adapters:
+            adapter.register(self)
+        # The AST preprocessor supplies the executors and the preprocessor.
+        ast_preprocessor = self.plugins.ast_preprocessor
+        if ast_preprocessor is not None:
+            self.executor.set_functions(**ast_preprocessor.executors(self))
         if preprocess:
-            if (
-                self.ast_preprocessor is None
-                or self.ast_preprocessor.preprocessor_class is None
-            ):
+            if ast_preprocessor is None or ast_preprocessor.preprocessor_class is None:
                 raise DSLRuntimeError(
-                    "the DSL preprocesses (preprocess=True) but lists no AST preprocessor "
-                    "plugin with a preprocessor; add one such as `ScfASTPreprocessorPlugin()` "
-                    "to `plugins`",
-                    context={"dsl": name},
+                    "the DSL preprocesses (preprocess=True) but names no "
+                    "`ast_preprocessor` plugin with a preprocessor; name one such as "
+                    "`plugins = Plugins(ast_preprocessor=scf.ASTPreprocessor())`",
+                    context={"dsl": name, **self._unavailable_context()},
                 )
-            self.preprocessor: Any = self.ast_preprocessor.preprocessor_class(
+            self.preprocessor: Any = ast_preprocessor.preprocessor_class(
                 dsl_package_name,
-                warnings_ignore=self.envar.warnings_ignore,
-                closure_check=self.ast_preprocessor.closure_check,
+                closure_check=ast_preprocessor.closure_check,
             )
-            self.package_name = dsl_package_name
 
     @property
     def _compiler(self) -> Any:
-        """The compiler of this DSL; an error when no plugin brought one."""
-        if self.compiler_provider is None:
+        """The compiler plugin of this DSL; an error when it names none."""
+        compiler = self.plugins.compiler
+        if compiler is None:
             raise DSLRuntimeError(
-                "this DSL has no compiler: pass `compiler_provider=` to `BaseDSL.__init__` "
-                "or list a dialect plugin that brings one (the LLVM world's "
-                "`LlvmDialectPlugin`)",
-                context={"dsl": self.name},
+                "this DSL has no compiler: name one in its plugins, e.g. "
+                "`plugins = Plugins(compiler=execution_engine.Compiler())`",
+                context={"dsl": self.name, **self._unavailable_context()},
             )
-        return self.compiler_provider
+        return compiler
 
-    def _host_gen_helper(self) -> _HostGenHelper:
-        """One host-entry helper for one trace, from the dialect plugins."""
-        if self.host_gen_helper is None:
+    def _func_entry(self) -> FuncEntryPlugin:
+        """The DSL's ``func_entry`` plugin, building the host entry of ``@jit``."""
+        entry = self.plugins.func_entry
+        if entry is None:
             raise DSLRuntimeError(
-                "no dialect plugin of this DSL builds a host entry for `@jit`: list one "
-                "with a `host_gen_helper` (the LLVM world's `LlvmDialectPlugin`, or "
-                "`LlvmHostGenHelper` reused by your dialect plugin)",
-                context={"dsl": self.name},
+                "this DSL builds no host entry for `@jit`: name a `func_entry` "
+                "plugin, e.g. `plugins = Plugins(func_entry=func.Entry())`",
+                context={"dsl": self.name, **self._unavailable_context()},
             )
-        return self.host_gen_helper()
+        return entry
+
+    def _unavailable_context(self) -> dict[str, Any]:
+        """The plugins the class named but ``available()`` rejected, for a
+        diagnostic's context; empty when none."""
+        if not self.unavailable_plugins:
+            return {}
+        return {"unavailable plugins": dict(self.unavailable_plugins)}
 
     def _create_environment_manager(self) -> EnvironmentVarManager:
         """Create the environment manager for this DSL's prefix."""
         return self._env_class(self.name)
-
-    def print_warning(self, message: str) -> None:
-        """Log and emit ``message`` as a ``UserWarning`` unless warnings are
-        ignored (``<PREFIX>_WARNINGS_IGNORE``)."""
-        if self.envar.warnings_ignore:
-            return
-        log().warning("Warning: %s", message)
-        warnings.warn(message, UserWarning)
 
     @classmethod
     def _get_dsl(cls) -> Any:
         """The instance of ``cls``; the singleton metaclass builds it once."""
         return cls()  # type: ignore[call-arg]
 
-    def _plugin_named(self, name: str) -> Plugin | None:
-        """Return the installed plugin called ``name``, or None."""
-        for plugin in self.plugins:
-            if plugin.name == name:
-                return plugin
-        return None
+    def register_dialects(self, context: ir.Context) -> None:
+        """Register the DSL's dialects on the trace ``context``, before any op
+        is built. Upstream dialects are on every context already, so the
+        default does nothing; a sub-DSL on an out-of-tree dialect registers it
+        here (``mynewdialect.register_dialect(context)``)."""
 
-    def _dialect_plugins(self) -> list[DialectPlugin]:
-        """The installed plugins that bring a dialect or a target, the listed
-        ones first and the class's default dialects last."""
-        plugins = [p for p in self.plugins if isinstance(p, DialectPlugin)]
-        plugins.extend(getattr(self, "default_dialect_plugins", ()))
-        return plugins
-
-    def _launch_diag(self, code: str) -> Any:
-        """The launch diagnostic ``code`` of the installed kernel helper's catalogue."""
-        catalogue = getattr(self.kernel_gen_helper, "diag_ids", None)
-        if catalogue is None or not hasattr(catalogue, code):
-            raise DSLRuntimeError(
-                f"the kernel generation helper declares no `{code}` diagnostic",
-                context={"helper": repr(self.kernel_gen_helper)},
-            )
-        return getattr(catalogue, code)
+    def shared_libs(self) -> list[str]:
+        """Library paths the DSL hands to the engine besides ``<PREFIX>_LIBS``
+        and the plugins' (``MlirTestDSL``: the CUDA runtime library when gpu
+        kernels can be built)."""
+        return []
 
     # =========================================================================
     # Decorators
     # =========================================================================
 
     @staticmethod
-    def _can_preprocess(**dkwargs: Any) -> bool:
-        """
-        Check if AST transformation is enabled or not for `jit` and `kernel` decorators.
-        """
-        return dkwargs.pop("preprocess", True)
+    def _can_preprocess(**decorator_kwargs: Any) -> bool:
+        """Whether the decorator keywords ask for the AST rewrite (``preprocess=``,
+        True by default)."""
+        return decorator_kwargs.pop("preprocess", True)
 
     @staticmethod
     def _lazy_initialize_dsl(func: Any) -> None:
@@ -803,13 +448,18 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     @staticmethod
     def jit_runner(
         cls: type["BaseDSL"],
-        executor_name: str,
+        kind: str,
+        on_call: Callable[..., Any],
         location: DSLLocation,
-        *dargs: Any,
-        **dkwargs: Any,
+        *decorator_args: Any,
+        **decorator_kwargs: Any,
     ) -> Any:
         """
-        Decorator to mark a function for JIT compilation.
+        The decorator machinery shared by ``@jit`` and the decorators plugins
+        add: validate the target, record the preprocessing choice, and wrap the
+        function so that a call materialises the DSL instance, preprocesses
+        the function once and hands the call to ``on_call(dsl, func, *args,
+        **kwargs)`` with the DSL active.
 
         ``location`` is the user's call site, already resolved to a value by
         the caller via :meth:`get_location_from_frame`: the returned decorator
@@ -818,24 +468,24 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         log().info("jit_runner")
 
         def jit_runner_decorator(func: Any) -> Any:
-            decorator_kind = "kernel" if executor_name == "_kernel_helper" else "jit"
+            decorator_kind = kind
             if not inspect.isfunction(func):
                 raise DSLUserCodeError(
                     DiagId.CALL_NOT_CALLABLE,
                     decorator=f"@{decorator_kind}",
                     got=f"a `{type(func).__name__}`",
                 )
-            unknown = sorted(set(dkwargs) - {"preprocess"})
+            unknown = sorted(set(decorator_kwargs) - {"preprocess"})
             if unknown:
                 raise DSLUserCodeError(
-                    DiagId.CALL_UNEXPECTED_KWARG, argument_name=unknown[0]
+                    DiagId.CALL_ARGUMENTS,
+                    function_name=f"@{decorator_kind}",
+                    detail=f"no option is named `{unknown[0]}`",
                 )
             # Run preprocessor that alters AST
-            preprocess_enabled = BaseDSL._can_preprocess(**dkwargs)
+            preprocess_enabled = BaseDSL._can_preprocess(**decorator_kwargs)
             func._dsl_cls = cls
-            # Distinguish @jit-decorated targets (executor ``_func``, the host
-            # wrapper) from @kernel-decorated targets (executor
-            # ``_kernel_helper``, the KernelLauncher).
+            # The decorator the function carries ("jit", "kernel", ...).
             func._decorator_kind = decorator_kind
             func._decorator_location = location
             func._preprocess_enabled = preprocess_enabled
@@ -847,19 +497,17 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 BaseDSL._preprocess_and_replace_code(func)
 
                 with active_dsl(func._dsl_object):
-                    return getattr(func._dsl_object, executor_name)(
-                        func, *args, **kwargs
-                    )
+                    return on_call(func._dsl_object, func, *args, **kwargs)
 
             return jit_wrapper
 
-        if len(dargs) == 1 and callable(dargs[0]):
-            return jit_runner_decorator(dargs[0])
+        if len(decorator_args) == 1 and callable(decorator_args[0]):
+            return jit_runner_decorator(decorator_args[0])
         else:
             return jit_runner_decorator
 
     @classmethod
-    def jit(cls, *dargs: Any, **dkwargs: Any) -> Any:
+    def jit(cls, *decorator_args: Any, **decorator_kwargs: Any) -> Any:
         """
         Decorator to mark a function for JIT compilation for Host code.
 
@@ -869,111 +517,56 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         """
         return BaseDSL.jit_runner(
             cls,
-            "_func",
+            "jit",
+            BaseDSL._func,
             BaseDSL.get_location_from_frame(
                 inspect.currentframe().f_back  # type: ignore[union-attr]
             ),
-            *dargs,
-            **dkwargs,
+            *decorator_args,
+            **decorator_kwargs,
         )
 
     @classmethod
-    def kernel(cls, *dargs: Any, **dkwargs: Any) -> Any:
+    def make_decorator(cls, kind: str, on_call: Callable[..., Any]) -> Any:
+        """The decorator ``@<DSL>.<kind>`` a plugin adds through ``decorators``.
+
+        It behaves like ``@jit`` (bare or with keywords, preprocessing, the
+        lazy DSL instance); a call of the decorated function runs
+        ``on_call(dsl, func, *args, **kwargs)``, the plugin's launcher, with the
+        DSL active. Like ``jit`` (a classmethod) it binds the class it is
+        accessed on, so ``@Variant.kernel`` on a subclass traces into the
+        variant's instance, not the defining class's. ``@jit`` itself is the
+        core's; everything else a DSL decorates with comes from a plugin this
+        way.
         """
-        Decorator to mark a function for JIT compilation for GPU.
-
-        Calling the decorated function returns a :class:`KernelLauncher`;
-        ``.launch(...)`` inside a ``@jit`` body traces and launches the kernel.
-        """
-        return BaseDSL.jit_runner(
-            cls,
-            "_kernel_helper",
-            BaseDSL.get_location_from_frame(
-                inspect.currentframe().f_back  # type: ignore[union-attr]
-            ),
-            *dargs,
-            **dkwargs,
-        )
-
-    # =========================================================================
-    # GPU module and kernel helper seams (filled by the gpu plugin)
-    # =========================================================================
-
-    def _kernel_helper(self, func: Any, *args: Any, **kwargs: Any) -> KernelLauncher:
-        """
-        Helper function to handle kernel generation logic
-
-        Calling a ``@kernel`` returns a :class:`KernelLauncher`; the kernel is
-        traced and launched when its ``launch`` runs inside a ``@jit`` body.
-        Needs a dialect plugin providing kernels (the ``gpu`` plugin).
-        """
-        if self.kernel_gen_helper is None:
-            raise DSLUserCodeError(
-                DiagId.CALL_PLUGIN_REQUIRED,
-                name=self.device_jit_decorator_name,
-                plugin="gpu",
-                plugin_class="GpuPlugin",
-            )
-        return KernelLauncher(self, self.kernel_gen_helper, func, *args, **kwargs)
-
-    def _enter_kernel_container(self) -> ir.InsertionPoint:
-        """The insertion point for a kernel of the current trace."""
-        if self.kernel_gen_helper is None:
-            raise DSLRuntimeError(
-                "no kernel helper is installed", context={"dsl": self.name}
-            )
-        return self.kernel_gen_helper.container_insertion_point(
-            self.kernel_container, self.current_module
-        )
-
-    @contextmanager
-    def _track_deferred_kernel_launches(self) -> Generator[None, None, None]:
-        """Scope the host-function body: a ``@kernel`` call returns a deferred
-        launcher, so a bare ``my_kernel(...)`` statement compiles to nothing;
-        on clean exit any launcher never launched is a mistake."""
-        outer, self._pending_launches = self._pending_launches, []
-        try:
-            yield
-            pending = self._pending_launches
-        finally:
-            self._pending_launches = outer
-        for launcher in pending:
-            if not launcher._launched:
-                filename, lineno, col, end_col = launcher._creation_loc
-                raise DSLUserCodeError(
-                    self._launch_diag("LAUNCH_NEVER_ISSUED"),
-                    filename=filename,
-                    lineno=lineno,
-                    col_offset=col,
-                    end_col_offset=end_col,
-                    kernel_name=getattr(launcher.funcBody, "__name__", "<kernel>"),
-                )
+        return _PluginDecorator(kind, on_call)
 
     # =========================================================================
     # Pipeline
     # =========================================================================
 
-    def _get_pipeline(self, pipeline: str | None) -> str:
-        """
-        Get the pipeline from the other configuration options.
+    def pipeline(self) -> list[str]:
+        """The pass list of this DSL, in order: what lowers the ops its plugins
+        emit. The base lists nothing (the core emits no dialect); a sub-DSL
+        returns its own, usually a plugin's published lowering (the test DSL:
+        the gpu lowering when an architecture is set, then
+        ``LOWER_TO_LLVM`` of ``mlir.mlir_dsl``). Wrapped as ``builtin.module(...)`` by
+        :meth:`_get_pipeline`; a ``pipeline=`` call keyword or
+        ``<PREFIX>_PIPELINE`` replaces it."""
+        return []
 
-        An explicit ``pipeline`` (a call keyword) is used as given, the
-        ``<PREFIX>_PIPELINE`` environment variable with the arch option
-        appended, otherwise the plugins' passes (install order) followed by the
-        core list, wrapped as ``builtin.module(...)``.
-        """
+    def _get_pipeline(self, pipeline: str | None) -> str:
+        """The pipeline string of a compile: an explicit ``pipeline`` (a call
+        keyword) as given, else the ``<PREFIX>_PIPELINE`` environment variable
+        with the arch option appended, else :meth:`pipeline` wrapped as
+        ``builtin.module(...)``."""
         if pipeline is not None:
             return pipeline
         if self.envar.pipeline is not None:
-            if self.envar.arch:
+            if self.envar.arch and self.pass_sm_arch_name:
                 return self.preprocess_pipeline(self.envar.pipeline, self.envar.arch)
             return self.envar.pipeline
-
-        passes: list[str] = []
-        for plugin in self._dialect_plugins():
-            passes.extend(plugin.pipeline_passes())
-        passes.extend(_CORE_PIPELINE_PASSES)
-        return "builtin.module(" + ",".join(passes) + ")"
+        return "builtin.module(" + ",".join(self.pipeline()) + ")"
 
     def preprocess_pipeline(self, pipeline: str, arch: str) -> str:
         """Append the architecture option (``<pass_sm_arch_name>=<arch>``) to
@@ -1000,6 +593,18 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             else:
                 pipeline = pipeline.rstrip(")") + f"{{{opt_str}}})"
         return pipeline
+
+    # =========================================================================
+    # Staging
+    # =========================================================================
+
+    def is_mlir_op(self, value: Any) -> bool:
+        """Whether one value is an MLIR op rather than a Python value, for this
+        DSL. ``mlir.dsl.is_mlir_op`` calls it for each leaf of a tuple, list or
+        frozen record (the containers are walked for you). The default: a raw
+        SSA value or a registered leaf whose payload is one. A sub-DSL with its
+        own value model overrides it."""
+        return _is_mlir_op_leaf(value)
 
     # =========================================================================
     # Name mangling
@@ -1066,36 +671,6 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     # Block arguments -> traced Python arguments
     # =========================================================================
 
-    def _generate_execution_arguments_for_known_types(
-        self,
-        arg: Any,
-        arg_spec: Any,
-        arg_name: str,
-        i: int,
-        fop_args: list[Any],
-        iv_block_args: int,
-    ) -> tuple[list[Any], int]:
-        """
-        Generate MLIR arguments for known types.
-
-        Sub-DSLs can override this method to handle types that are not
-        natively supported by the Base DSL.
-        """
-        ir_arg = []
-        # ``self.funcBody`` is the function currently being traced; it supplies
-        # the owning-function context that ``is_argument_meta`` uses to
-        # detect reserved ``self``/``cls`` parameters.
-        if is_argument_meta(
-            arg,
-            arg_spec,
-            arg_name,
-            i,
-            self.funcBody,
-        ):
-            ir_arg.append(arg)
-
-        return ir_arg, iv_block_args
-
     @staticmethod
     def _restore_tree(treedef: Any, restore_leaf: Callable[[Any], Any]) -> Any:
         """Rebuild the container described by ``treedef``, restoring every
@@ -1144,11 +719,12 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             arg_spec = parameter.annotation
             log().debug("Processing [%d] Argument [%s : %s]", idx, arg_name, arg_spec)
 
-            ir_arg, iv_block_args = self._generate_execution_arguments_for_known_types(
-                arg, arg_spec, arg_name, idx, fop_args, iv_block_args
-            )
-
-            if not ir_arg:
+            # A Python value is handed to the body as is; ``traced_function``
+            # supplies the owning-function context ``is_argument_meta`` uses to
+            # detect reserved ``self``/``cls`` parameters.
+            if is_argument_meta(arg, arg_spec, arg_name, idx, self.traced_function):
+                ir_arg: Any = arg
+            else:
                 with JitArgAdapterRegistry.using_scope(self._jit_arg_adapter_scope):
                     base_spec = (
                         get_args(arg_spec)[0]
@@ -1175,8 +751,6 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                         blk_args = fop_args[iv_block_args : iv_block_args + n_args]
                         ir_arg = self._restore_from_block_args(treedef, blk_args)
                         iv_block_args += n_args
-            else:
-                ir_arg = ir_arg[0]
 
             return ir_arg, iv_block_args
 
@@ -1240,39 +814,6 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             got=f"a `{type(arg).__name__}`",
         )
 
-    def _generate_jit_func_args_for_known_types(
-        self,
-        func: Any,
-        arg: Any,
-        arg_name: str,
-        arg_spec: Any,
-        arg_index: int,
-        *,
-        is_host: bool = True,
-    ) -> tuple[list[Any] | None, list[Any] | None, list[Any] | None]:
-        """
-        Generate JIT function arguments for known types.
-
-        Sub-DSLs can override this method to handle types that are not
-        natively supported by the Base DSL. ``None`` triples mark a Meta
-        argument, which the trace specialises on.
-        """
-
-        jit_arg_type: list[Any] | None = []
-        jit_arg_attr: list[Any] | None = []
-        jit_exec_arg: list[Any] | None = []
-
-        if is_argument_meta(
-            arg,
-            arg_spec,
-            arg_name,
-            arg_index,
-            func,
-        ):
-            jit_exec_arg = jit_arg_type = jit_arg_attr = None
-
-        return jit_exec_arg, jit_arg_type, jit_arg_attr
-
     @staticmethod
     def _extract_annotation_markers(spec_ty: Any, arg: Any) -> list[Any]:
         """Extract ``Annotated[...]`` markers from an annotation matching ``arg``.
@@ -1326,13 +867,10 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         self,
         *,
         arg: Any,
-        spec_ty: Any,
         arg_name: str,
         arg_index: int,
-        func: Any,
         function_name: str,
         is_host: bool,
-        compile_only: bool,
         jit_arg_type: list[Any],
         jit_exec_arg: list[Any],
     ) -> None:
@@ -1346,7 +884,6 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             num=arg_index + 1,
             arg_name=arg_name,
             arg_type=type(arg).__name__,
-            phase_label=("JitArgument" if is_host else "DynamicExpression"),
             function_name=function_name,
         )
 
@@ -1386,14 +923,16 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                     num=arg_index + 1,
                     arg_name=arg_name,
                     arg_type=type(value).__name__,
-                    phase_label="JitArgument",
                     function_name=function_name,
                 )
             if entry is None or entry.marshal is None:
                 raise DSLUserCodeError(
-                    DiagId.ARG_NOT_MARSHALABLE,
+                    DiagId.ARG_UNSUPPORTED_TYPE,
+                    num=arg_index + 1,
                     arg_name=arg_name,
+                    function_name=function_name,
                     arg_type=type(value).__name__,
+                    detail=": the DSL knows the type, but it has no host representation",
                 )
             with JitArgAdapterRegistry.using_argument(arg_name, arg_index):
                 exec_args.extend(entry.marshal(value))
@@ -1409,7 +948,6 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         sig: inspect.Signature,
         *,
         is_host: bool = True,
-        compile_only: bool = False,
     ) -> JitFuncArgs:
         """Generate JIT function arguments."""
         positional_names = []
@@ -1484,13 +1022,13 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                     if err is not None:
                         raise err
 
-                (
-                    jit_exec_arg,
-                    jit_arg_type,
-                    jit_arg_attr,
-                ) = self._generate_jit_func_args_for_known_types(
-                    func, arg, arg_name, spec_ty, i, is_host=is_host
-                )
+                # A Python value (``None`` triple) is specialised on by the
+                # trace; an MLIR op gets its types, attributes and values.
+                jit_exec_arg: list[Any] | None = []
+                jit_arg_type: list[Any] | None = []
+                jit_arg_attr: list[Any] | None = []
+                if is_argument_meta(arg, spec_ty, arg_name, i, func):
+                    jit_exec_arg = jit_arg_type = jit_arg_attr = None
 
                 if jit_arg_type is not None and len(jit_arg_type) == 0:
                     exec_args, arg_types, arg_attrs = self._flatten_jit_arg(
@@ -1502,13 +1040,10 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
                     self._check_unsupported_jit_arg(
                         arg=arg,
-                        spec_ty=spec_ty,
                         arg_name=arg_name,
                         arg_index=i,
-                        func=func,
                         function_name=function_name,
                         is_host=is_host,
-                        compile_only=compile_only,
                         jit_arg_type=jit_arg_type,
                         jit_exec_arg=jit_exec_arg,  # type: ignore[arg-type]
                     )
@@ -1544,19 +1079,12 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         args: tuple[Any, ...] | list[Any],
         kwonlyargs: dict[str, Any],
         sig: inspect.Signature,
-        compile_only: bool = False,
     ) -> JitFuncArgs:
         """Convert input arguments to the MLIR function signature and the
         marshalled execution arguments."""
 
         result = self._generate_jit_func_args(
-            func,
-            function_name,
-            args,
-            kwonlyargs,
-            sig,
-            is_host=True,
-            compile_only=compile_only,
+            func, function_name, args, kwonlyargs, sig, is_host=True
         )
 
         if len(result.values) != len(result.types):
@@ -1566,48 +1094,6 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             )
 
         return result
-
-    def _check_buffer_kinds(
-        self,
-        args: tuple[Any, ...],
-        kwonlyargs: dict[str, Any],
-        adapted_args: list[Any],
-        sig: inspect.Signature,
-        function_name: str,
-    ) -> None:
-        """Reject a buffer whose side does not match what the trace did.
-
-        A host buffer (a numpy array, a CPU tensor) passed to a call whose
-        trace launched a kernel is the plugin's ``LAUNCH_HOST_BUFFER``; a
-        device buffer passed to a call whose trace launched nothing is
-        ``ARG_DEVICE_BUFFER_ON_HOST``. A bare address (kind ``unknown``) is
-        never checked.
-        """
-        launched = self.launch_inner_count > 0
-        input_args = [*args, *kwonlyargs.values()]
-        for name, original, adapted in zip(sig.parameters, input_args, adapted_args):
-            arg = original if adapted is None else adapted
-            if not tree_utils.contains_leaf(arg):
-                continue
-            values, _, _ = tree_utils.tree_flatten(arg, return_ir_values=False)
-            for value in values:
-                kind = getattr(value, "kind", "unknown")
-                if not isinstance(value, t.Pointer) or kind == "unknown":
-                    continue
-                if kind == "host" and launched:
-                    raise DSLUserCodeError(
-                        self._launch_diag("LAUNCH_HOST_BUFFER"),
-                        arg_name=name,
-                        arg_type=type(original).__name__,
-                        function_name=function_name,
-                    )
-                if kind == "device" and not launched:
-                    raise DSLUserCodeError(
-                        DiagId.ARG_DEVICE_BUFFER_ON_HOST,
-                        arg_name=name,
-                        arg_type=type(original).__name__,
-                        function_name=function_name,
-                    )
 
     # =========================================================================
     # Locations
@@ -1621,7 +1107,6 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             lineno=frame.f_lineno,
             col_offset=0,
             function_name=frame.f_code.co_name,
-            caller_locs=(),
         )
 
     def get_ir_location(self, location: DSLLocation | None = None) -> Any:
@@ -1636,31 +1121,19 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         file_loc = ir.Location.file(
             location.filename, location.lineno, location.col_offset
         )
-        loc = ir.Location.name(location.function_name, childLoc=file_loc)
-
-        if location.caller_locs:
-            caller_ir_locs = [
-                ir.Location.file(fn, ln, 0) for fn, ln in location.caller_locs
-            ]
-            loc = ir.Location.callsite(loc, caller_ir_locs)
-
-        return loc
+        return ir.Location.name(location.function_name, childLoc=file_loc)
 
     def _enter_loc_tracebacks(self) -> Any:
-        """Enter the loc-tracebacks context if enabled, returning it (or None).
-
-        Enable via <PREFIX>_LOC_TRACEBACKS=N (e.g. 128 for full stacks).
-        """
+        """Turn on MLIR's traceback locations for the trace when ``debuginfo``
+        is set (the user's line) or ``<PREFIX>_LOC_TRACEBACKS=N`` asks for a
+        call chain of N frames; ``debug`` keeps the DSL's own frames. Returns
+        the context manager to exit, or None."""
         depth = self.envar.loc_tracebacks
-        if depth <= 0:
-            return None
-        try:
-            loc_tracebacks = ir.loc_tracebacks(max_depth=depth)
-        except (ValueError, TypeError, AttributeError):
-            # Bindings without the feature, or an unsupported depth.
-            return None
-        loc_tracebacks.__enter__()
-        return loc_tracebacks
+        if depth <= 0 and self.envar.debuginfo:
+            depth = 1
+        return enter_traceback_locations(
+            depth, include_dsl_frames=bool(self.envar.debug)
+        )
 
     # =========================================================================
     # Compile, hash, dump
@@ -1674,14 +1147,14 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         function_name: str = "",
     ) -> Any:
         """
-        Compile and JIT an MLIR module through the compiler provider.
+        Compile and JIT an MLIR module through the compiler plugin.
 
         :return: The ``ExecutionEngine`` holding the compiled module.
         """
         # This method is also a direct entry point (not only reached through
         # generate_mlir), so it owns a compile boundary of its own; when
         # nested inside generate_mlir the depth counter folds it away.
-        phase_profiler.begin_compile()
+        profiler.begin_compile()
         try:
             return self._compiler.compile_and_jit(
                 module,
@@ -1692,6 +1165,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 remark_filter=self.envar.remarks,
                 remark_policy=self.envar.remarks_policy,
                 remark_output=self.envar.remarks_output,
+                after_lowering=self._after_lowering,
             )
         except DSLBaseError:
             raise
@@ -1700,14 +1174,19 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 "compilation failed", context={"function": function_name}, cause=e
             ) from e
         finally:
-            phase_profiler.finish_compile()
+            profiler.finish_compile()
+
+    def _after_lowering(self, module: ir.Module) -> None:
+        """Run every adapter's ``after_lowering`` on the lowered ``module``."""
+        for plugin in self.plugins.adapters:
+            plugin.after_lowering(self, module)
 
     def jit_lowered_module(
         self, module: ir.Module, shared_libs: list[str], function_name: str = ""
     ) -> Any:
         """Build the ``ExecutionEngine`` of an already lowered ``module`` (a file
         cache hit): the pass pipeline is skipped."""
-        phase_profiler.begin_compile()
+        profiler.begin_compile()
         try:
             return self._compiler.jit(module, shared_libs=shared_libs)
         except DSLBaseError:
@@ -1717,7 +1196,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 "compilation failed", context={"function": function_name}, cause=e
             ) from e
         finally:
-            phase_profiler.finish_compile()
+            profiler.finish_compile()
 
     def get_shared_libs(self, extra_link_libs: tuple[str, ...] = ()) -> list[str]:
         """The runtime libraries handed to the ``ExecutionEngine``: the
@@ -1736,6 +1215,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             else:
                 shared_libs.extend(support_libs.split(os.pathsep))
 
+        shared_libs.extend(self.shared_libs())
         for plugin in self.plugins:
             shared_libs.extend(plugin.shared_libs())
         shared_libs.extend(extra_link_libs)
@@ -1843,27 +1323,22 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     # Return values
     # =========================================================================
 
-    def get_return_types(self) -> list[Any]:
-        """
-        Get the return types of the host function (DkgDSL's seam).
-
-        The base does not consult it: the entry is created as ``void`` and,
-        once the body is traced, its function type is rewritten with the one
-        result the return packs (:meth:`_return_values`).
-        """
-        return []
-
     def _return_values(
-        self, helper: _HostGenHelper, result: Any, sig: inspect.Signature, loc: Any
+        self, entry: FuncEntryPlugin, result: Any, sig: inspect.Signature, loc: Any
     ) -> tuple[list[ir.Value], _ResultSpec | None]:
         """Turn the traced return value into what the entry returns.
         Numeric leaves and frozen records/tuples/``@struct``s of them are
-        accepted; the host helper decides how the leaves travel (the LLVM
-        world packs several into one ``!llvm.struct``).
+        accepted; the ``func_entry`` plugin's ``pack_results`` decides how the
+        leaves travel (the test DSL's ``func.Entry`` packs several into one
+        struct).
         """
         if result is None:
             if sig.return_annotation not in (inspect.Signature.empty, None):
-                raise DSLUserCodeError(DiagId.TYPE_RETURN_NONE)
+                raise DSLUserCodeError(
+                    DiagId.TYPE_RETURN_MISMATCH,
+                    got="`None`",
+                    detail=" while it declares a return type",
+                )
             return [], None
         if isinstance(result, (bool, int, float)):
             result = t.Numeric._from_python_value(result)
@@ -1891,7 +1366,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 DiagId.TYPE_RETURN_MISMATCH, got=f"a `{type(result).__name__}`"
             )
         values, _, _ = tree_utils.tree_flatten(result, return_ir_values=True)
-        ret_values, slot = helper.pack_results(
+        ret_values, slot = entry.pack_results(
             values, [leaf.prototype for leaf in leaves], loc=loc
         )
         return ret_values, _ResultSpec(treedef, slot)
@@ -1904,7 +1379,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             if not leaf.is_none and not leaf.is_meta
         ]
         values = iter(
-            self._host_gen_helper().unpack_result(
+            self._func_entry().unpack_result(
                 spec.slot, raw, [leaf.prototype for leaf in leaves]
             )
         )
@@ -1916,11 +1391,11 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
     def generate_original_ir(
         self,
-        funcBody: Callable[..., Any],
+        func: Callable[..., Any],
         function_name: str,
         func_types: list[Any],
         arg_attrs: list[Any],
-        gpu_module_attrs: dict[str, Any],
+        container_attrs: dict[str, Any],
         args: tuple[Any, ...],
         kwonlyargs: dict[str, Any],
         sig: inspect.Signature,
@@ -1930,7 +1405,8 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         pipeline: str = "",
         extra_link_libs: tuple[str, ...] = (),
     ) -> tuple[ir.Module, str | None, Any, _ResultSpec | None]:
-        """Trace ``funcBody`` into a ``func.func`` host entry of a fresh module.
+        """Trace ``func`` into the host entry the ``func_entry`` plugin builds,
+        in a fresh module.
 
         :return: The verified module, its hash (None under ``no_cache``), the
             trace's Python result and the result slot description
@@ -1941,54 +1417,33 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             module = ir.Module.create(loc=loc)
 
             with ir.InsertionPoint(module.body):
-                # The kernel container is built up front and pruned after the
-                # trace when it received no kernel.
-                self.current_module = module
-                self.kernel_container = (
-                    self.kernel_gen_helper.build_container(gpu_module_attrs, loc=loc)
-                    if self.kernel_gen_helper is not None
-                    else None
-                )
+                # A plugin with per-trace state (a kernel container, the
+                # launches it expects) sets it up before the entry is built.
+                for plugin in self.plugins.decorators:
+                    plugin.before_trace(self, module, loc=loc, attrs=container_attrs)
 
-                # The host entry is the dialect plugin's (the LLVM world: a
-                # ``func.func`` with the C interface); its result types are
-                # set after the trace.
-                helper = self._host_gen_helper()
-                entry_block = helper.generate_func_op(
-                    function_name, list(func_types), list(arg_attrs), loc=loc
+                # The host entry is the ``func_entry`` plugin's (``func.Entry``: a
+                # ``func.func`` with the C interface); its result types are set
+                # after the trace.
+                entry = self._func_entry()
+                func_op, entry_block, result = self.trace_body(
+                    entry,
+                    function_name,
+                    func,
+                    args,
+                    kwonlyargs,
+                    sig,
+                    func_types,
+                    arg_attrs,
+                    loc=loc,
                 )
-                log().debug("Generated Function OP [%s]", helper.func_op)
                 with ir.InsertionPoint(entry_block):
-                    ir_args, ir_kwargs = self.generate_execution_arguments(
-                        args, kwonlyargs, entry_block, sig
-                    )
-                    # Call user function body
-                    try:
-                        with self._track_deferred_kernel_launches():
-                            result = funcBody(*ir_args, **ir_kwargs)
-                    except NameError as name_error:
-                        # Extract the source location from the NameError traceback.
-                        tb = name_error.__traceback__
-                        err_filename = err_lineno = None
-                        while tb is not None:
-                            err_filename = tb.tb_frame.f_code.co_filename
-                            err_lineno = tb.tb_lineno
-                            tb = tb.tb_next
-                        raise DSLUserCodeError(
-                            DiagId.SCOPE_UNBOUND_NAME_IN_TRACE,
-                            filename=err_filename,
-                            lineno=err_lineno,
-                            cause=name_error,
-                            var=getattr(name_error, "name", None)
-                            or f"<in {funcBody.__name__}>",
-                            function_name=funcBody.__name__,
-                        ) from name_error
                     ret_values, result_spec = self._return_values(
-                        helper, result, sig, loc
+                        entry, result, sig, loc
                     )
-                    helper.generate_return(ret_values, loc=loc)
-                if self.kernel_gen_helper is not None:
-                    self.kernel_gen_helper.prune_empty_containers(module)
+                    entry.generate_return(func_op, ret_values, loc=loc)
+                for plugin in self.plugins.decorators:
+                    plugin.after_trace(self, module)
 
             return module, result, result_spec
 
@@ -2001,7 +1456,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             module, result, result_spec = self._maybe_profile(build_ir_module)()
             # Plugins add to the module before the hash, so what they add is
             # part of the cached artifact (the TVM-FFI wrapper, for one).
-            for plugin in self.plugins:
+            for plugin in self.plugins.adapters:
                 plugin.attach_to_module(
                     self, module, function_name, sig, args, kwonlyargs
                 )
@@ -2020,7 +1475,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 result_spec,
             )
 
-        build_and_finalize = phase_profiler.profile_build(build_and_finalize)
+        build_and_finalize = profiler.profile_build(build_and_finalize)
         return build_and_finalize()
 
     def _maybe_profile(self, fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -2039,13 +1494,12 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         pipeline: str,
         sig: inspect.Signature,
         no_cache: bool,
-        func_type: Callable[..., JitCompiledFunction] = JitCompiledFunction,
         *,
         result_spec: _ResultSpec | None = None,
         extra_link_libs: tuple[str, ...] = (),
-        funcBody: Callable[..., Any] | None = None,
-    ) -> JitCompiledFunction:
-        """Compile ``module`` and cache the resulting :class:`JitCompiledFunction`.
+        func: Callable[..., Any] | None = None,
+    ) -> Any:
+        """Compile ``module`` and cache the callable the compiler plugin loads.
 
         The lowered module goes into an ``ExecutionEngine`` over
         ``get_shared_libs``; the entry is the packed ``_mlir_<name>`` wrapper.
@@ -2093,33 +1547,31 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             engine = self._maybe_profile(self.compile_and_jit)(
                 module, pipeline, shared_libs, function_name
             )
-        # The lookup materializes the JIT'd code (ORC compiles lazily), so it
-        # belongs to the jit phase together with engine construction.
-        lookup = phase_profiler.timed("jit")(
-            self._maybe_profile(lookup_packed_function)
-        )
-        capi_func = lookup(engine, function_name)
-
-        jit_function = func_type(
+        # Binding the entry materializes the JIT'd code (ORC compiles lazily),
+        # so it belongs to the jit phase together with engine construction.
+        load = profiler.timed("jit")(self._maybe_profile(self._compiler.load))
+        jit_function = load(
             module,
             engine,
-            capi_func,
-            sig,
             function_name,
-            self.kernel_info,
+            sig,
             jit_time_profiling=self.envar.jit_time_profiling,
             result_ctype=result_spec.slot if result_spec is not None else None,
-            has_kernels=self.num_kernels > 0,
         )
         jit_function.result_spec = result_spec  # type: ignore[attr-defined]
-        if isinstance(jit_function, JitCompiledFunction):
-            jit_function.execution_args.set_adapter_scope(self._jit_arg_adapter_scope)
-        # An export plugin wraps the function (its symbols are in the engine now).
-        for plugin in self.plugins:
+        execution_args = getattr(jit_function, "execution_args", None)
+        if execution_args is not None:
+            execution_args.set_adapter_scope(self._jit_arg_adapter_scope)
+        # Decorator plugins record what the trace did; adapters then wrap the
+        # function for another ABI (their symbols are in the engine now).
+        for plugin in self.plugins.decorators:
+            plugin.finish_compiled_function(self, jit_function)
+        for plugin in self.plugins.adapters:
             jit_function = plugin.wrap_compiled_function(self, jit_function)
 
         if not no_cache:
-            self.jit_cache.set(module_hash, jit_function, funcBody)
+            # The entry lives as long as the decorated function does.
+            self.jit_cache.set(module_hash, jit_function, func)
         if file_cache_enabled and not load_from_file_cache:
             dump_cache_to_path(
                 self.name,
@@ -2134,17 +1586,13 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
     def post_compilation_cleanup(self) -> None:
         """Clean up some internal state after one compilation is completed."""
-        self.kernel_info = OrderedDict()
-        self.launch_inner_count = 0
-        self.num_kernels = 0
         self.decorator_location = None
-        self.kernel_container = None
 
     def generate_mlir(
         self,
-        funcBody: Callable[..., Any],
+        func: Callable[..., Any],
         function_name: str,
-        gpu_module_attrs: dict[str, Any],
+        container_attrs: dict[str, Any],
         args: tuple[Any, ...],
         kwonlyargs: dict[str, Any],
         sig: inspect.Signature,
@@ -2154,15 +1602,12 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         location: DSLLocation | None = None,
         extra_link_libs: tuple[str, ...] = (),
     ) -> Any:
-        """Trace ``funcBody`` into an MLIR module, compile it through the
-        compiler provider (or take the cached function) and run it.
+        """Trace ``func`` into an MLIR module, compile it through the
+        compiler plugin (or take the cached function) and run it.
 
         :return: The trace's Python result under ``<PREFIX>_DRYRUN``, the
             compiled function under ``compile_only``, else the call's result
         """
-        # Check current DSL build supports target arch
-        self._is_supported_arch()
-
         # The remark session owns the context's remark engine for the whole
         # call, so trace-time remarks and the passes' remarks share one stream.
         with ir.Context() as ctx, self.get_ir_location(location), self._remark_session(
@@ -2171,17 +1616,18 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             # Each MLIR context keeps a thread pool alive; cached compilations
             # keep their context, so threading is disabled to bound the count.
             ctx.enable_multithreading(False)
-            for plugin in self._dialect_plugins():
+            self.register_dialects(ctx)
+            for plugin in self.plugins:
                 plugin.register_dialects(ctx)
             self.collected_remarks = remark_session.remarks
             # Optional: capture full Python call stacks on every MLIR op.
             loc_tracebacks = self._enter_loc_tracebacks()
 
-            phase_profiler.begin_compile()
+            profiler.begin_compile()
             try:
                 # Convert input arguments to MLIR arguments
                 mlir_func_args = self.generate_mlir_function_types(
-                    funcBody, function_name, args, kwonlyargs, sig, compile_only
+                    func, function_name, args, kwonlyargs, sig
                 )
                 exe_args = mlir_func_args.values
                 adapted_args = mlir_func_args.adapted_python_args
@@ -2201,11 +1647,11 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
                 # Generate original ir module and its hash value.
                 module, module_hash, result, result_spec = self.generate_original_ir(
-                    funcBody,
+                    func,
                     function_name,
                     mlir_func_args.types,
                     mlir_func_args.attributes,
-                    gpu_module_attrs,
+                    container_attrs,
                     trace_args,
                     trace_kwargs,
                     sig,
@@ -2214,12 +1660,18 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                     pipeline=pipeline,
                     extra_link_libs=extra_link_libs,
                 )
-                self._check_buffer_kinds(
-                    args, kwonlyargs, adapted_args, sig, function_name
-                )
+                for plugin in self.plugins.decorators:
+                    plugin.check_arguments(
+                        self, sig, args, kwonlyargs, adapted_args, function_name
+                    )
 
-                # dryrun is used to only generate IR
-                if self.envar.dryrun:
+                # A dry run generates the IR and stops; so does a call on a DSL
+                # without a compiler plugin (trace-only: the IR is the product).
+                # An explicit ``compile()`` on such a DSL falls through to the
+                # missing-compiler error below.
+                if self.envar.dryrun or (
+                    self.plugins.compiler is None and not compile_only
+                ):
                     return result
 
                 cached_jit_func = None if no_cache else self.jit_cache.get(module_hash)
@@ -2239,7 +1691,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                         no_cache,
                         result_spec=result_spec,
                         extra_link_libs=extra_link_libs,
-                        funcBody=funcBody,
+                        func=func,
                     )
                 else:
                     self.cache_hits += 1
@@ -2258,14 +1710,15 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                         pass
                 self.post_compilation_cleanup()
                 # Diagnostics last: a profiler failure must not skip the cleanup.
-                phase_profiler.finish_compile()
+                profiler.finish_compile()
 
         # If compile_only is set, bypass execution return the jit_executor directly
         if compile_only:
             # The returned function is specialized on this call's Meta values;
             # a later call with other ones is a diagnostic, not a silent reuse.
-            if isinstance(jit_function, JitCompiledFunction):
-                jit_function.execution_args.set_meta_values(
+            execution_args = getattr(jit_function, "execution_args", None)
+            if execution_args is not None:
+                execution_args.set_meta_values(
                     {
                         param.name: arg
                         for param, arg in zip(sig.parameters.values(), args)
@@ -2273,7 +1726,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                     }
                 )
                 # The host shape of every argument, adapted as the trace saw it.
-                jit_function.execution_args.set_shapes(
+                execution_args.set_shapes(
                     {
                         param.name: tree_utils.tree_flatten(
                             arg, return_ir_values=False
@@ -2333,7 +1786,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
     def _run_preprocessor_impl(self, original_function: Any) -> Any:
         function_name = original_function.__name__
-        self.funcBody = original_function
+        self.traced_function = original_function
         log().info("Started preprocessing [%s]", function_name)
         exec_globals: dict[str, Any] = {}
         if original_function.__globals__ is not None:
@@ -2371,7 +1824,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     # =========================================================================
 
     def _get_function_bound_args(
-        self, sig: inspect.Signature, func_name: str, *args: Any, **kwargs: Any
+        self, sig: inspect.Signature, function_name: str, *args: Any, **kwargs: Any
     ) -> inspect.BoundArguments:
         """
         Binds provided arguments to a function's signature and applies default values.
@@ -2384,9 +1837,9 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             bound_args.apply_defaults()
         except TypeError as e:
             raise DSLUserCodeError(
-                DiagId.CALL_SIGNATURE_MISMATCH,
-                provided=len(args),
-                provided_kw=len(kwargs),
+                DiagId.CALL_ARGUMENTS,
+                function_name=function_name,
+                detail=f"{len(args)} positional and {len(kwargs)} keyword argument(s) do not bind to its runtime parameters ({e})",
                 cause=e,
             ) from e
         return bound_args
@@ -2406,7 +1859,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         bound_args: inspect.BoundArguments,
         function_name: str,
     ) -> bool:
-        """Raise ``CALL_MISSING_ARG`` for a parameter without default that
+        """Raise ``CALL_ARGUMENTS`` for a parameter without default that
         ``bound_args`` leaves unbound.
 
         :return: Whether the signature has ``*args`` or ``**kwargs``
@@ -2424,24 +1877,24 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 and param.name not in bound_args.arguments
             ):
                 raise DSLUserCodeError(
-                    DiagId.CALL_MISSING_ARG,
-                    missing=f"`{param.name}`",
+                    DiagId.CALL_ARGUMENTS,
                     function_name=function_name,
+                    detail=f"no value for `{param.name}`",
                 )
         return has_varargs
 
-    def _get_signature(self, funcBody: Callable[..., Any]) -> inspect.Signature:
+    def _get_signature(self, func: Callable[..., Any]) -> inspect.Signature:
         """
         Returns the signature for a given function, handling PEP-563
         (postponed evaluation of type annotations) via eval_str=True.
         """
         try:
-            return inspect.signature(funcBody, eval_str=True)
+            return inspect.signature(func, eval_str=True)
         except NameError as e:
             raise DSLUserCodeError(
                 DiagId.SCOPE_UNBOUND_NAME_IN_TRACE,
                 var=getattr(e, "name", None) or "<annotation>",
-                function_name=getattr(funcBody, "__name__", "<function>"),
+                function_name=getattr(func, "__name__", "<function>"),
                 cause=e,
             ) from e
 
@@ -2501,7 +1954,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
         function_name: str
         pipeline: str | None
-        gpu_module_attrs: dict[str, Any]
+        container_attrs: dict[str, Any]
         no_cache: bool
         extra_link_libs: tuple[str, ...]
         compile_only: bool
@@ -2511,19 +1964,19 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         location: DSLLocation | None
 
     def _prepare_compilation(
-        self, funcBody: Callable[..., Any], *args: Any, **kwargs: Any
+        self, func: Callable[..., Any], *args: Any, **kwargs: Any
     ) -> "_CompilationSetup":
         """Extract kwargs, canonicalize args and mangle the name.
 
-        The call keywords ``pipeline``, ``gpu_module_attrs``, ``no_cache``,
+        The call keywords ``pipeline``, ``container_attrs``, ``no_cache``,
         ``extra_link_libs`` and ``compile_only`` are the DSL's, popped before
         the remaining arguments bind to the function's signature.
         """
-        function_name = funcBody.__name__
-        self.funcBody = funcBody
+        function_name = func.__name__
+        self.traced_function = func
 
         pipeline = kwargs.pop("pipeline", None)
-        gpu_module_attrs = kwargs.pop("gpu_module_attrs", {})
+        container_attrs = kwargs.pop("container_attrs", {})
         no_cache = kwargs.pop("no_cache", False) or self.envar.no_cache
         extra_link_libs_arg = kwargs.pop("extra_link_libs", ())
         if isinstance(extra_link_libs_arg, (str, bytes, os.PathLike)):
@@ -2538,7 +1991,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             log().info("Cache is disabled as user wants to compile only.")
 
         # Get signature of the function
-        sig = self._get_signature(funcBody)
+        sig = self._get_signature(func)
 
         # Get bound arguments
         bound_args = self._get_function_bound_args(sig, function_name, *args, **kwargs)
@@ -2562,7 +2015,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         return self._CompilationSetup(
             function_name=function_name,
             pipeline=pipeline,
-            gpu_module_attrs=gpu_module_attrs,
+            container_attrs=container_attrs,
             no_cache=no_cache,
             extra_link_libs=extra_link_libs,
             compile_only=compile_only,
@@ -2572,33 +2025,26 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             location=self.decorator_location,
         )
 
-    def _func(self, funcBody: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        """The ``@jit`` executor: one call of the decorated ``funcBody``.
+    def _func(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """The ``@jit`` launcher (the ``on_call`` of the core decorator): one
+        call of the decorated ``func``, with the DSL already active.
 
         1. Translates the arguments (numpy arrays -> ``Pointer``, ``float`` ->
            ``f32``, ...) and traces the body into the host entry
         2. Compiles and JITs the MLIR module (cached)
         3. Invokes the compiled function and rebuilds its result
         """
-        # Keep this guard even though jit_wrapper also enters the DSL context:
-        # compile/device paths may call _func directly.
-        with active_dsl(self):
-            return self._func_impl(funcBody, *args, **kwargs)
-
-    def _func_impl(
-        self, funcBody: Callable[..., Any], *args: Any, **kwargs: Any
-    ) -> Any:
         if ir.Context.current is not None and ir.InsertionPoint.current is not None:
             # A nested call inside a trace runs its (preprocessed) body inline.
-            return funcBody(*args, **kwargs)
+            return func(*args, **kwargs)
 
-        setup = self._prepare_compilation(funcBody, *args, **kwargs)
+        setup = self._prepare_compilation(func, *args, **kwargs)
 
         log().debug("Generating MLIR for function '%s'", setup.function_name)
         return self.generate_mlir(
-            funcBody,
+            func,
             setup.function_name,
-            setup.gpu_module_attrs,
+            setup.container_attrs,
             setup.canonicalized_args,
             setup.canonicalized_kwargs,
             setup.sig,
@@ -2610,219 +2056,92 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         )
 
     # =========================================================================
-    # Device entry: @kernel
+    # Services for the decorators plugins add
     # =========================================================================
 
-    def generate_kernel_operands_and_types(
+    def bind_arguments(
         self,
-        kernel_func: Callable[..., Any],
-        kernel_name: str,
-        signature: inspect.Signature,
+        func: Callable[..., Any],
+        name: str,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
-    ) -> tuple[list[Any], list[Any], list[Any]]:
-        """
-        Generate the operands and types for the kernel function
-        """
-        log().debug(
-            "Processing GPU kernel call in [%s] mode",
-            (
-                f"Only {self.device_jit_decorator_name}"
-                if self.device_compilation_only
-                else f"{self.host_jit_decorator_name} + {self.device_jit_decorator_name}"
-            ),
-        )
+        *,
+        is_host: bool = False,
+    ) -> tuple[inspect.Signature, tuple[Any, ...], dict[str, Any], JitFuncArgs]:
+        """Bind one call of ``func`` for a plugin's decorator.
 
-        if self.device_compilation_only:
-            return [], [], []
-
-        _kernel_args = self._generate_jit_func_args(
-            kernel_func, kernel_name, args, kwargs, signature, is_host=False
+        :return: The signature, the canonical positional and keyword-only
+            arguments (defaults applied), and their IR operands, types and
+            attribute dicts from the argument boundary; ``is_host=False`` is the
+            device side (a kernel's arguments are the host trace's values)
+        """
+        signature = self._get_signature(func)
+        self.traced_function = func
+        bound = self._get_function_bound_args(signature, name, *args, **kwargs)
+        self._check_arg_count(signature, bound, name)
+        canonical_args, canonical_kwargs = self._canonicalize_args(bound)
+        jit_args = self._generate_jit_func_args(
+            func, name, canonical_args, canonical_kwargs, signature, is_host=is_host
         )
-        if (
-            not len(_kernel_args.values)
-            == len(_kernel_args.types)
-            == len(_kernel_args.attributes)
-        ):
+        if not len(jit_args.values) == len(jit_args.types) == len(jit_args.attributes):
             raise DSLRuntimeError(
-                "Size of kernel_operands, kernel_arg_types and kernel_arg_attrs must be equal"
+                "the argument boundary produced mismatched operands, types and attributes",
+                context={
+                    "function": name,
+                    "values": len(jit_args.values),
+                    "types": len(jit_args.types),
+                    "attributes": len(jit_args.attributes),
+                },
             )
-        return _kernel_args.values, _kernel_args.types, _kernel_args.attributes
+        return signature, canonical_args, canonical_kwargs, jit_args
 
-    def _collect_kernel_launch_args(
+    def trace_body(
         self,
-        kernel_name: str,
-        kwargs: dict[str, Any],
-        requiredArgs: list[str],
-        optionalArgs: list[str],
-    ) -> tuple[Any, Any]:
-        """Pop the named launch args out of ``kwargs`` into required/optional
-        namedtuples (None when the corresponding name list is empty)."""
+        entry: Any,
+        name: str,
+        func: Callable[..., Any],
+        args: tuple[Any, ...],
+        kwonlyargs: dict[str, Any],
+        sig: inspect.Signature,
+        arg_types: list[Any],
+        arg_attrs: list[Any],
+        *,
+        loc: Any = None,
+    ) -> tuple[Any, ir.Block, Any]:
+        """Build the function op ``entry`` describes and trace ``func`` into it.
 
-        def extract_args(argNames: list[str], assertIfNone: bool = False) -> list[Any]:
-            extracted = []
-            for name in argNames:
-                value = kwargs.pop(name, None)
-                if assertIfNone and value is None:
-                    raise DSLRuntimeError(
-                        f"the launch of `{kernel_name}` misses its `{name}` argument"
-                    )
-                extracted.append(value)
-            return extracted
+        ``entry`` is anything with the entry protocol's ``generate_func_op(name,
+        arg_types, arg_attrs, loc) -> (op, entry_block)``: the ``func_entry``
+        plugin for ``@jit``, a kernels plugin for ``@kernel``. The body runs
+        with the insertion point in the entry block and the block arguments
+        bound to the Python parameters; the caller appends the terminator.
 
-        RequiredArgs = namedtuple("RequiredArgs", requiredArgs)  # type: ignore[misc]
-        req_args = (
-            RequiredArgs._make(extract_args(requiredArgs, assertIfNone=True))
-            if requiredArgs
-            else None
-        )
-        OptionalArgs = namedtuple("OptionalArgs", optionalArgs)  # type: ignore[misc]
-        opt_args = (
-            OptionalArgs._make(extract_args(optionalArgs)) if optionalArgs else None
-        )
-        return req_args, opt_args
-
-    def kernel_launcher(self, *dargs: Any, **dkwargs: Any) -> Any:
+        :return: The op, its entry block and the trace's Python result
         """
-        Decorator generating a kernel: the kernel function op with its traced
-        body inside the ``gpu.module`` and the launch op at the call site.
-
-        Decorator keywords (default in ``<>``):
-
-        - ``requiredArgs <[]>``: launch arguments that must be present,
-          collected as a namedtuple
-        - ``optionalArgs <[]>``: launch arguments that may be present,
-          collected as a namedtuple
-        - ``unitAttrNames <[]>``: names of ``ir.UnitAttr`` to set on the
-          kernel function op
-        - ``valueAttrDict <{}>``: names and values of ``ir.Attribute`` to set
-          on the kernel function op
-        - ``kernelGenHelper <None>``: the mandatory kernel generation helper
-          class (derived from :class:`_KernelGenHelper`)
-
-        :return: The decorated function; calling it returns a
-            :class:`KernelReturns` ``(kernel_func_ret, launch_op_ret)`` and
-            the mangled kernel name
-        """
-
-        def decorator(funcBody: Callable[..., Any]) -> Callable[..., Any]:
-            @wraps(funcBody)
-            def kernel_wrapper(*args: Any, **kwargs: Any) -> Any:
-                requiredArgs = dkwargs.get("requiredArgs", [])
-                optionalArgs = dkwargs.get("optionalArgs", [])
-                unitAttrNames = dkwargs.get("unitAttrNames", [])
-                valueAttrDict = dkwargs.get("valueAttrDict", {})
-                kernelGenHelper = dkwargs.get("kernelGenHelper", None)
-                launch_loc = kwargs.pop("_launch_loc", None)
-
-                kernel_name = funcBody.__name__
-                signature = self._get_signature(funcBody)
-                self.funcBody = funcBody
-
-                # Give each kernel a unique name. (The same kernel may be
-                # called multiple times, resulting in multiple kernel traces.)
-                kernel_name = f"kernel_{self.mangle_name(kernel_name, args, signature)}_{self.num_kernels}"
-                self.num_kernels += 1
-
-                # Pop the named launch args out of kwargs into the
-                # required/optional tuples before the kernel's signature binds.
-                req_args, opt_args = self._collect_kernel_launch_args(
-                    kernel_name, kwargs, requiredArgs, optionalArgs
-                )
-                if kernelGenHelper is None:
-                    raise DSLRuntimeError(
-                        "kernelGenHelper should be explicitly specified!"
-                    )
-
-                # Get bound arguments
-                bound_args = self._get_function_bound_args(
-                    signature, kernel_name, *args, **kwargs
-                )
-
-                # check arguments
-                self._check_arg_count(signature, bound_args, kernel_name)
-
-                # Canonicalize the input arguments
-                canonicalized_args, canonicalized_kwargs = self._canonicalize_args(
-                    bound_args
-                )
-
-                (
-                    kernel_operands,
-                    kernel_types,
-                    kernel_arg_attrs,
-                ) = self.generate_kernel_operands_and_types(
-                    funcBody,
-                    kernel_name,
-                    signature,
-                    canonicalized_args,
-                    canonicalized_kwargs,
-                )
-
-                loc = self.get_ir_location()
-                with self._enter_kernel_container():
-                    log().debug("Generating device kernel")
-                    if self.device_compilation_only:
-                        # Convert input arguments to MLIR arguments
-                        _kernel_mlir_args = self.generate_mlir_function_types(
-                            funcBody,
-                            kernel_name,
-                            canonicalized_args,
-                            canonicalized_kwargs,
-                            signature,
-                        )
-                        kernel_types = _kernel_mlir_args.types
-                        kernel_arg_attrs = _kernel_mlir_args.attributes
-
-                    helper = kernelGenHelper()
-                    fop = helper.generate_func_op(
-                        kernel_types, kernel_arg_attrs, kernel_name, loc
-                    )
-                    log().debug("Kernel function op: %s", fop)
-                    for attr in unitAttrNames:
-                        fop.attributes[attr] = ir.UnitAttr.get()
-                    for key, val in valueAttrDict.items():
-                        fop.attributes[key] = val
-
-                    fop.sym_visibility = ir.StringAttr.get("public")
-                    with ir.InsertionPoint(helper.get_func_body_start()):
-                        ir_args, ir_kwargs = self.generate_execution_arguments(
-                            canonicalized_args, canonicalized_kwargs, fop, signature
-                        )
-                        log().debug(
-                            "IR arguments - args: %s ; kwargs: %s", ir_args, ir_kwargs
-                        )
-                        kernel_ret = funcBody(*ir_args, **ir_kwargs)
-                        if kernel_ret is not None:
-                            raise DSLUserCodeError(
-                                DiagId.TYPE_RETURN_MISMATCH,
-                                got=f"a `{type(kernel_ret).__name__}`",
-                                detail=" from a kernel",
-                            )
-                        helper.generate_func_ret_op()
-
-                # The call site: the launch op referring to the kernel symbol.
-                kernel_sym = helper.kernel_symbol(kernel_name)
-                setattr(funcBody, "_dsl_kernel_sym", kernel_sym)
-                setattr(funcBody, "_dsl_kernel_name", kernel_name)
-                launch_ret = helper.generate_launch_op(
-                    kernelSym=kernel_sym,
-                    kernelOperands=kernel_operands,
-                    requiredArgs=req_args,
-                    optionalArgs=opt_args,
-                    loc=loc,
-                    launch_loc=launch_loc or loc,
-                )
-
-                result = KernelReturns(
-                    kernel_func_ret=kernel_ret, launch_op_ret=launch_ret
-                )
-                log().debug("Kernel result: %s, kernel name: %s", result, kernel_name)
-                return result, kernel_name
-
-            return kernel_wrapper
-
-        if len(dargs) == 1 and callable(dargs[0]):
-            return decorator(dargs[0])
-        else:
-            return decorator
+        func_op, entry_block = entry.generate_func_op(
+            name, list(arg_types), list(arg_attrs), loc=loc
+        )
+        log().debug("Generated function op [%s]", func_op)
+        with ir.InsertionPoint(entry_block):
+            ir_args, ir_kwargs = self.generate_execution_arguments(
+                args, kwonlyargs, entry_block, sig
+            )
+            try:
+                result = func(*ir_args, **ir_kwargs)
+            except NameError as name_error:
+                # Extract the source location from the NameError traceback.
+                tb = name_error.__traceback__
+                err_filename = err_lineno = None
+                while tb is not None:
+                    err_filename = tb.tb_frame.f_code.co_filename
+                    err_lineno = tb.tb_lineno
+                    tb = tb.tb_next
+                raise DSLUserCodeError(
+                    DiagId.SCOPE_UNBOUND_NAME_IN_TRACE,
+                    filename=err_filename,
+                    lineno=err_lineno,
+                    cause=name_error,
+                    var=getattr(name_error, "name", None) or f"<in {func.__name__}>",
+                    function_name=func.__name__,
+                ) from name_error
+        return func_op, entry_block, result

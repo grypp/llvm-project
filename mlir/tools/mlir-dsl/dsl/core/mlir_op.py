@@ -2,12 +2,13 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""The dialect protocol behind the type system.
+"""The hook protocol behind the type system, implemented by the ``type_ops`` plugin.
 
 ``Int32(6) + a``, ``Vector([a, b]) * v`` and ``p[i]`` are the same program in
 every DSL built on ``mlir.dsl``; which IR they become is the business of the
-active dialect. An :class:`OpEmitter` answers, for the core types, what SSA
-type a value has and which op implements each operation:
+tracing DSL's ``type_ops`` plugin (``core.plugin.TypeOpsPlugin``, an
+:class:`OpEmitter`). An :class:`OpEmitter` answers, for the core types, what
+SSA type a value has and which op implements each operation:
 
 * scalars: ``mlir_type``/``scalar_type`` and the arithmetic, comparison and
   conversion ops of ``Numeric``;
@@ -16,13 +17,13 @@ type a value has and which op implements each operation:
 * pointers: ``pointer_type``/``pointer_space`` and ``load``, ``store``,
   ``ptr_add``, ``inttoptr``, ``ptrtoint``, ``addrspacecast``.
 
-The types call :func:`current_emitter`: the emitter of the active DSL's
-dialect plugin (``DialectPlugin.emitter``), else the LLVM world's
-(``plugins/dialects/llvm``), so the types also work standalone. The default
-type hooks describe MLIR's builtin types (``i32``, ``vector<N x T>``); a tile
+The types call :func:`current_emitter`: the ``type_ops`` plugin of the
+tracing DSL (the ``plugins/type_ops`` composer in the test DSL); a DSL that names
+none cannot use the types in a trace. The default type hooks describe MLIR's
+builtin types (``i32``, ``vector<N x T>``); a type-ops plugin over a tile
 dialect answers rank-0 and rank-1 tiles instead. The op signatures are those
-of ``plugins/dialects/llvm/arith.py`` (operands as ``ir.Value``, ``signed=``,
-``loc=``, ``ip=``); an op a dialect lacks raises ``DSLRuntimeError``.
+of ``plugins/type_ops/arith.py`` (operands as ``ir.Value``, ``signed=``,
+``loc=``, ``ip=``); an op a plugin lacks raises ``DSLRuntimeError``.
 """
 
 from __future__ import annotations
@@ -30,13 +31,14 @@ from __future__ import annotations
 from typing import Any
 
 from ... import ir
-from .common import DSLRuntimeError, get_current_dsl
+from .common import DSLRuntimeError, DSLUserCodeError, get_current_dsl
+from .diagnostics import DiagId
 
 __all__ = ["OpEmitter", "current_emitter"]
 
 
 class OpEmitter:
-    """The protocol a dialect implements for the core types."""
+    """The hook protocol a ``type_ops`` plugin implements for the core types."""
 
     def _unsupported(self, name: str) -> Any:
         raise DSLRuntimeError(f"{type(self).__name__} does not emit `{name}`")
@@ -188,18 +190,21 @@ class OpEmitter:
         return self._unsupported("addrspacecast")
 
 
-_DEFAULT_EMITTER: OpEmitter | None = None
-
-
 def current_emitter() -> OpEmitter:
-    """The emitter of the tracing DSL's dialect, else the LLVM world's."""
-    emitter = getattr(get_current_dsl(), "emitter", None)
-    if emitter is not None:
-        return emitter
-    global _DEFAULT_EMITTER
-    if _DEFAULT_EMITTER is None:
-        # Resolved on first use: the core imports no plugin at import time.
-        from ..plugins.dialects.llvm.emitter import LlvmEmitter
-
-        _DEFAULT_EMITTER = LlvmEmitter()
-    return _DEFAULT_EMITTER
+    """The ``type_ops`` plugin of the tracing DSL."""
+    dsl = get_current_dsl()
+    if dsl is None:
+        # Plain Python: no DSL is tracing, so there is no dialect to ask.
+        raise DSLUserCodeError(
+            DiagId.CALL_OUTSIDE_JIT,
+            api="a DSL type's MLIR type or op",
+            decorator="@jit",
+        )
+    emitter = getattr(dsl.plugins, "type_ops", None)
+    if emitter is None:
+        raise DSLRuntimeError(
+            "the core types need a `type_ops` plugin, and the tracing DSL names "
+            "none (`plugins = Plugins(type_ops=TypeOps(scalars=arith, ...))`)",
+            context={"dsl": dsl.name, **dsl._unavailable_context()},
+        )
+    return emitter

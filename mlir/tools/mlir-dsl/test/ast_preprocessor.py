@@ -2,7 +2,7 @@
 # RUN: %PYTHON %s 2>&1 | FileCheck %s --check-prefix=EXEC
 # RUN: env MLIR_DSL_DRYRUN=1 MLIR_DSL_AST_PREPROCESSOR=0 %PYTHON %s 2>&1 | FileCheck %s --check-prefix=OFF
 # REQUIRES: host-supports-jit
-# The preprocessor's decisions (Design 7): which native construct becomes
+# The preprocessor's decisions: which native construct becomes
 # Python control flow at trace time (Meta) and which an `scf` region (staged);
 # what a region carries; how `and`/`or`/`not`, comparison chains, `assert`,
 # `bool()` and closures are rewritten; which early exits stay native Python
@@ -31,13 +31,13 @@ class Pair:
     hi: m.Int32
 
 
-# --- The switch (Design 7.8) ------------------------------------------------
+# --- The switch ------------------------------------------------
 # `MLIR_DSL_AST_PREPROCESSOR=0` turns the rewrite off for the whole process,
 # `@m.jit(preprocess=False)` for one function. Without it, native control flow
 # on a staged value fails in plain Python; Meta control flow and the explicit
 # builders work either way. The rest of this file needs the rewrite.
 PREPROCESSOR_ON = EnvironmentVarManager("MLIR_DSL").ast_preprocessor
-print("PREPROCESSOR:", PREPROCESSOR_ON, m.MlirDSL().enable_preprocessor)
+print("PREPROCESSOR:", PREPROCESSOR_ON, m.MlirTestDSL().enable_preprocessor)
 # CHECK: PREPROCESSOR: True True
 # OFF:   PREPROCESSOR: False False
 
@@ -87,7 +87,7 @@ if not PREPROCESSOR_ON:
     raise SystemExit(0)
 
 
-# --- Loop kinds by bound (Design 7.3, 7.4, 7.6) -----------------------------
+# --- Loop kinds by bound -----------------------------
 
 
 @m.jit
@@ -181,7 +181,7 @@ def meta_control(k, n: m.Int32) -> m.Int32:
 print("RESULT: meta_control", meta_control(3, 10), meta_control(9, 10))
 
 
-# --- Loop carries (Design 7.2, the write_args protocol) ---------------------
+# --- Loop carries (the write_args protocol) ---------------------
 
 
 @m.jit
@@ -212,7 +212,7 @@ report(carries, 10)  # 30.0 + (55 + 45 + 1024)
 def pointers(out: m.Pointer[m.Int32], p: m.Pointer[m.Int32], n: m.Int32) -> m.Int32:
     i = m.Int32(100)  # bound before the loop that rebinds it as its target
     for i in range(n):
-        out[i] = i * 2  # a subscript store marks `out` mutated: no carry (Design 4)
+        out[i] = i * 2  # a subscript store marks `out` mutated: no carry
         p[0] = i
         p = p + 1  # a rebound pointer is an ordinary carry of type !llvm.ptr
     return i  # the last induction value, or 100 when the loop ran zero times
@@ -232,7 +232,7 @@ buf, buf2 = np.zeros(4, np.int32), np.full(4, -1, np.int32)
 print("RESULT: pointers", pointers(buf, buf2, 4), pointers(buf, buf2, 0), buf, buf2)
 
 
-# --- `if`/`elif`/`else` (Design 7.2, 7.4) -----------------------------------
+# --- `if`/`elif`/`else` -----------------------------------
 
 
 @m.jit
@@ -332,7 +332,7 @@ print(
 )
 
 
-# --- The ternary (Design 7.1, 7.5) ------------------------------------------
+# --- The ternary ------------------------------------------
 
 
 @m.jit
@@ -375,7 +375,7 @@ buf = np.zeros(2, np.int32)
 print("RESULT: hoisted_ternaries", hoisted_ternaries(buf, 10), buf)
 
 
-# --- `and`/`or`, comparison chains, `assert`, `bool()` (Design 7.1, 7.5) ----
+# --- `and`/`or`, comparison chains, `assert`, `bool()` ----
 
 evaluations = []
 
@@ -442,7 +442,7 @@ def assert_staged(k: m.Int32) -> m.Int32:
 report(assert_staged, 10)
 
 
-# --- Closures and nested functions (Design 7.1, 7.2) ------------------------
+# --- Closures and nested functions ------------------------
 
 
 def make_scaler(k):
@@ -515,26 +515,26 @@ except m.DSLUserCodeError as e:
 
 @m.jit
 def staging_probe(n: m.Int32, k) -> m.Int32:
-    # `is_dynamic_expr` tells a staged value from a Meta one inside a trace
-    # (the active DSL's notion); outside a trace a host `Int32` is Meta too.
+    # `is_mlir_op` tells an MLIR op from a Python value inside a trace (the
+    # active DSL's notion); outside a trace a host `Int32` is a Python value too.
     print(
-        "IS_DYNAMIC:",
-        m.is_dynamic_expr(n),
-        m.is_dynamic_expr(k),
-        m.is_dynamic_expr(n + k),
-        m.is_dynamic_expr(k + 1),
-        m.is_dynamic_expr(m.Int32(1)),
+        "IS_MLIR_OP:",
+        m.is_mlir_op(n),
+        m.is_mlir_op(k),
+        m.is_mlir_op(n + k),
+        m.is_mlir_op(k + 1),
+        m.is_mlir_op(m.Int32(1)),
     )
     return n
 
 
 staging_probe(1, 2)
-print("IS_DYNAMIC HOST:", m.is_dynamic_expr(7), m.is_dynamic_expr(m.Int32(3)))
-# CHECK: IS_DYNAMIC: True False True False False
-# CHECK: IS_DYNAMIC HOST: False False
+print("IS_MLIR_OP HOST:", m.is_mlir_op(7), m.is_mlir_op(m.Int32(3)))
+# CHECK: IS_MLIR_OP: True False True False False
+# CHECK: IS_MLIR_OP HOST: False False
 
 
-# --- Early exits and loop `else` (Design 7.2) -------------------------------
+# --- Early exits and loop `else` -------------------------------
 
 
 @m.jit
@@ -565,7 +565,7 @@ def for_else(n: m.Int32) -> m.Int32:
     return acc
 
 
-# CHECK: ERROR: for_else UNSUP_LOOP_ELSE
+# CHECK: ERROR: for_else UNSUP_SYNTAX
 report(for_else, 10)
 
 
@@ -633,7 +633,7 @@ def nested_function_return(n: m.Int32) -> m.Int32:
 report(nested_function_return, 10)
 
 
-# --- `while` (Design 7.2, 7.5) ----------------------------------------------
+# --- `while` ----------------------------------------------
 
 
 @m.jit

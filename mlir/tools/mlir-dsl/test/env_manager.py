@@ -1,10 +1,10 @@
 # RUN: env PYTHONUNBUFFERED=1 MLIR_DSL_DRYRUN=1 MLIR_DSL_DEBUGINFO=1 MLIR_DSL_PIPELINE=canonicalize,cse MLIR_DSL_PROFILE_COMPILER=1 %PYTHON %s 2>&1 | FileCheck %s
-# The environment manager (Design 6b): one manager per prefix, every
+# The environment manager: one manager per prefix, every
 # `{prefix}_{SUFFIX}` read once at construction with the reader its annotation
 # selects; the documented defaults; the `affects_compile` settings forming the
 # JIT cache key; the DEBUG master switch; prefix isolation; malformed values
 # and declarations rejected as DSLRuntimeError; the `arch` property; sub-DSL
-# EnvVarSpec composition; PROFILE_COMPILER (Design 6c) and the logging
+# EnvVarSpec composition; PROFILE_COMPILER and the logging
 # settings. The RUN line configures the DSL's own MLIR_DSL prefix.
 import logging
 import os
@@ -27,7 +27,7 @@ from mlir.dsl.core.env_manager import (
     get_str_env_var,
     parser_for_type,
 )
-from mlir.dsl.util import phase_profiler
+from mlir.dsl.util import profiler
 from mlir.dsl.util.logger import log
 
 os.chdir(tempfile.mkdtemp())  # LOG_TO_FILE writes <prefix>.log into the cwd
@@ -39,7 +39,7 @@ GROUPS = [
     ("no_cache", "cache_dir", "disable_file_caching", "jit_cache_max_elems"),
     ("keep_ir", "keep_ir_after_passes", "print_ir_after_passes", "loc_tracebacks"),
     ("remarks", "remarks_policy", "remarks_output"),
-    ("arch", "compiler_opt", "pipeline", "shared_libs", "enable_tvm_ffi"),
+    ("arch", "pipeline", "shared_libs", "enable_tvm_ffi"),
 ]
 
 
@@ -105,7 +105,7 @@ print("MLIR_DSL:", env.dryrun, env.debuginfo, env.pipeline, env.arch, env.print_
 print("key:", env.cache_key_str())
 # CHECK-NEXT: key: ast_preprocessor=True;{{.*}}debuginfo=True;dryrun=True;{{.*}}pipeline='canonicalize,cse';
 # The DSL instance reads the same prefix; PIPELINE replaces its core pass list.
-dsl = m.MlirDSL()
+dsl = m.MlirTestDSL()
 print("dsl:", dsl.envar.prefix, dsl.envar.dryrun, dsl._get_pipeline(None))
 # CHECK:      dsl: MLIR_DSL True canonicalize,cse
 
@@ -133,7 +133,7 @@ print("RESULT:", cumsum(10))
 # setting alone. Not an `env_var` field: read directly by __init__.
 def profile(value):
     manager("T_PROF", **({} if value is None else {"PROFILE_COMPILER": value}))
-    return phase_profiler.enabled(), phase_profiler.deep()
+    return profiler.enabled(), profiler.deep()
 
 
 print("off:", {profile(v) for v in ["off", "0", "false", "no", ""]})
@@ -146,7 +146,7 @@ is_field = any(e.key_name == "profile_compiler" for e in SPEC)
 print("unset keeps:", profile(None), "| field:", is_field)
 # CHECK: unset keeps: (True, False) | field: False
 
-# --- Defaults (the Design 6b table), under a prefix with nothing set --------
+# --- Defaults, under a prefix with nothing set ------------------------------
 show(manager("T_DEF"))
 # CHECK:      jit_time_profiling=False log_to_console=False log_to_file=False log_level=1
 # CHECK-NEXT: debug=False debuginfo=False show_stacktrace=False print_ir=False verify_trace=False dryrun=False
@@ -154,12 +154,12 @@ show(manager("T_DEF"))
 # CHECK-NEXT: no_cache=False cache_dir=None disable_file_caching=False jit_cache_max_elems=None
 # CHECK-NEXT: keep_ir=False keep_ir_after_passes='' print_ir_after_passes='' loc_tracebacks=0
 # CHECK-NEXT: remarks='' remarks_policy='all' remarks_output=''
-# CHECK-NEXT: arch=None compiler_opt='' pipeline=None shared_libs=None enable_tvm_ffi=False
+# CHECK-NEXT: arch=None pipeline=None shared_libs=None enable_tvm_ffi=False
 # Every variable read under the prefix (the spec plus PROFILE_COMPILER), all
 # documented on the class.
 suffixes = _prefixed_env_var_suffixes()
 print("suffixes:", len(SPEC), len(suffixes), " ".join(suffixes))
-# CHECK: suffixes: 29 30 ARCH AST_PREPROCESSOR CACHE_DIR COMPILER_OPT DEBUG DEBUGINFO DISABLE_FILE_CACHING DRYRUN ENABLE_PASS_PROFILING ENABLE_TVM_FFI JIT_CACHE_MAX_ELEMS JIT_TIME_PROFILING KEEPIR_AFTER_PASSES KEEP_IR LIBS LOC_TRACEBACKS LOG_LEVEL LOG_TO_CONSOLE LOG_TO_FILE NO_CACHE PIPELINE PRINT_IR PRINT_IR_AFTER_PASSES PROFILE_COMPILER REMARKS REMARKS_OUTPUT REMARKS_POLICY SHOW_STACKTRACE VERIFY_TRACE WARNINGS_IGNORE
+# CHECK: suffixes: 28 29 ARCH AST_PREPROCESSOR CACHE_DIR DEBUG DEBUGINFO DISABLE_FILE_CACHING DRYRUN ENABLE_PASS_PROFILING ENABLE_TVM_FFI JIT_CACHE_MAX_ELEMS JIT_TIME_PROFILING KEEPIR_AFTER_PASSES KEEP_IR LIBS LOC_TRACEBACKS LOG_LEVEL LOG_TO_CONSOLE LOG_TO_FILE NO_CACHE PIPELINE PRINT_IR PRINT_IR_AFTER_PASSES PROFILE_COMPILER REMARKS REMARKS_OUTPUT REMARKS_POLICY SHOW_STACKTRACE VERIFY_TRACE WARNINGS_IGNORE
 doc = EnvironmentVarManager.__doc__
 print("documented:", all(f"[DSL_NAME]_{s}" in doc for s in suffixes))
 # CHECK: documented: True
@@ -173,7 +173,7 @@ DEBUGINFO=no VERIFY_TRACE=True NO_CACHE=ON CACHE_DIR=/some/cache/dir KEEP_IR=1
 KEEPIR_AFTER_PASSES=canonicalize,cse PRINT_IR_AFTER_PASSES=cse REMARKS=llvm-.*
 REMARKS_POLICY=final REMARKS_OUTPUT=/some/remarks.yaml DRYRUN=1 ARCH=sm_90a
 WARNINGS_IGNORE=1 DISABLE_FILE_CACHING=1 JIT_CACHE_MAX_ELEMS=16 ENABLE_TVM_FFI=1
-COMPILER_OPT=opt-level=2 PIPELINE=canonicalize LIBS=/a.so:/b.so LOC_TRACEBACKS=3"""
+PIPELINE=canonicalize LIBS=/a.so:/b.so LOC_TRACEBACKS=3"""
 env = manager("T_PARSE", **parse(PARSE))
 show(env)
 # CHECK:      jit_time_profiling=True log_to_console=True log_to_file=True log_level=40
@@ -182,7 +182,7 @@ show(env)
 # CHECK-NEXT: no_cache=True cache_dir='/some/cache/dir' disable_file_caching=True jit_cache_max_elems=16
 # CHECK-NEXT: keep_ir=True keep_ir_after_passes='canonicalize,cse' print_ir_after_passes='cse' loc_tracebacks=3
 # CHECK-NEXT: remarks='llvm-.*' remarks_policy='final' remarks_output='/some/remarks.yaml'
-# CHECK-NEXT: arch='sm_90a' compiler_opt='opt-level=2' pipeline='canonicalize' shared_libs='/a.so:/b.so' enable_tvm_ffi=True
+# CHECK-NEXT: arch='sm_90a' pipeline='canonicalize' shared_libs='/a.so:/b.so' enable_tvm_ffi=True
 # Values are read once, at construction: a later change to the process
 # environment is seen by a fresh manager only.
 os.environ["T_PARSE_DRYRUN"] = "0"
@@ -281,12 +281,12 @@ print("readers:", [reader(a) for a in ANNOTATIONS])
 keys = sorted(e.key_name for e in SPEC)
 in_key = {e.key_name for e in SPEC if e.affects_compile}
 print("in key:", " ".join(k for k in keys if k in in_key))
-# CHECK: in key: arch ast_preprocessor compiler_opt debug debuginfo dryrun enable_tvm_ffi keep_ir_after_passes loc_tracebacks pipeline remarks remarks_output remarks_policy shared_libs
+# CHECK: in key: arch ast_preprocessor debug debuginfo dryrun enable_tvm_ffi keep_ir_after_passes loc_tracebacks pipeline remarks remarks_output remarks_policy shared_libs
 print("not in key:", " ".join(k for k in keys if k not in in_key))
 # CHECK: not in key: cache_dir disable_file_caching enable_pass_profiling jit_cache_max_elems jit_time_profiling keep_ir log_level log_to_console log_to_file no_cache print_ir print_ir_after_passes show_stacktrace verify_trace warnings_ignore
 base = key("T_KEY")
 print("defaults:", base)
-# CHECK: defaults: ast_preprocessor=True;compiler_opt='';debug=False;debuginfo=False;dryrun=False;enable_tvm_ffi=False;keep_ir_after_passes='';loc_tracebacks=0;remarks='';remarks_output='';remarks_policy='all';
+# CHECK: defaults: ast_preprocessor=True;debug=False;debuginfo=False;dryrun=False;enable_tvm_ffi=False;keep_ir_after_passes='';loc_tracebacks=0;remarks='';remarks_output='';remarks_policy='all';
 # Settings that only govern caching, printing or logging never enter it, so a
 # change to them cannot miss the cache.
 NON_COMPILE = """PRINT_IR=1 NO_CACHE=1 LOG_LEVEL=20 CACHE_DIR=/x KEEP_IR=1 VERIFY_TRACE=1
@@ -296,7 +296,7 @@ print("unchanged by non-compile settings:", key("T_KEY", **parse(NON_COMPILE)) =
 # CHECK: unchanged by non-compile settings: True
 # Each compile setting changes the key; together they sit at their sorted
 # positions, `arch`, `pipeline` and `shared_libs` present only when set.
-COMPILE = """ARCH=sm_90a AST_PREPROCESSOR=0 COMPILER_OPT=opt-level=3 DEBUGINFO=1 DRYRUN=1
+COMPILE = """ARCH=sm_90a AST_PREPROCESSOR=0 DEBUGINFO=1 DRYRUN=1
 ENABLE_TVM_FFI=1 KEEPIR_AFTER_PASSES=cse LOC_TRACEBACKS=2 PIPELINE=cse REMARKS=llvm-.*
 REMARKS_OUTPUT=/r.yaml REMARKS_POLICY=final LIBS=/l.so"""
 for suffix, value in parse(COMPILE).items():
@@ -306,7 +306,6 @@ for suffix, value in parse(COMPILE).items():
     )
 # CHECK: ARCH -> True ["arch='sm_90a'"]
 # CHECK: AST_PREPROCESSOR -> True ['ast_preprocessor=False']
-# CHECK: COMPILER_OPT -> True ["compiler_opt='opt-level=3'"]
 # CHECK: DEBUGINFO -> True ['debuginfo=True']
 # CHECK: DRYRUN -> True ['dryrun=True']
 # CHECK: ENABLE_TVM_FFI -> True ['enable_tvm_ffi=True']
@@ -318,10 +317,10 @@ for suffix, value in parse(COMPILE).items():
 # CHECK: REMARKS_POLICY -> True ["remarks_policy='final'"]
 # CHECK: LIBS -> True ["shared_libs='/l.so'"]
 print("all:", key("T_KEY", **parse(COMPILE)))
-# CHECK: all: arch='sm_90a';ast_preprocessor=False;compiler_opt='opt-level=3';debug=False;debuginfo=True;dryrun=True;enable_tvm_ffi=True;keep_ir_after_passes='cse';loc_tracebacks=2;pipeline='cse';remarks='llvm-.*';remarks_output='/r.yaml';remarks_policy='final';shared_libs='/l.so';
+# CHECK: all: arch='sm_90a';ast_preprocessor=False;debug=False;debuginfo=True;dryrun=True;enable_tvm_ffi=True;keep_ir_after_passes='cse';loc_tracebacks=2;pipeline='cse';remarks='llvm-.*';remarks_output='/r.yaml';remarks_policy='final';shared_libs='/l.so';
 # DEBUG enters the key itself and through the default it raises.
 print("debug:", key("T_KEY", DEBUG="1"))
-# CHECK: debug: ast_preprocessor=True;compiler_opt='';debug=True;debuginfo=True;dryrun=False;
+# CHECK: debug: ast_preprocessor=True;debug=True;debuginfo=True;dryrun=False;
 # Values render with repr, sets made deterministic.
 print("render:", *[_render_cache_key_value(v) for v in ("x", 3, True, {2, 1})])
 # CHECK: render: 'x' 3 True (1, 2)
@@ -376,14 +375,12 @@ for env in (a, b, short):
 # CHECK-NEXT: B_DSL False None None 0
 # CHECK-NEXT: A False None None 0
 print("a key:", a.cache_key_str())
-# CHECK: a key: arch='sm_80';ast_preprocessor=True;compiler_opt='';debug=False;debuginfo=False;dryrun=True;enable_tvm_ffi=False;keep_ir_after_passes='';loc_tracebacks=5;pipeline='cse';
+# CHECK: a key: arch='sm_80';ast_preprocessor=True;debug=False;debuginfo=False;dryrun=True;enable_tvm_ffi=False;keep_ir_after_passes='';loc_tracebacks=5;pipeline='cse';
 print("b == short == defaults:", b.cache_key_str() == short.cache_key_str() == base)
 # CHECK: b == short == defaults: True
-d = m.MlirDSL().envar
-print("MlirDSL:", d.prefix, d.dryrun, d.arch, d.pipeline, d.loc_tracebacks)
-# CHECK: MlirDSL: MLIR_DSL True None canonicalize,cse 0
-print("libs:", b.missing_shared_libs_message)
-# CHECK: libs: B_DSL_LIBS environment variable is not set. Set B_DSL_LIBS explicitly for this DSL runtime.
+d = m.MlirTestDSL().envar
+print("MlirTestDSL:", d.prefix, d.dryrun, d.arch, d.pipeline, d.loc_tracebacks)
+# CHECK: MlirTestDSL: MLIR_DSL True None canonicalize,cse 0
 os.environ["lower_DRYRUN"] = "1"
 lo, up = EnvironmentVarManager("lower"), EnvironmentVarManager("LOWER")
 print(
@@ -424,7 +421,7 @@ print("defaults:", sub.dryrun, sub.tile, sub.backend, sub.label, sub.target)
 print("base untouched:", manager("T_SUB").dryrun, "dryrun" in sub.cache_key_str())
 # CHECK: base untouched: False False
 print("key:", sub.cache_key_str())
-# CHECK: key: ast_preprocessor=True;compiler_opt='';debug=False;debuginfo=False;enable_tvm_ffi=False;keep_ir_after_passes='';label='T_SUB-128';loc_tracebacks=0;remarks='';remarks_output='';remarks_policy='all';target='HOST';tile=128;
+# CHECK: key: ast_preprocessor=True;debug=False;debuginfo=False;enable_tvm_ffi=False;keep_ir_after_passes='';label='T_SUB-128';loc_tracebacks=0;remarks='';remarks_output='';remarks_policy='all';target='HOST';tile=128;
 os.environ.update(
     {"T_SUB_TILE": "64", "T_SUB_BACKEND": "cuda", "T_SUB_TARGET": "device"}
 )

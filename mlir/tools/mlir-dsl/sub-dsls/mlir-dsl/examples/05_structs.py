@@ -10,7 +10,7 @@ untouched, `a, b = s` unpacks the fields, and structs nest. At every boundary
 a struct flattens to its fields: a struct argument is one function argument
 per field, a returned struct comes back as a host instance, and a returned
 tuple of leaves is packed into one host result and unpacked again. No dialect
-type is involved, so structs work under every dialect plugin.
+type is involved, so structs work under every `type_ops` plugin (every dialect).
 """
 
 import mlir.mlir_dsl as m
@@ -18,7 +18,7 @@ import mlir.mlir_dsl as m
 
 @m.struct
 class Vec2:
-    x: m.Float32  # fields are DSL types only; `float` would be STRUCT_FIELD_TYPE
+    x: m.Float32  # fields are DSL types only; `float` would be STRUCT_DEFINITION
     y: m.Float32
 
 
@@ -60,7 +60,7 @@ def divmod_(n: m.Int32, d: m.Int32) -> tuple:
 
 
 def check(label, result, pick, want):
-    if m.is_dynamic_expr(result):  # DRYRUN hands back the traced value: `?`
+    if m.is_mlir_op(result):  # DRYRUN hands back the traced value: `?`
         print(f"{label}: ?")
         return
     got = pick(result)

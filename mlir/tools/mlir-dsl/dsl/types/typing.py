@@ -6,10 +6,11 @@
 
 A ``Numeric`` holds a Python scalar (a compile-time value that folds) or an
 ``ir.Value`` (a staged value); its operators promote the operands, fold Python
-payloads in Python and emit staged ones through the active dialect's
-``OpEmitter`` (``core/mlir_op.py``), which also answers every SSA type: the
-module imports no dialect. A ``Pointer`` is one pointer SSA value of that
-dialect (``!llvm.ptr`` under the LLVM world) with ``(dtype, addrspace)``
+payloads in Python and emit staged ones through the tracing DSL's
+``type_ops`` plugin (an ``OpEmitter``, ``core/mlir_op.py``), which also
+answers every SSA type: the module imports no dialect. A ``Pointer`` is one
+pointer SSA value of that plugin's choice (``!llvm.ptr`` under the builtin
+type ops) with ``(dtype, addrspace)``
 metadata; a ``@struct`` is a frozen record of DSL-typed fields and a pytree
 that flattens to its fields at every boundary, not an SSA aggregate. Outside a
 trace a ``Pointer`` holds a host address and a struct its host field values,
@@ -31,7 +32,6 @@ from typing import (
     ClassVar,
     Optional,
     Type,
-    TypeVar,
     Union,
     cast as tcast,
     get_origin,
@@ -245,22 +245,19 @@ class NumericMeta(DslType):
 
     @property
     def mlir_type(cls) -> ir.Type:
-        """The SSA type of this dtype in the active dialect: the scalar type
-        under ``arith``, whatever the dialect plugin's emitter answers
-        otherwise (a rank-0 tile, ...)."""
+        """The SSA type of this dtype under the tracing DSL's ``type_ops``
+        plugin: the builtin scalar type (``i32``) under the builtin type ops,
+        whatever another plugin answers (a rank-0 tile, ...)."""
         return _emitter().mlir_type(cls)
 
 
-Value = TypeVar("Value")
-
-
 def cast(
-    obj: Union[bool, int, float, Value, "Numeric"], type_: Type["Numeric"]
+    obj: Union[bool, int, float, ir.Value, "Numeric"], type_: Type["Numeric"]
 ) -> "Numeric":
     """Cast an object to the specified numeric type.
 
     :param obj: Object to be cast
-    :type obj: Union[bool, int, float, Value, Numeric]
+    :type obj: Union[bool, int, float, ir.Value, Numeric]
     :param type_: Target numeric type
     :type type_: Type[Numeric]
     :return: Object cast to the target numeric type
@@ -472,14 +469,6 @@ class FloatMeta(NumericMeta):
         return 0.0
 
     @property
-    def inf(cls) -> float:
-        return float("inf")
-
-    @property
-    def nan(cls) -> float:
-        return float("nan")
-
-    @property
     def exponent_width(cls) -> int:
         return cls._exponent_width
 
@@ -670,7 +659,7 @@ def _promote_integer(
 # =============================================================================
 
 # Python operator -> the emitter method of the same name, resolved per call.
-_ARITH_EMITTERS: dict = {
+_OPERATOR_EMITTERS: dict = {
     operator.add: lambda *a, **k: _emitter().add(*a, **k),
     operator.sub: lambda *a, **k: _emitter().sub(*a, **k),
     operator.mul: lambda *a, **k: _emitter().mul(*a, **k),
@@ -712,8 +701,8 @@ def _binary_op(
     This wrapper handles type promotion, operation execution, and result type
     determination for binary operations between Numeric types. Two Python
     payloads fold in Python through ``op``; otherwise both operands are
-    materialized as ``ir.Value`` of the promoted dtype and the arith emitter
-    of the same name is called as ``emit(lhs, rhs, signed=...)``.
+    materialized as ``ir.Value`` of the promoted dtype and the type-ops emitter
+    method of the same name is called as ``emit(lhs, rhs, signed=...)``.
 
     :param op: The binary operation to perform (e.g., operator.add, operator.sub)
     :type op: callable
@@ -778,7 +767,7 @@ def _binary_op(
             signed = getattr(operand_type, "signed", None)
             lhs_val = _emitter().const(lhs_val, operand_type, loc=loc, ip=ip)
             rhs_val = _emitter().const(rhs_val, operand_type, loc=loc, ip=ip)
-            emit = _ARITH_EMITTERS.get(op, op)
+            emit = _OPERATOR_EMITTERS.get(op, op)
             res_val = emit(lhs_val, rhs_val, signed=signed, loc=loc, ip=ip)
         else:
             res_val = op(lhs_val, rhs_val)
@@ -855,8 +844,8 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
 
         If the target type is the same as the current type, returns self.
         Otherwise, creates a new instance of the target type with the same
-        value. ``ir.Value`` as the target materializes a Python payload as an
-        ``arith.constant``; ``int``/``float``/``bool`` return the Python
+        value. ``ir.Value`` as the target materializes a Python payload through
+        the type ops' ``const``; ``int``/``float``/``bool`` return the Python
         payload and require a compile-time value.
 
         :param dtype: The target numeric type to convert to
@@ -947,12 +936,17 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         if isinstance(value, Numeric):
             value = value.value
         if cls.ctype is None or not isinstance(value, (bool, int, float)):
-            if arg_name is None:
-                from ..runtime.jit_arg_adapters import JitArgAdapterRegistry
+            from ..core.arguments import JitArgAdapterRegistry
 
+            if arg_name is None:
                 arg_name = JitArgAdapterRegistry.active_argument()[0]
             raise DSLUserCodeError(
-                DiagId.ARG_NOT_MARSHALABLE, arg_name=arg_name, arg_type=cls.__name__
+                DiagId.ARG_UNSUPPORTED_TYPE,
+                num=JitArgAdapterRegistry.active_argument()[1] + 1,
+                arg_name=arg_name,
+                function_name="the compiled function",
+                arg_type=cls.__name__,
+                detail=": this dtype has no host representation",
             )
         return _make_owning_c_pointer(cls._to_ctype(value))
 
@@ -1000,8 +994,8 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
             5 and 3 -> 3
             0 and 3 -> 0
         """
-        # Fast path: Boolean & Boolean -> a single arith.andi on i1. The general
-        # path would promote to i32, select, and compare back to i1.
+        # Fast path: Boolean & Boolean -> a single `and_` on the two i1 operands.
+        # The general path would promote to i32, select, and compare back to i1.
         if isinstance(self, Boolean) and isinstance(other, Boolean):
             return self.__and__(other, loc=loc, ip=ip)  # type: ignore[call-arg]
 
@@ -1820,9 +1814,10 @@ class Boolean(Integer, metaclass=IntegerMeta, width=1, signed=True, mlir_type=T.
     1. Python bool/int/float: converted using Python's bool() function.
     2. Numeric: uses the Numeric.value to construct Boolean recursively.
     3. MLIR Value with IntegerType: direct when its width is 1, otherwise
-       compared with 0 using arith.cmpi.
-    4. MLIR Value with FloatType: compared with 0.0 using arith.cmpf
-       (unordered, so NaN is true).
+       compared with 0 through the type ops' ``cmp("ne")``.
+    4. MLIR Value with FloatType: compared with 0.0 through the type ops'
+       ``cmp("ne")`` (unordered under the builtin arith type ops, so NaN is
+       true there).
     """
 
     def __init__(
@@ -1855,19 +1850,6 @@ class Boolean(Integer, metaclass=IntegerMeta, width=1, signed=True, mlir_type=T.
                 arg_type=type(a).__name__,
             )
         super().__init__(value, loc=loc, ip=ip)
-
-    def ir_value_int8(
-        self,
-        *,
-        loc: Optional[ir.Location] = None,
-        ip: Optional[ir.InsertionPoint] = None,
-    ) -> ir.Value:
-        """Return the int8 ir value of this Boolean, for storing it in memory.
-
-        :return: The int8 value of this Boolean
-        :rtype: ir.Value
-        """
-        return Int8(self.value, loc=loc, ip=ip).ir_value(loc=loc, ip=ip)
 
     def __neg__(  # type: ignore[override]
         self,
@@ -2234,7 +2216,7 @@ def _lookup_scalar_type(scalar: ir.Type) -> Optional[Type[Numeric]]:
 
 def _lookup_mlir_type(mlir_type: ir.Type) -> Optional[Type[Numeric]]:
     """Return the dtype whose SSA type ``mlir_type`` is under the active
-    dialect, or None when no dtype claims it."""
+    type_ops plugin, or None when no dtype claims it."""
     scalar = _emitter().scalar_type(mlir_type)
     if scalar is None:
         return None
@@ -2249,21 +2231,23 @@ def _lookup_mlir_type(mlir_type: ir.Type) -> Optional[Type[Numeric]]:
 def _minmax(is_min: bool, *args: Any, loc: Any = None, ip: Any = None) -> Any:
     """min/max over scalars and iterables of scalars; the result dtype is the
     operands' promoted dtype, Python-only operands fold in Python."""
-    # ``tree_utils`` imports this module; resolve the staged test on use.
-    from ..core.executor import is_dynamic_expression
+    # ``core/staging.py`` imports this module; import ``is_mlir_op`` on use.
+    from ..core.staging import is_mlir_op
 
     values: list[Any] = []
     for arg in args:
         values.extend(arg if isinstance(arg, (list, tuple)) else [arg])
     if not values:
         raise DSLUserCodeError(
-            f"`{'min' if is_min else 'max'}()` needs at least one value.",
+            DiagId.CALL_ARGUMENTS,
+            function_name="min" if is_min else "max",
+            detail="at least one value is required",
             suggestion="Pass one or more scalars, or a non-empty list or tuple of them.",
         )
 
     def minmax_op(lhs: Any, rhs: Any) -> Any:
         if not isinstance(lhs, Numeric) and not isinstance(rhs, Numeric):
-            if not is_dynamic_expression(lhs) and not is_dynamic_expression(rhs):
+            if not is_mlir_op(lhs) and not is_mlir_op(rhs):
                 return builtins.min(lhs, rhs) if is_min else builtins.max(lhs, rhs)
         a, b, res_type = _binary_op_type_promote(as_numeric(lhs), as_numeric(rhs))
         a, b = a.to(res_type), b.to(res_type)
@@ -2306,21 +2290,6 @@ class align(int):
         return f"align({super().__str__()})"
 
 
-def _wrap_ir_value(value: ir.Value) -> Any:
-    """Wrap a raw ``ir.Value`` in the DSL leaf that claims its type.
-
-    ``util/tree_utils.py`` installs the registry-aware implementation here at
-    import; this default knows the scalar dtypes only. ``Pointer.load(count=)``
-    and ``masked_load`` use it to wrap their ``vector<N x T>`` results.
-    """
-    dt = _lookup_mlir_type(value.type)
-    if dt is None:
-        raise DSLUserCodeError(
-            DiagId.TYPE_UNSUPPORTED_MLIR_TYPE, mlir_type=str(value.type)
-        )
-    return dt(value)
-
-
 # =============================================================================
 # Pointer
 # =============================================================================
@@ -2330,12 +2299,12 @@ class TypedPointer:
     """Type annotation object for a ``Pointer`` element type and memory space.
 
     ``Pointer[dtype]`` and ``Pointer[dtype, space]`` return a ``TypedPointer``
-    for use in kernel/JIT signatures. It is not an LLVM pointer value itself;
+    for use in kernel/JIT signatures. It is not a pointer SSA value itself;
     it carries the metadata needed to derive the corresponding MLIR argument
     type and to adapt a host buffer or address passed for that parameter.
 
     :param dtype: Element type such as ``Float32`` or ``Int8``.
-    :param space: LLVM address space, an integer (``0`` is generic).
+    :param space: Address space, an integer (``0`` is generic).
 
     Example::
 
@@ -2388,16 +2357,17 @@ def _vector_operand(value: Any) -> Optional[ir.Value]:
 class Pointer(ir.Value):
     """A pointer value with element dtype metadata.
     ``Pointer`` is the DSL's memory type. Inside a trace it wraps one pointer
-    SSA value of the active dialect (``!llvm.ptr`` under the LLVM world, a
+    SSA value of the DSL's ``type_ops`` plugin (``!llvm.ptr`` under the builtin type ops, a
     rank-0 tile of pointers under a tile dialect) and subclasses ``ir.Value``
     so it can be passed directly to MLIR ops; ``p + i``, ``p[i]``/``p.load()``
     and ``p[i] = v``/``p.store(v)`` are the emitter's ``ptr_add``, ``load`` and
     ``store``. Outside a trace it holds a host address (an ``int``) for a
     ``@jit`` argument, which ``marshal`` passes to the compiled function.
 
-    :param base: The ``!llvm.ptr`` value, or a host address
+    :param base: The pointer SSA value (``!llvm.ptr`` under the builtin type
+        ops), or a host address
     :param dtype: Element type, defaults to ``Int8``
-    :param space: LLVM address space, defaults to that of ``base`` (``0`` on the host)
+    :param space: Address space, defaults to that of ``base`` (``0`` on the host)
     :param kind: Host payload kind: ``"host"``, ``"device"`` or ``"unknown"``
     :param keepalive: An object kept alive as long as the host pointer is
     """
@@ -2450,7 +2420,13 @@ class Pointer(ir.Value):
             # Host payload: ``ir.Value.__init__`` is not run; the instance is
             # only ever read through the Python attributes below.
             if base < 0:
-                raise DSLUserCodeError(DiagId.ARG_POINTER_NEGATIVE, address=base)
+                raise DSLUserCodeError(
+                    DiagId.ARG_ANNOTATION_MISMATCH,
+                    num=1,
+                    arg_name="base",
+                    expected="a non-negative address (`0` for null)",
+                    got=f"{base}",
+                )
             self._base = None
             self._address = ctypes.c_void_p(base)
             self._addrspace = 0 if space is None else _normalize_address_space(space)
@@ -2462,14 +2438,6 @@ class Pointer(ir.Value):
                 function_name="Pointer",
                 arg_type=type(base).__name__,
             )
-
-    @classmethod
-    def _from_raw_ptr(
-        cls,
-        value: ir.Value,
-        dtype: Optional[Type[Numeric]] = None,
-    ) -> "Pointer":
-        return cls(value, dtype=dtype or Int8)
 
     def __class_getitem__(cls, args: Any) -> TypedPointer:
         params = args if isinstance(args, tuple) else (args,)
@@ -2536,10 +2504,6 @@ class Pointer(ir.Value):
             )
         return self._base
 
-    @property
-    def llvm_ptr(self) -> ir.Value:
-        return self.ir_value()
-
     def __str__(self) -> str:
         return f"ptr<space={self._addrspace}, dtype={self._dtype}>"
 
@@ -2586,10 +2550,6 @@ class Pointer(ir.Value):
     def mlir_type(self) -> ir.Type:
         return _emitter().pointer_type(self._dtype, self._addrspace)
 
-    @property
-    def _mlir_type(self) -> ir.Type:
-        return self._dtype.mlir_type
-
     def _effective_alignment(self, alignment: Optional[int]) -> int:
         return alignment if alignment is not None else self.natural_alignment
 
@@ -2632,7 +2592,7 @@ class Pointer(ir.Value):
             return value.ir_value(loc=loc, ip=ip)
         if isinstance(value, (bool, int, float)):
             return self._dtype(value, loc=loc, ip=ip).ir_value(loc=loc, ip=ip)
-        if isinstance(value, ir.Value) and value.type == self._mlir_type:
+        if isinstance(value, ir.Value) and value.type == self._dtype.mlir_type:
             return value
         raise DSLUserCodeError(
             DiagId.ARG_NOT_NUMERIC, arg_name="value", arg_type=type(value).__name__
@@ -2693,22 +2653,6 @@ class Pointer(ir.Value):
         int_type = dtype.mlir_type
         return dtype(_emitter().ptrtoint(self.ir_value(), int_type, loc=loc, ip=ip))
 
-    def _inttoptr(
-        self,
-        value: Any,
-        addrspace: int,
-        dtype: Type[Numeric],
-        *,
-        loc: Optional[ir.Location] = None,
-        ip: Optional[ir.InsertionPoint] = None,
-    ) -> "Pointer":
-        if isinstance(value, int):
-            value = Int64(value)
-        if hasattr(value, "ir_value"):
-            value = value.ir_value(loc=loc, ip=ip)
-        res_val = _emitter().inttoptr(value, addrspace, loc=loc, ip=ip)
-        return Pointer(res_val, dtype=dtype, space=addrspace)
-
     # -- Memory access -------------------------------------------------------
 
     @dsl_user_op
@@ -2746,7 +2690,11 @@ class Pointer(ir.Value):
         )
         if count is None:
             return self._dtype(res, loc=loc, ip=ip)
-        return _wrap_ir_value(res)
+        # The registry-aware wrapper (a ``Vector`` for ``vector<N x T>``); the
+        # import is deferred because ``util/tree_utils`` imports this module.
+        from ..util.tree_utils import wrap_ir_value
+
+        return wrap_ir_value(res)
 
     @dsl_user_op
     def store(
@@ -2843,7 +2791,11 @@ class Pointer(ir.Value):
             loc=loc,
             ip=ip,
         )
-        return _wrap_ir_value(res)
+        # The registry-aware wrapper (a ``Vector`` for ``vector<N x T>``); the
+        # import is deferred because ``util/tree_utils`` imports this module.
+        from ..util.tree_utils import wrap_ir_value
+
+        return wrap_ir_value(res)
 
     @dsl_user_op
     def masked_store(
@@ -2957,7 +2909,7 @@ class Pointer(ir.Value):
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Pointer":
         masked_int = self.toint(loc=loc, ip=ip) & mask
-        return self._inttoptr(masked_int, self._addrspace, self.dtype, loc=loc, ip=ip)
+        return inttoptr(masked_int, self._addrspace, self._dtype, loc=loc, ip=ip)
 
     @dsl_user_op
     def __rand__(
@@ -3088,17 +3040,16 @@ class Struct:
         cls = type(self)
         if args:
             raise DSLUserCodeError(
-                DiagId.STRUCT_VALUE_TYPE,
+                DiagId.STRUCT_CONSTRUCTION,
                 name=f"{cls.__name__}.replace",
-                got=f"{len(args)} positional argument(s)",
+                detail=f"it takes keyword arguments naming its fields, but got {len(args)} positional argument(s)",
             )
         extra = set(fields) - set(cls._field_names)
         if extra:
             raise DSLUserCodeError(
-                DiagId.STRUCT_UNEXPECTED_KWARG,
+                DiagId.STRUCT_CONSTRUCTION,
                 name=cls.__name__,
-                kwargs=sorted(extra),
-                fields=cls._field_names,
+                detail=f"unexpected keyword argument(s) {sorted(extra)}; the fields are {cls._field_names}",
             )
         values = {name: getattr(self, name) for name in cls._field_names}
         for fname, v in fields.items():
@@ -3156,7 +3107,9 @@ def _coerce_field_value(
     """
     if isinstance(value, (tuple, list)):
         raise DSLUserCodeError(
-            DiagId.STRUCT_FIELD_ARITY, field=name, name=struct_name, count=len(value)
+            DiagId.STRUCT_CONSTRUCTION,
+            name=struct_name,
+            detail=f"field `{name}` must hold exactly one runtime value, but the value given holds {len(value)}",
         )
     if isinstance(ann, NumericMeta):
         if value is None:
@@ -3180,7 +3133,9 @@ def _coerce_field_value(
             return value
         raise _field_mismatch(position, name, ann, value)
     raise DSLUserCodeError(
-        DiagId.STRUCT_FIELD_TYPE, field=name, name=struct_name, annotation=repr(ann)
+        DiagId.STRUCT_DEFINITION,
+        name=struct_name,
+        detail=f"field `{name}` is annotated `{ann!r}`, which is not a DSL type, a `Pointer[T]` or a `@struct` class",
     )
 
 
@@ -3189,7 +3144,7 @@ def struct(cls: Optional[type] = None) -> Any:
 
     The decorated class must annotate every field with a DSL type (``Int32``,
     ``Pointer[T]``, another struct class); a Python type is
-    ``STRUCT_FIELD_TYPE``. The result is a frozen dataclass deriving from
+    ``STRUCT_DEFINITION``. The result is a frozen dataclass deriving from
     :class:`Struct`: ``__init__(**fields, loc=None, ip=None)`` coerces each
     value into its field's type and fills missing fields with zero, fields
     are read as attributes, ``replace`` copies with changes, and the record
@@ -3219,16 +3174,19 @@ def struct(cls: Optional[type] = None) -> Any:
             if n not in Struct.__annotations__ and get_origin(a) is not ClassVar
         }
         if not hints:
-            raise DSLUserCodeError(DiagId.STRUCT_NO_FIELDS, name=cls.__name__)
+            raise DSLUserCodeError(
+                DiagId.STRUCT_DEFINITION,
+                name=cls.__name__,
+                detail="it declares no type-annotated field",
+            )
         field_names: list = []
         field_annotations: dict = {}
         for name, ann in hints.items():
             if not _is_field_annotation(ann):
                 raise DSLUserCodeError(
-                    DiagId.STRUCT_FIELD_TYPE,
-                    field=name,
+                    DiagId.STRUCT_DEFINITION,
                     name=cls.__name__,
-                    annotation=repr(ann),
+                    detail=f"field `{name}` is annotated `{ann!r}`, which is not a DSL type, a `Pointer[T]` or a `@struct` class",
                 )
             field_names.append(name)
             field_annotations[name] = ann
@@ -3244,17 +3202,16 @@ def struct(cls: Optional[type] = None) -> Any:
         ) -> None:
             if args:
                 raise DSLUserCodeError(
-                    DiagId.STRUCT_VALUE_TYPE,
+                    DiagId.STRUCT_CONSTRUCTION,
                     name=cls_name,
-                    got=f"{len(args)} positional argument(s)",
+                    detail=f"it takes keyword arguments naming its fields, but got {len(args)} positional argument(s)",
                 )
             extra = set(kwargs) - set(field_names)
             if extra:
                 raise DSLUserCodeError(
-                    DiagId.STRUCT_UNEXPECTED_KWARG,
+                    DiagId.STRUCT_CONSTRUCTION,
                     name=cls_name,
-                    kwargs=sorted(extra),
-                    fields=field_names,
+                    detail=f"unexpected keyword argument(s) {sorted(extra)}; the fields are {field_names}",
                 )
             for i, name in enumerate(field_names):
                 object.__setattr__(
@@ -3322,7 +3279,11 @@ def make_struct(name: str, **fields: Any) -> type:
     :return: A ``@struct`` class with the given fields.
     """
     if not fields:
-        raise DSLUserCodeError(DiagId.STRUCT_NO_FIELDS, name=name)
+        raise DSLUserCodeError(
+            DiagId.STRUCT_DEFINITION,
+            name=name,
+            detail="it declares no type-annotated field",
+        )
     cls = type(name, (), {"__annotations__": dict(fields)})
     return struct(cls)
 
@@ -3388,8 +3349,6 @@ __all__ = [
     "as_ir_value",
     "cast",
     "align",
-    "GridConstant",
-    "grid_constant",
     "Pointer",
     "TypedPointer",
     "inttoptr",

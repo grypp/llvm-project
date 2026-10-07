@@ -5,12 +5,15 @@
 """mlir.dsl: a Python DSL base layer for MLIR (see mlir/tools/mlir-dsl/README.md).
 
 The core: the types (``Int32``, ``Pointer``, ``@struct``, ``Vector``), the
-staging decision and the host boundary (``BaseDSL``), the plugin protocols
-(``Plugin``, ``DialectPlugin``, ``ASTPreprocessorPlugin``, ``OpEmitter``) and
-the extension points (``register_leaf``, ``register_jit_arg_adapter``). It
-emits no dialect op of its own: the plugins under ``mlir.dsl.plugins`` do, and
-a sub-DSL is a ``BaseDSL`` subclass listing the ones it wants. ``mlir.mlir_dsl``
-is the reference sub-DSL and the namespace to write programs against.
+staging decision and the host boundary (``BaseDSL``), the plugin roles
+(``TypeOpsPlugin``, ``FuncEntryPlugin``, ``ASTPreprocessorPlugin``, ``CompilerPlugin``) and the
+families (``DecoratorPlugin``, ``AdapterPlugin``), and
+the ``Plugins`` record a DSL names them in, and the extension points
+(``register_leaf``, ``register_jit_arg_adapter``). It emits no dialect op of
+its own: each plugin folder ships the op modules it emits through, and
+``mlir.dsl.plugins`` the role implementations and the plugin families. A
+sub-DSL is a ``BaseDSL`` subclass with its own ``plugins`` record;
+``mlir.mlir_dsl`` is the test DSL and the namespace to write programs against.
 """
 
 # The types
@@ -70,13 +73,21 @@ from .types.vector import Vector
 from .types.typing import max_ as max, min_ as min
 
 # The sub-DSL authoring surface
-from .core.dsl import BaseDSL, LaunchConfig, _KernelGenHelper
-from .core.plugin import ASTPreprocessorPlugin, DialectPlugin, Plugin
+from .core.dsl import BaseDSL
+from .core.plugin import (
+    ASTPreprocessorPlugin,
+    AdapterPlugin,
+    CompilerPlugin,
+    DecoratorPlugin,
+    FuncEntryPlugin,
+    Plugin,
+    Plugins,
+    TypeOpsPlugin,
+)
 from .core.mlir_op import OpEmitter, current_emitter
-from .core.executor import Executor, is_dynamic_expr, is_dynamic_expression
-from .compiler.compiler import Compiler
+from .core.staging import Executor, is_mlir_op
 from .util.tree_utils import register_leaf
-from .runtime.jit_arg_adapters import JitArgAdapterRegistry
+from .core.arguments import JitArgAdapterRegistry
 
 register_jit_arg_adapter = JitArgAdapterRegistry.register_jit_arg_adapter
 
@@ -139,19 +150,20 @@ __all__ = [
     "max",
     "min",
     "BaseDSL",
-    "LaunchConfig",
-    "_KernelGenHelper",
     "ASTPreprocessorPlugin",
-    "DialectPlugin",
     "Plugin",
+    "Plugins",
+    "TypeOpsPlugin",
+    "FuncEntryPlugin",
+    "CompilerPlugin",
+    "DecoratorPlugin",
+    "AdapterPlugin",
     "OpEmitter",
     "current_emitter",
     "Executor",
-    "is_dynamic_expr",
-    "Compiler",
+    "is_mlir_op",
     "register_leaf",
     "register_jit_arg_adapter",
-    "is_dynamic_expression",
     "DSLRuntimeError",
     "DSLUserCodeError",
     "DiagId",

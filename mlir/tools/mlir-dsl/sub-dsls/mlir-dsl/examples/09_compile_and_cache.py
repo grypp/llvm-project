@@ -53,7 +53,7 @@ def child():
     # directory empty, compiles and writes mlir_dsl_<module hash>.mlir (MLIR
     # bytecode); the second loads it and skips the pass pipeline, which
     # `dsl.file_cache_hits` counts.
-    dsl = m.MlirDSL()
+    dsl = m.MlirTestDSL()
     entries = len(os.listdir(dsl.envar.cache_dir))
     result = axpb(2.0, 3.0, 1)
     label = f"  child: axpb(2, 3, 1) = {result}, entries found = {entries}, file hits"
@@ -64,7 +64,7 @@ def main():
     if sys.argv[1:] == ["child"]:
         child()
         return
-    dsl = m.MlirDSL()
+    dsl = m.MlirTestDSL()
 
     # m.compile: trace, lower and JIT for these argument types (Meta `b` baked
     # in) without calling.  The result binds a call like Python (the Meta

@@ -6,7 +6,7 @@
 # RUN: rm -f %t.bitstream && env MLIR_DSL_REMARKS=".*" MLIR_DSL_REMARKS_OUTPUT=%t.bitstream %PYTHON %s 2>&1 | FileCheck %s --check-prefix=BITSTREAM
 # RUN: env MLIR_DSL_REMARKS=".*" MLIR_DSL_REMARKS_POLICY=sometimes %PYTHON %s 2>&1 | FileCheck %s --check-prefix=BADPOLICY
 # REQUIRES: host-supports-jit
-# The DSL's wiring of the upstream RemarkEngine (Design 8b), not the engine's
+# The DSL's wiring of the upstream RemarkEngine, not the engine's
 # own filter/policy/format semantics (mlir/test/python/ir/remarks.py): the
 # `<PREFIX>_REMARKS` filter, `_REMARKS_POLICY` and `_REMARKS_OUTPUT` settings
 # reach the per-compile session; without an output path the remarks are
@@ -22,7 +22,7 @@ import os
 import mlir.mlir_dsl as m
 from mlir import ir
 
-dsl = m.MlirDSL()
+dsl = m.MlirTestDSL()
 OUTPUT = os.environ.get("MLIR_DSL_REMARKS_OUTPUT", "")
 
 

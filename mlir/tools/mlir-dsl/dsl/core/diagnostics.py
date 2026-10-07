@@ -51,10 +51,10 @@ __all__ = [
     "render_user_diagnostic",
 ]
 
-# Canonical author-facing names for the two value phases (the language spec calls
-# them Meta and Staged values; diagnostics use plain words).  Defined once here
-# and auto-injected into every message as {meta}/{staged} (see DiagCatalog.fill),
-# so the wording is consistent and can be changed in a single place.
+# The author-facing words for the two kinds of values (a Python value and an
+# MLIR op, ``is_mlir_op`` in the code). Defined once here and injected into
+# every message as {meta}/{staged} (see DiagCatalog.fill), so the wording is
+# consistent and can be changed in one place.
 META_VALUE = "Python value"
 STAGED_VALUE = "runtime value"
 
@@ -162,8 +162,6 @@ def render_code_frame(
     line: int | None,
     col: int | None = None,
     end_col: int | None = None,
-    *,
-    display_filename: str | None = None,
 ) -> str | None:
     """Code frame: ``--> file:line:col`` + gutter + source lines + caret.
 
@@ -175,9 +173,7 @@ def render_code_frame(
     """
     if not filename or not line:
         return None
-    frame = _format_user_source_frame(
-        filename, line, col, end_col, display_filename=display_filename
-    )
+    frame = _format_user_source_frame(filename, line, col, end_col)
     return "\n".join(frame) if frame else None
 
 
@@ -318,14 +314,12 @@ def _format_internal_error_diagnostic(
 
 def _is_internal_verifier_error(message: str, cause_text: str) -> bool:
     """Whether an internal error is the MLIR verifier rejecting the built IR."""
-    return (
-        "ICE IR Verification Failed" in message or "Verification failed:" in cause_text
-    )
+    return "IR verification failed" in message or "Verification failed:" in cause_text
 
 
 def _brief_internal_error(message: str) -> str:
     """One-line summary of an internal error message."""
-    if "ICE IR Verification Failed" in message:
+    if "IR verification failed" in message:
         return "IR verification failed"
     return message.strip()
 
@@ -491,8 +485,6 @@ def _format_user_source_frame(
     line: int,
     col: int | None,
     end_col: int | None,
-    *,
-    display_filename: str | None = None,
 ) -> list[str]:
     """Lines of the user code frame: ``-->`` location, gutter, up to two
     context lines, the error line and the caret line (0-based ``col``).
@@ -502,7 +494,7 @@ def _format_user_source_frame(
     """
     source_lines = _read_source_lines(filename)
     loc = _format_source_location(
-        display_filename or filename,
+        filename,
         line,
         col,
         absolute_path=False,
@@ -810,16 +802,6 @@ class DiagId(DiagCatalog, enum.Enum):
             "do not change it inside.",
         ),
     )
-    PHASE_NUMERIC_PROTOCOL_ON_STAGED = (
-        "`{proto}` is not available when an operand is a {staged}, as this `{what}` "
-        "is; it only works on Python values.",
-        (
-            "Call `{proto}` on Python values only, e.g. compute it before the kernel "
-            "and pass the result in as an argument.",
-            "For three-argument `pow`, write `(a ** b) % mod` instead, if wraparound "
-            "on overflow is acceptable.",
-        ),
-    )
     PHASE_DYNAMIC_INDEX = (
         "Cannot use a {staged} as a list index or for loop range in plain Python code; "
         "only a Python `int` works there.",
@@ -878,17 +860,6 @@ class DiagId(DiagCatalog, enum.Enum):
             "cond else y`.",
         ),
     )
-    TYPE_DYNAMIC_EXPR_UNSUPPORTED = (
-        "A value updated inside this `{body_name}`{detail} has type `{py_type}`, a "
-        "{meta} that cannot become a {staged}, so this `{body_name}` cannot run at run "
-        "time.",
-        (
-            "Make it a {staged} before the `{body_name}`, e.g. `Int32(...)`, "
-            "`Float32(...)`, or `Boolean(...)`.",
-            "If the `{body_name}` is compile-time, give it Meta bounds or a Meta "
-            "condition so it runs in Python and the value can stay a {meta}.",
-        ),
-    )
     TYPE_LOOP_BOUND_NOT_INT = (
         "The loop's `{name}` is a `{dtype}`, but a loop's start, stop, and step must "
         "all be integers.",
@@ -907,14 +878,7 @@ class DiagId(DiagCatalog, enum.Enum):
             "a tuple or frozen dataclass of them.",
             "A kernel cannot return a value: write its results through a `Pointer` "
             "argument instead.",
-        ),
-    )
-    TYPE_RETURN_NONE = (
-        "This function declares a return type, but its body returned `None` instead of "
-        "a value of that type.",
-        (
-            "Add `return <value>` with a value of the declared type on every path.",
-            "If the function returns nothing, remove the return type annotation.",
+            "If the function returns nothing, remove its return type annotation.",
         ),
     )
     TYPE_IMPLICIT_PROMOTION_UNSUPPORTED = (
@@ -1005,20 +969,13 @@ class DiagId(DiagCatalog, enum.Enum):
             "DSL values is not supported.",
         ),
     )
-    CONTAINER_FIELD_UNSET = (
-        "`{var}` is a `{type}` whose field `{field}` has no value, so it cannot be "
-        "flattened.",
+    CONTAINER_INVALID_RECORD = (
+        "`{var}` is a `{type}` that compiled code cannot carry: {detail}.",
         (
-            "Give every field of `{type}` a value before it crosses a `@jit` boundary or "
-            "a loop; a `field(init=False)` must be assigned in `__post_init__`.",
-        ),
-    )
-    CONTAINER_EXTRA_ATTRIBUTE = (
-        "`{var}` is a `{type}` with an instance attribute `{attr}` that is not a "
-        "dataclass field but holds a DSL value; only fields are carried.",
-        (
-            "Make `{attr}` a field of `{type}`, or compute it from the fields where it "
-            "is used instead of storing it in `__post_init__`.",
+            "A record carried through compiled code is a frozen dataclass or "
+            "`@struct` whose fields all have values: declare it "
+            "`@dataclass(frozen=True)`, assign every field (an `init=False` one in "
+            "`__post_init__`), and keep DSL values in fields, not in other attributes.",
         ),
     )
     CONTAINER_TOO_DEEP = (
@@ -1027,23 +984,6 @@ class DiagId(DiagCatalog, enum.Enum):
         (
             "Flatten the value yourself or raise `sys.setrecursionlimit`; a container "
             "that refers back to itself is not supported.",
-        ),
-    )
-    CONTAINER_CYCLE = (
-        "`{var}` is a `{type}` that contains itself, so it cannot be flattened into "
-        "a finite list of values.",
-        (
-            "Carry a value without cycles: a tuple, list or frozen dataclass whose "
-            "elements do not refer back to it.",
-        ),
-    )
-    CONTAINER_DATACLASS_NOT_FROZEN = (
-        "`{type}` is a dataclass holding runtime values, but it is not frozen. Values "
-        "carried through compiled code are rebuilt on every path, so a mutable "
-        "dataclass would silently lose updates.",
-        (
-            "Declare it `@dataclass(frozen=True)` and create updated copies with "
-            "`dataclasses.replace(...)`.",
         ),
     )
 
@@ -1056,10 +996,13 @@ class DiagId(DiagCatalog, enum.Enum):
             "buffers and compile-time int/bool/float/None values.",
         ),
     )
-    UNSUP_LOOP_ELSE = (
-        "A `for`/`while` loop with an `else:` clause is not supported in compiled "
-        "code.",
-        ("Remove the `else:` and put its code after the loop.",),
+    UNSUP_SYNTAX = (
+        "{what} is not supported in a compiled function{detail}.",
+        (
+            "Compiled functions accept a subset of Python: rewrite this part with a "
+            "supported form, or do it in plain Python outside the compiled function "
+            "and pass the result in.",
+        ),
     )
     UNSUP_EARLY_EXIT = (
         "Early exit ({kind}) is not allowed in {where}. The `{kind}` sits inside a "
@@ -1076,75 +1019,10 @@ class DiagId(DiagCatalog, enum.Enum):
             "`if not done:`.",
         ),
     )
-    UNSUP_RANGE_ARGS = (
-        "`range(...)` takes 1 to 3 positional arguments; "
-        "this call passes a different number.",
-        (
-            "Call it as `range(stop)`, `range(start, stop)`, or `range(start, stop, "
-            "step)`.",
-            "Pass loop options such as `unroll=` as keyword arguments, not "
-            "positionally.",
-        ),
-    )
-    UNSUP_FSTRING = (
-        "This f-string contains a part that is neither literal text nor a `{{...}}` "
-        "placeholder, which is not supported in compiled code.",
-        (
-            "Assign the value to a variable before the f-string and use that variable "
-            "in the f-string.",
-        ),
-    )
-    UNSUP_READ_UNDERSCORE = (
-        "`_` is a throwaway name and cannot be read.",
-        ("Give the value a real name if you need to read it.",),
-    )
-    UNSUP_DECORATOR_ORDER = (
-        "`{decorator}` must be the innermost decorator, the one written directly above "
-        "`def`.",
-        ("Move `{decorator}` directly above the function definition.",),
-    )
-    UNSUP_GLOBAL = (
-        "`global` cannot be used in a compiled function: compiled code cannot assign "
-        "to a module-level variable.",
-        ("Pass the value in as a function argument and return the updated value.",),
-    )
-    UNSUP_NONLOCAL = (
-        "`{stmt}` refers to `{name}`, which belongs to an enclosing function: compiled "
-        "code cannot assign to a variable outside the compiled function.",
-        ("Pass `{name}` in as a function argument and return the updated value.",),
-    )
-    UNSUP_YIELD = (
-        "`yield` makes this function a generator, which cannot be compiled: calling a "
-        "generator only creates a generator object and never runs its body.",
-        (
-            "Move the generator to plain Python outside the compiled function and pass "
-            "its results in.",
-            "Build a list and return it instead of yielding.",
-        ),
-    )
-    UNSUP_ASYNC = (
-        "`async`/`await` cannot be compiled: calling a coroutine only creates a "
-        "coroutine object, and there is no event loop here to run it.",
-        ("Write a plain (non-`async`) function and call it directly.",),
-    )
     UNSUP_NO_SOURCE = (
         "The source of `{func}` is not available (for example it was defined in a REPL "
         "or through `exec()`), so it cannot be compiled.",
         ("Save the function to a `.py` file and import it from there.",),
-    )
-    UNSUP_BUILTIN = (
-        "The built-in function `{name}` is not allowed in compiled code{detail}.",
-        (
-            "Remove the `{name}` call from the compiled function; do that work in "
-            "plain Python before the kernel and pass the result in.",
-            "If the argument is a runtime value, compute the result with runtime "
-            "operations instead, e.g. a `for` over the elements with comparisons or "
-            "`max`/`min`.",
-        ),
-    )
-    UNSUP_COMPARISON_OPERATOR = (
-        "The comparison operator `{op}` is not supported in compiled code.",
-        ("Use one of `==`, `!=`, `<`, `>`, `<=`, `>=`.",),
     )
 
     # --- ARG ---
@@ -1160,17 +1038,6 @@ class DiagId(DiagCatalog, enum.Enum):
         "The value given to `align()` is not a positive power of 2.",
         ("Pass a positive power of 2 to `align()`, e.g. `align(16)`.",),
     )
-    ARG_NOT_MARSHALABLE = (
-        "Argument `{arg_name}` has type `{arg_type}`, which cannot be passed to the "
-        "compiled function: the DSL does not recognize it as a buffer, pointer, or "
-        "numeric, and no argument adapter is registered for that type.",
-        (
-            "Pass a numpy array, a pointer, or a DSL numeric for `{arg_name}`, the "
-            "kind of value it was compiled with.",
-            "To pass a `{arg_type}`, write an adapter for it and register it with "
-            "`@register_jit_arg_adapter({arg_type})`.",
-        ),
-    )
     ARG_NOT_NUMERIC = (
         "Argument `{arg_name}` expects a numeric value, but this call passes a value "
         "of type `{arg_type}`.",
@@ -1179,59 +1046,33 @@ class DiagId(DiagCatalog, enum.Enum):
             "`{arg_name}`.",
         ),
     )
-    ARG_POINTER_NEGATIVE = (
-        "Pointer address must be non-negative, but this call passes {address}.",
-        (
-            "Pass the address your allocator returned, e.g. `tensor.data_ptr()` in "
-            "PyTorch; a real device address is never negative.",
-            "For a null pointer, pass `0`.",
-        ),
-    )
     ARG_UNSUPPORTED_TYPE = (
         "Argument #{num} `{arg_name}` of `{function_name}` has type `{arg_type}`, "
-        "which the DSL cannot pass into compiled code.",
+        "which cannot be passed into compiled code{detail}.",
         (
-            "Pass a numpy array, a DSL numeric such as `Int32`, or a pointer for "
-            "`{arg_name}` instead.",
+            "Pass a numpy array, a DSL numeric such as `Int32`, a pointer, or a tuple "
+            "or frozen record of them for `{arg_name}`.",
             "To pass a custom class, register an adapter for it with "
             "`@register_jit_arg_adapter(YourClass)`.",
         ),
     )
-    ARG_DEVICE_BUFFER_ON_HOST = (
-        "Argument `{arg_name}` is a device buffer, but `{function_name}` runs on the "
-        "host: its trace launched no kernel.",
+    ARG_BUFFER_INVALID = (
+        "Argument `{arg_name}` cannot be used as a `Pointer` argument: {detail}.",
         (
-            "This function runs on the host: pass a host buffer, e.g. `t.cpu()`.",
-            "If the buffer is meant for a kernel, launch one from `{function_name}`.",
-        ),
-    )
-    ARG_BUFFER_NOT_CONTIGUOUS = (
-        "Argument `{arg_name}` is a `{arg_type}` that is not contiguous in memory; a "
-        "`Pointer` argument needs one contiguous block.",
-        (
-            "Pass a contiguous copy, e.g. `t.contiguous()` for a PyTorch tensor or "
-            "`np.ascontiguousarray(a)` for a numpy array.",
+            "Pass one contiguous block of memory on the device the function runs on, "
+            "e.g. `np.ascontiguousarray(a)`, `t.contiguous()`, or `t.cpu()` for a "
+            "host function.",
         ),
     )
 
     # --- CALL ---
-    CALL_BUILTIN_KWARGS_UNSUPPORTED = (
-        "`{fcn}` does not accept keyword arguments when one of its arguments is a "
-        "{staged}.",
-        ("Call `{fcn}` with positional arguments only.",),
-    )
-    CALL_DUPLICATE_ARGUMENT = (
-        "This call passes a value for `{argument_name}` twice, once positionally and "
-        "once by keyword.",
-        ("Pass `{argument_name}` either positionally or by keyword, not both.",),
-    )
-    CALL_MISSING_ARG = (
-        "The call to `{function_name}` did not pass {missing}; every parameter without "
-        "a default needs a value.",
+    CALL_ARGUMENTS = (
+        "The call to `{function_name}` does not match its parameters: {detail}.",
         (
-            "Pass {missing} when calling `{function_name}`.",
-            "To make a parameter optional, give it a default value in the function "
-            "definition.",
+            "Pass exactly one value for every parameter without a default, by "
+            "position or by its exact name, and nothing else.",
+            "Keyword-only parameters such as loop options are passed by name, e.g. "
+            "`range(n, unroll=2)`.",
         ),
     )
     CALL_MISSING_JIT_DECORATOR = (
@@ -1255,37 +1096,11 @@ class DiagId(DiagCatalog, enum.Enum):
             "that function.",
         ),
     )
-    CALL_SIGNATURE_MISMATCH = (
-        "This call passes {provided} positional and {provided_kw} keyword arguments, "
-        "which does not match the number of runtime parameters the function declares "
-        "(a reserved `self`/`cls` receiver is not counted).",
-        (
-            "Pass exactly one value for every parameter that has no default, and "
-            "remove any extra arguments.",
-        ),
-    )
-    CALL_TOO_MANY_ARGS = (
-        "This call passes more positional arguments than the function accepts "
-        "({provided} passed, at most {expected} accepted).",
-        (
-            "Remove the extra positional arguments.",
-            "Pass keyword-only parameters by name, e.g. `f(a, b, unroll=2)`.",
-        ),
-    )
     CALL_TVM_FFI_ARGS = (
         "The TVM-FFI call of `{function_name}` rejected its arguments: {detail}",
         (
             "Check the argument count and types against the function signature; a "
             "compile-time argument must repeat the value the function was compiled with.",
-        ),
-    )
-    CALL_UNEXPECTED_KWARG = (
-        "This call passes a keyword argument `{argument_name}`, but the function has "
-        "no parameter with that name.",
-        (
-            "Remove the `{argument_name}=...` argument.",
-            "If you meant an existing parameter, use its exact name from the function "
-            "definition.",
         ),
     )
     CALL_META_VALUE_MISMATCH = (
@@ -1297,70 +1112,31 @@ class DiagId(DiagCatalog, enum.Enum):
             "Or `compile(...)` the function again with this value.",
         ),
     )
-    CALL_WRONG_IMPORT = (
-        "`{name}` was imported from a different module (or defined locally), so it is "
-        "not the DSL's `{name}`. Control-flow helpers such as `range` must come "
-        "from the DSL package.",
-        (
-            "Remove any local definition or import of `{name}`.",
-            "Use the DSL's version, e.g. the `range(...)` exported by the DSL "
-            "package.",
-        ),
-    )
     CALL_PLUGIN_REQUIRED = (
-        "`{name}` needs the `{plugin}` plugin, which is not installed on this DSL.",
-        (
-            "Install the {plugin} plugin: `class MyDSL(MlirDSL): plugins = "
-            "MlirDSL.plugins + [{plugin_class}()]`.",
-        ),
+        "`{name}` needs {plugin}, which this DSL does not name.",
+        ("Name it: `{fix}`.",),
     )
 
     # --- CONFIG ---
-    CONFIG_INVALID_OPT_LEVEL = (
-        "Optimization level must be between 0 and 3, but got {val}.",
-        (
-            "Use a valid optimization level: 0 (no optimization), 1, 2, or 3 (maximum "
-            "optimization).",
-        ),
-    )
-    CONFIG_MISSING_TVM_FFI = (
-        "`{var}` is set, but the `tvm_ffi` package is not installed, so no TVM-FFI "
-        "function can be exported.",
-        (
-            "Install it with `pip install apache-tvm-ffi`.",
-            "Or unset `{var}` to compile without the TVM-FFI export.",
-        ),
+    CONFIG_INVALID = (
+        "`{var}` has an invalid setting: {detail}.",
+        ("Set `{var}` to a supported value, or leave it unset for the default.",),
     )
 
     # --- STRUCT ---
-    STRUCT_NO_FIELDS = (
-        "`{name}` declares no struct field: `@struct` needs at least one "
-        "type-annotated field.",
-        ("Add a field annotated with a DSL type, e.g. `x: Float32`.",),
-    )
-    STRUCT_FIELD_TYPE = (
-        "Field `{field}` of `{name}` is annotated `{annotation}`, which is not a DSL "
-        "type or a `@struct` class.",
+    STRUCT_DEFINITION = (
+        "`{name}` is not a valid `@struct`: {detail}.",
         (
-            "Annotate `{field}` with a DSL type such as `Int32` or `Float32`, or with "
-            "another `@struct` class.",
-            "For a compile-time setting, keep it a plain Python attribute of the class.",
+            "Declare at least one field annotated with a DSL type such as `Int32` or "
+            "`Float32`, a `Pointer[T]` or another `@struct` class; keep compile-time "
+            "settings as plain class attributes.",
         ),
     )
-    STRUCT_UNEXPECTED_KWARG = (
-        "`{name}(...)` got unexpected keyword argument(s) {kwargs}.",
-        ("Use the field names declared on `{name}`: {fields}.",),
-    )
-    STRUCT_VALUE_TYPE = (
-        "`{name}(...)` takes keyword arguments naming its fields, but got {got}.",
-        ("Construct it by field, e.g. `{name}(x=Float32(1.0))`.",),
-    )
-    STRUCT_FIELD_ARITY = (
-        "Field `{field}` of `{name}` must hold exactly one runtime value, but the "
-        "value given holds {count}.",
+    STRUCT_CONSTRUCTION = (
+        "`{name}(...)` cannot be built: {detail}.",
         (
-            "Pass a single DSL value for `{field}`, e.g. `Int32(...)`; a tuple or a "
-            "nested container is not a single field value.",
+            "Construct a `@struct` by field, e.g. `Vec2(x=Float32(1.0), "
+            "y=Float32(2.0))`, one DSL value per field.",
         ),
     )
     STRUCT_FIELD_ASSIGNMENT = (
@@ -1470,7 +1246,6 @@ _classify(
     NOT_ZERO_COST,
     "a Python value changes inside a runtime for/while/if",
     "PHASE_MUTATE_PYTHON",
-    "TYPE_DYNAMIC_EXPR_UNSUPPORTED",
 )
 _classify(
     NOT_ZERO_COST,
@@ -1479,11 +1254,8 @@ _classify(
     "TYPE_CONDITIONAL_BRANCH_MISMATCH",
     "CONTAINER_STRUCTURE_CHANGED",
     "CONTAINER_UNSUPPORTED",
-    "CONTAINER_CYCLE",
-    "CONTAINER_FIELD_UNSET",
-    "CONTAINER_EXTRA_ATTRIBUTE",
+    "CONTAINER_INVALID_RECORD",
     "CONTAINER_TOO_DEEP",
-    "CONTAINER_DATACLASS_NOT_FROZEN",
 )
 _classify(
     NOT_ZERO_COST,
@@ -1497,49 +1269,25 @@ _classify(
     "PHASE_REQUIRES_CONSTANT",
     "PHASE_DYNAMIC_INDEX",
     "PHASE_DYNAMIC_TO_STATIC_BOOL",
-    "PHASE_NUMERIC_PROTOCOL_ON_STAGED",
-    "CALL_BUILTIN_KWARGS_UNSUPPORTED",
-)
-_classify(
-    NOT_ZERO_COST,
-    "a Python-only feature cannot run in compiled code",
-    "UNSUP_YIELD",
-    "UNSUP_ASYNC",
-    "UNSUP_BUILTIN",
-    "UNSUP_GLOBAL",
-    "UNSUP_NONLOCAL",
 )
 _classify(
     UNSUPPORTED,
     "a Python construct the DSL does not compile yet",
-    "UNSUP_LOOP_ELSE",
+    "UNSUP_SYNTAX",
     "UNSUP_TVM_FFI_PARAM",
     "UNSUP_EARLY_EXIT",
     "UNSUP_NO_SOURCE",
-    "UNSUP_COMPARISON_OPERATOR",
-    "UNSUP_READ_UNDERSCORE",
-    "UNSUP_DECORATOR_ORDER",
-    "UNSUP_RANGE_ARGS",
-    "UNSUP_FSTRING",
-    "CALL_WRONG_IMPORT",
     "SCOPE_CLOSURE_CAPTURE",
 )
 _classify(
     USAGE,
     "arguments",
     "ARG_ANNOTATION_MISMATCH",
-    "ARG_NOT_MARSHALABLE",
-    "ARG_NOT_NUMERIC",
-    "ARG_POINTER_NEGATIVE",
-    "ARG_INVALID_ALIGNMENT",
     "ARG_UNSUPPORTED_TYPE",
-    "ARG_DEVICE_BUFFER_ON_HOST",
-    "ARG_BUFFER_NOT_CONTIGUOUS",
-    "CALL_DUPLICATE_ARGUMENT",
-    "CALL_MISSING_ARG",
-    "CALL_SIGNATURE_MISMATCH",
-    "CALL_TOO_MANY_ARGS",
-    "CALL_UNEXPECTED_KWARG",
+    "ARG_NOT_NUMERIC",
+    "ARG_INVALID_ALIGNMENT",
+    "ARG_BUFFER_INVALID",
+    "CALL_ARGUMENTS",
     "CALL_META_VALUE_MISMATCH",
     "CALL_TVM_FFI_ARGS",
     "TYPE_LOOP_BOUND_NOT_INT",
@@ -1548,7 +1296,7 @@ _classify(
     USAGE,
     "kernel launch",
     # The LAUNCH_* codes live in the gpu plugin's namespaced catalog
-    # (plugins/dialects/gpu.py); they are classified here by name so that
+    # (plugins/decorators/kernels/gpu/__init__.py); they are classified here by name so that
     # catalog renders like the base one.
     "LAUNCH_INVALID_DIMENSION",
     "LAUNCH_INVALID_GRID",
@@ -1557,22 +1305,20 @@ _classify(
     "LAUNCH_ALREADY_ISSUED",
     "LAUNCH_HOST_BUFFER",
     "LAUNCH_STREAM_UNSUPPORTED",
-    "CALL_OUTSIDE_JIT",
 )
 _classify(
     USAGE,
     "compiling and reusing functions",
     "CALL_MISSING_JIT_DECORATOR",
     "CALL_NOT_CALLABLE",
+    "CALL_OUTSIDE_JIT",
     "CALL_PLUGIN_REQUIRED",
     "TYPE_RETURN_MISMATCH",
-    "TYPE_RETURN_NONE",
 )
 _classify(
     USAGE,
     "compile options",
-    "CONFIG_INVALID_OPT_LEVEL",
-    "CONFIG_MISSING_TVM_FFI",
+    "CONFIG_INVALID",
     # In the gpu plugin's catalog, like the LAUNCH_* codes above.
     "CONFIG_UNSUPPORTED_ARCH",
 )
@@ -1587,11 +1333,8 @@ _classify(
 _classify(
     USAGE,
     "structs",
-    "STRUCT_NO_FIELDS",
-    "STRUCT_FIELD_TYPE",
-    "STRUCT_UNEXPECTED_KWARG",
-    "STRUCT_VALUE_TYPE",
-    "STRUCT_FIELD_ARITY",
+    "STRUCT_DEFINITION",
+    "STRUCT_CONSTRUCTION",
     "STRUCT_FIELD_ASSIGNMENT",
 )
 _classify(

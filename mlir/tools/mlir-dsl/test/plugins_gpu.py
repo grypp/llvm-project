@@ -1,25 +1,28 @@
 # RUN: env MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR=1 MLIR_DSL_ARCH=sm_90 %PYTHON %s 2>&1 | FileCheck %s
 # RUN: env MLIR_DSL_DRYRUN=1 %PYTHON %s 2>&1 | FileCheck %s --check-prefix=NOARCH
-# The gpu plugin (Design 7.9, 2c row 13): `available()` lists it on MlirDSL when
-# MLIR_DSL_ARCH is set (or the CUDA runtime library is findable); `install`
-# validates the arch and provides the DSL's `kernel_gen_helper` (kernel entry, launch, `gpu.module` container);
-# `pipeline_passes` is `gpu-lower-to-nvvm-pipeline{cubin-chip=<arch>}` composed
-# ahead of the core list. Calling a `@kernel` prepares a deferred launch; its
+# The gpu kernels plugin: `gpu.Kernels` is the decorator
+# plugin in MlirTestDSL's `Plugins` record that adds `@kernel`, installed
+# whenever the gpu bindings are present (kernel function, `gpu.module`
+# container, launch); it validates the arch at install and sets the DSL's
+# `pass_sm_arch_name`;
+# `MlirTestDSL.pipeline` puts `gpu-lower-to-nvvm-pipeline{cubin-chip=<arch>}`
+# ahead of the LLVM lowering when an arch is set. Calling a `@kernel` prepares a deferred launch; its
 # `.launch` emits the `gpu.func` (gpu.kernel, `known_block_size` for a static
 # block) in `gpu.module @kernels` and a synchronous `gpu.launch_func` with i64
 # dimensions and the host values flattened to operands; the index helpers read
 # the NVVM special registers as Int32. The launch validates its LaunchConfig and
 # the buffer kinds and raises the namespaced `gpu:` diagnostics. Traced only (no
 # GPU, no CUDA toolkit); the lowering is MLIR's. Without an arch the plugin is
-# not listed, an explicitly listed one fails at the first launch.
+# still installed and the first launch diagnoses the missing arch.
 import os
+from dataclasses import replace
 from typing import Annotated
 
 import numpy as np
 
 import mlir.mlir_dsl as m
 from mlir import ir
-from mlir.dsl.plugins.dialects import gpu as g
+from mlir.dsl.plugins.decorators.kernels import gpu as g
 
 
 def report(fn, *args, **kwargs):
@@ -34,18 +37,24 @@ def report(fn, *args, **kwargs):
 # =============================================================================
 # Availability, the target and the pipeline
 # =============================================================================
-print("AVAILABLE:", g.available(), "gpu" in [p.name for p in m.MlirDSL.plugins])
+print(
+    "AVAILABLE:",
+    g.Kernels.available(),
+    isinstance(m.MlirTestDSL.plugins.named("gpu"), g.Kernels),
+)
+# The kernels plugin is named in MlirTestDSL's record; `available()` says whether
+# the gpu bindings are built, with or without an arch.
 # CHECK:  AVAILABLE: True True
-# NOARCH: AVAILABLE: False False
+# NOARCH: AVAILABLE: True True
 rejected = []
 for arch in (None, "", "sm90", "gfx90a", "SM_90", "sm_90b", 90):
     try:
-        g.check_arch(arch)
+        g.check_arch(arch, var="MLIR_DSL_ARCH")
     except m.DSLUserCodeError as e:
         rejected.append(e.diag_id.name)
 print(
     "ARCH:",
-    [g.check_arch(a) for a in ("sm_80", "sm_90a", "sm_100f")],
+    [g.check_arch(a, var="MLIR_DSL_ARCH") for a in ("sm_80", "sm_90a", "sm_100f")],
     set(rejected),
     len(rejected),
 )
@@ -58,42 +67,45 @@ print(
     "DIAGS:",
     g.GpuDiagId.namespace,
     [d.name for d in g.GpuDiagId],
-    g.GpuKernelGenHelper.diag_ids is g.GpuDiagId,
+    g.Kernels.diag_ids is g.GpuDiagId,
 )
 # CHECK:  DIAGS: gpu ['LAUNCH_INVALID_DIMENSION', 'LAUNCH_INVALID_GRID', 'LAUNCH_OUTSIDE_JIT', 'LAUNCH_NEVER_ISSUED', 'LAUNCH_ALREADY_ISSUED', 'LAUNCH_HOST_BUFFER', 'LAUNCH_STREAM_UNSUPPORTED', 'CONFIG_UNSUPPORTED_ARCH'] True
 
 
-class GpuDSL(m.MlirDSL):
-    plugins = [g.GpuPlugin()]
+class GpuDSL(m.MlirTestDSL):
+    # The plugin named explicitly with its chip option; the record installs a
+    # copy bound to the instance (NOARCH still builds it).
+    plugins = replace(
+        m.MlirTestDSL.plugins, decorators=[g.Kernels(chip_option="cubin-chip")]
+    )
 
 
 dsl = GpuDSL()
-plugin = dsl.plugins[0]
 print(
     "INSTALLED:",
     repr(dsl.envar.arch),
-    plugin is not GpuDSL.plugins[0],
-    plugin.dsl is dsl,
+    isinstance(dsl.plugins.named("gpu"), g.Kernels),
 )
 print(
     "SEAMS:",
-    dsl.kernel_gen_helper is not None,
-    dsl.kernel_gen_helper is g.GpuKernelGenHelper,
+    dsl.plugins.named("gpu") is not GpuDSL.plugins.named("gpu"),
+    dsl.plugins.named("gpu").dsl is dsl,
+    dsl.pass_sm_arch_name,
 )
-print("PASSES:", plugin.pipeline_passes())
+print("PASSES:", [p for p in dsl.pipeline() if p.startswith("gpu-")])
 print("PIPELINE:", dsl._get_pipeline(None))
-# The plugin is installed as a copy bound to the instance; without an arch it
-# installs but contributes no pass (the launch diagnoses the missing arch).
-# CHECK:  INSTALLED: 'sm_90' True True
-# CHECK:  SEAMS: True True
+# Without an arch the DSL's pipeline has no gpu pass (the launch diagnoses
+# the missing arch).
+# CHECK:  INSTALLED: 'sm_90' True
+# CHECK:  SEAMS: True True cubin-chip
 # CHECK:  PASSES: ['gpu-lower-to-nvvm-pipeline{cubin-chip=sm_90}']
 # CHECK:  PIPELINE: builtin.module(gpu-lower-to-nvvm-pipeline{cubin-chip=sm_90},convert-scf-to-cf,convert-cf-to-llvm,convert-vector-to-llvm,convert-arith-to-llvm,convert-math-to-llvm,convert-func-to-llvm,reconcile-unrealized-casts)
-# NOARCH: INSTALLED: {{None|''}} True True
-# NOARCH: SEAMS: True True
+# NOARCH: INSTALLED: {{None|''}} True
+# NOARCH: SEAMS: True True cubin-chip
 # NOARCH: PASSES: []
 # NOARCH: PIPELINE: builtin.module(convert-scf-to-cf,convert-cf-to-llvm,
 dsl.envar.arch = "sm_80"  # the arch is a property of the instance
-print("OVERRIDE:", plugin.pipeline_passes())
+print("OVERRIDE:", [p for p in dsl.pipeline() if p.startswith("gpu-")])
 del dsl.envar.arch
 # CHECK:  OVERRIDE: ['gpu-lower-to-nvvm-pipeline{cubin-chip=sm_80}']
 # NOARCH: OVERRIDE: ['gpu-lower-to-nvvm-pipeline{cubin-chip=sm_80}']
@@ -103,8 +115,8 @@ saved_arch = os.environ.get("MLIR_DSL_ARCH")
 os.environ["MLIR_DSL_ARCH"] = "gfx90a"
 
 
-class BadArchDSL(m.MlirDSL):
-    plugins = [g.GpuPlugin()]
+class BadArchDSL(m.MlirTestDSL):
+    plugins = replace(m.MlirTestDSL.plugins, decorators=[g.Kernels()])
 
 
 report(BadArchDSL)
@@ -156,7 +168,7 @@ def axpy_host(
 # CHECK-NOT:         index
 # CHECK-NOT:         gpu.thread_id
 # CHECK:           OK axpy_host
-# NOARCH:          error[CALL_PLUGIN_REQUIRED]:{{.*}} `@kernel` needs the `gpu` plugin, which is not installed on this DSL.
+# NOARCH:          error[gpu:CONFIG_UNSUPPORTED_ARCH]:{{.*}} The GPU architecture `<unset>` is not a CUDA target this DSL can compile for
 report(axpy_host, 512, 2.0, 0, 0)
 
 
@@ -238,7 +250,7 @@ def too_few(x: m.Pointer[m.Float32]):
 # CHECK:       OK grid_constant_host
 # CHECK:       error[TYPE_RETURN_MISMATCH]:{{.*}} This function returns a `Int32`, which a compiled function cannot return from a kernel.
 # CHECK:       suggestion:{{.*}}A kernel cannot return a value: write its results through a `Pointer` argument
-# CHECK:       error[CALL_SIGNATURE_MISMATCH]:{{.*}} This call passes 1 positional and 0 keyword arguments, which does not match the number of runtime parameters the function declares
+# CHECK:       error[CALL_ARGUMENTS]:{{.*}} The call to `{{.*}}` does not match its parameters: 1 positional and 0 keyword argument(s) do not bind
 report(grid_constant_host, 0, 1)
 report(return_host, 0)
 report(too_few, 0)
@@ -275,13 +287,16 @@ def deferred(x: m.Pointer[m.Float32], n: m.Int32):
 # CHECK:           gpu.launch_func @kernels::@kernel_fill_2
 # CHECK:       OK deferred
 report(deferred, 0, 2)
+# The kernel records live on the plugin and describe the last trace (reset
+# when the next trace starts).
+kernels = m.MlirTestDSL().plugins.named("gpu")
 print(
-    "RESET:",
-    m.MlirDSL().num_kernels,
-    m.MlirDSL().launch_inner_count,
-    list(m.MlirDSL().kernel_info),
+    "LAST TRACE:", kernels.num_kernels, kernels.launch_count, list(kernels.kernel_info)
 )
-# CHECK: RESET: 0 0 []
+# Without an arch every launch stops at the arch check after its kernel was
+# built, so the last trace counts one kernel and no launch.
+# CHECK:  LAST TRACE: 3 3 ['kernel_fill_0', 'kernel_fill_1', 'kernel_fill_2']
+# NOARCH: LAST TRACE: 1 0 []
 
 
 @m.jit
@@ -401,8 +416,8 @@ print("KINDS:", m.Pointer(0x1000).kind, device_ptr.kind, m.Pointer(device_ptr).k
 # CHECK:      suggestion:{{.*}}Allocate `x` on the device with your framework and pass that tensor.
 # CHECK:      OK launches
 # CHECK:      OK launches
-# CHECK:      error[ARG_DEVICE_BUFFER_ON_HOST]:{{.*}} Argument `x` is a device buffer, but `host_only` runs on the host: its trace launched no kernel.
-# CHECK:      suggestion:{{.*}}This function runs on the host: pass a host buffer, e.g. `t.cpu()`.
+# CHECK:      error[ARG_BUFFER_INVALID]:{{.*}} Argument `x` cannot be used as a `Pointer` argument: it is a device buffer, but `host_only` runs on the host (its trace launched no kernel).
+# CHECK:      suggestion:{{.*}}Pass one contiguous block of memory on the device the function runs on
 # CHECK:      OK host_only
 report(launches, host_array)
 report(launches, device_ptr)
@@ -428,10 +443,10 @@ report(m.grid_dim)
 
 
 # =============================================================================
-# A DSL without the plugin, one with it but no arch, and a sub-DSL's helper
+# A DSL without the plugin, one with it but no arch, and a sub-DSL's kernel entry
 # =============================================================================
-class CpuDSL(m.MlirDSL):
-    plugins = []
+class CpuDSL(m.MlirTestDSL):
+    plugins = replace(m.MlirTestDSL.plugins, decorators=())  # no kernels plugin
 
 
 @CpuDSL.kernel
@@ -444,9 +459,9 @@ def cpu_host(x: m.Pointer[m.Float32]):
     cpu_kernel(x).launch()
 
 
-# CHECK:  error[CALL_PLUGIN_REQUIRED]:{{.*}} `@kernel` needs the `gpu` plugin, which is not installed on this DSL.
-# CHECK:  suggestion:{{.*}}Install the gpu plugin: `class MyDSL(MlirDSL): plugins = MlirDSL.plugins +
-# NOARCH: error[CALL_PLUGIN_REQUIRED]:{{.*}} `@kernel` needs the `gpu` plugin
+# CHECK:  error[CALL_PLUGIN_REQUIRED]:{{.*}} `@kernel` needs the `Kernels` plugin, which this DSL does not name.
+# CHECK:  suggestion:{{.*}}Name it: `plugins = Plugins(..., decorators=[Kernels()])`.
+# NOARCH: error[CALL_PLUGIN_REQUIRED]:{{.*}} `@kernel` needs the `Kernels` plugin
 report(cpu_host, 0)
 
 
@@ -466,21 +481,17 @@ def explicit_host(x: m.Pointer[m.Float32]):
 report(explicit_host, 0)
 
 
-class TaggedHelper(g.GpuKernelGenHelper):
-    """A sub-DSL's kernel generation helper: tags every kernel it emits."""
+class TaggedKernels(g.Kernels):
+    """A sub-DSL's kernels plugin: tags every kernel function it builds."""
 
-    def generate_func_op(self, arg_types, arg_attrs, kernel_name, loc=None):
-        fop = super().generate_func_op(arg_types, arg_attrs, kernel_name, loc)
+    def generate_func_op(self, name, arg_types, arg_attrs, loc=None):
+        fop, block = super().generate_func_op(name, arg_types, arg_attrs, loc)
         fop.attributes["tagged.by"] = ir.StringAttr.get("TaggedDSL")
-        return fop
+        return fop, block
 
 
-class TaggedDSL(m.MlirDSL):
-    plugins = [g.GpuPlugin()]
-
-    def __init__(self):
-        super().__init__()
-        self.kernel_gen_helper = TaggedHelper  # after the plugins installed
+class TaggedDSL(m.MlirTestDSL):
+    plugins = replace(m.MlirTestDSL.plugins, decorators=[TaggedKernels()])
 
 
 @TaggedDSL.kernel

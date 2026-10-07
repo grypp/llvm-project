@@ -2,24 +2,29 @@
 # RUN: rm -rf %t.cache && env MLIR_DSL_CACHE_DIR=%t.cache %PYTHON %s 2>&1 | FileCheck %s --check-prefix=EXEC
 # RUN: env MLIR_DSL_REMARKS=".*" %PYTHON %s 2>&1 | FileCheck %s --check-prefix=REMARKS
 # REQUIRES: host-supports-jit
-# BaseDSL (Design 5b, 6, 11b): the `@jit`/`@kernel` decorators and the
+# BaseDSL: the `@jit`/`@kernel` decorators and the
 # singleton DSL instance; Meta specialisation and `mangle_name`; the host
 # boundary (arguments restored in their Python shape, results packed into one
 # `!llvm.struct` and unpacked again); `m.compile`; the `func.func` host entry; the
-# `Plugin`/`DialectPlugin` protocol; the in-memory cache counters and
+# `Plugins` record and the `Plugin` hooks; the in-memory cache counters and
 # `collected_remarks`. Every error path is a DSL diagnostic. The EXEC line
 # starts from an empty file cache so the counters are deterministic; the third
 # RUN line turns the remark engine on for the `collected_remarks` checks.
 import dataclasses
+import gc
 import inspect
 import os
 
 import numpy as np
 
 import mlir.mlir_dsl as m
-from mlir import execution_engine, ir, passmanager
+from mlir import ir
+from mlir.dsl.plugins.compiler import execution_engine
+from mlir.dsl.plugins.func_entry import func
+from mlir.dsl.plugins.type_ops import arith, llvm, vector
+from mlir.dsl.plugins.type_ops import TypeOps
 
-dsl = m.MlirDSL()
+dsl = m.MlirTestDSL()
 
 
 def report(label, fn, *args, **kwargs):
@@ -53,7 +58,7 @@ def plus_two(n: m.Int32) -> m.Int32:
     return n + 2
 
 
-class OtherDSL(m.MlirDSL):
+class OtherDSL(m.MlirTestDSL):
     pass
 
 
@@ -68,15 +73,18 @@ class OtherDSL(m.MlirDSL):
 print("NESTED:", outer(2))
 code_before = plus_two.__wrapped__.__code__
 print("NO_PREPROCESS:", plus_two(1), plus_two.__wrapped__.__code__ is code_before)
-print("SINGLETON:", m.MlirDSL() is dsl, m.BaseDSL() is dsl, OtherDSL() is OtherDSL())
+print(
+    "SINGLETON:", m.MlirTestDSL() is dsl, m.BaseDSL() is dsl, OtherDSL() is OtherDSL()
+)
 # CHECK: NO_PREPROCESS: ? True
 # CHECK: SINGLETON: True True True
 # EXEC:  NO_PREPROCESS: 3 True
 
 
-# Only a plain Python function can be decorated; `@kernel` needs the gpu plugin.
-class CpuOnlyDSL(m.MlirDSL):
-    plugins = []
+# Only a plain Python function can be decorated; `@kernel` is inherited from
+# MlirTestDSL, but using it needs the kernels decorator plugin in the record.
+class CpuOnlyDSL(m.MlirTestDSL):
+    plugins = dataclasses.replace(m.MlirTestDSL.plugins, decorators=())
 
 
 @CpuOnlyDSL.kernel
@@ -88,11 +96,11 @@ report("NOT_FUNCTION", m.jit(), 3)
 print(str(report("CPU_KERNEL", cpu_kernel, 1)))
 # CHECK:      NOT_FUNCTION ERROR: CALL_NOT_CALLABLE
 # CHECK-NEXT: CPU_KERNEL ERROR: CALL_PLUGIN_REQUIRED
-# CHECK:      error[CALL_PLUGIN_REQUIRED]:{{.*}}`@kernel` needs the `gpu` plugin, which is not installed on this DSL.
-# CHECK:      suggestion:{{.*}}Install the gpu plugin: `class MyDSL(MlirDSL): plugins = MlirDSL.plugins +
+# CHECK:      error[CALL_PLUGIN_REQUIRED]:{{.*}}`@kernel` needs the `Kernels` plugin, which this DSL does not name.
+# CHECK:      suggestion:{{.*}}Name it: `plugins = Plugins(..., decorators=[Kernels()])`.
 
 
-# --- Meta specialisation and `mangle_name` (Design 6) -----------------------
+# --- Meta specialisation and `mangle_name` -----------------------
 # Only the Meta arguments are folded into the symbol (a Python value under no
 # DSL annotation, a default, a type by its name, a sequence element-wise); a
 # staged argument (annotated, a DSL value, a buffer) leaves the name alone;
@@ -106,7 +114,7 @@ def two(a, b: m.Int32):
     pass
 
 
-class PrefixedDSL(m.MlirDSL):
+class PrefixedDSL(m.MlirTestDSL):
     _name_mangling_prefix = "pfx"
 
 
@@ -150,14 +158,16 @@ def counters(label, before, *results):
 # CHECK-LABEL: func.func @unrolled_3_5() -> i32
 # EXEC:        SPECIALISED: 6 12 15 6 HITS: 1 MISSES: 3 CACHED: 3
 # EXEC-NEXT:   NO_CACHE: 6 HITS: 0 MISSES: 1 CACHED: 0
+gc.collect()
 before = (dsl.cache_hits, dsl.cache_misses, len(dsl.jit_cache))
 runs = unrolled(3), unrolled(4), unrolled(3, k=5), unrolled(3)
 counters("SPECIALISED:", before, *runs)
+gc.collect()
 before = (dsl.cache_hits, dsl.cache_misses, len(dsl.jit_cache))
 counters("NO_CACHE:", before, unrolled(3, no_cache=True))
 
 
-# --- the host boundary: arguments (Design 6) --------------------------------
+# --- the host boundary: arguments --------------------------------
 # The entry's block arguments reach the body in the shape of the Python
 # arguments: an annotated numeric is wrapped in its type (a Python value is
 # cast first), a tuple, a frozen dataclass and a `@struct` (one block argument
@@ -215,17 +225,21 @@ print(str(report("CAST", scaled, "two", 3)))
 
 # Staging is decided by the annotation alone, for every DSL built on BaseDSL:
 # an unannotated Python value is a Meta argument (there is no `Constexpr`
-# annotation and no per-DSL knob), so a bare `BaseDSL` behaves like `MlirDSL`.
+# annotation and no per-DSL knob), so a bare `BaseDSL` behaves like `MlirTestDSL`.
 class StrictDSL(m.BaseDSL):
-    plugins = []
-    _jit_arg_adapter_scope = "mlir"
+    plugins = m.Plugins(
+        type_ops=TypeOps(scalars=arith, vectors=vector, memory=llvm),
+        func_entry=func.Entry(),
+        compiler=execution_engine.Compiler(),
+    )
+
+    def pipeline(self):
+        return list(m.LOWER_TO_LLVM)
 
     def __init__(self):
         super().__init__(
             name="MLIR_DSL",
             dsl_package_name=["mlir", "dsl"],
-            compiler_provider=m.Compiler(passmanager, execution_engine),
-            pass_sm_arch_name="cubin-chip",
             preprocess=False,
         )
 
@@ -239,7 +253,7 @@ print(str(report("STRICT", strict, 4)))
 # CHECK: STRICT RESULT: 1
 
 
-# --- the host boundary: results (Design 6) ----------------------------------
+# --- the host boundary: results ----------------------------------
 # Several leaves (a tuple, a `@struct`, a nest of them) are packed into one
 # `!llvm.struct` (`llvm.mlir.undef` + `llvm.insertvalue`) and unpacked into the
 # same Python shape on the host, Meta slots restored verbatim; no return is a
@@ -289,16 +303,16 @@ print("NESTED:", repr(ret_nested(4)))
 print("VOID:", ret_void(1))
 print(str(report("NONE", ret_none_annotated, 1)))
 print(str(report("POINTER", ret_pointer, np.zeros(2, np.float32))))
-# CHECK: NONE ERROR: TYPE_RETURN_NONE
-# CHECK: error[TYPE_RETURN_NONE]:{{.*}}This function declares a return type, but its body returned `None`
-# CHECK: suggestion:{{.*}}Add `return <value>` with a value of the declared type on every path.
+# CHECK: NONE ERROR: TYPE_RETURN_MISMATCH
+# CHECK: error[TYPE_RETURN_MISMATCH]:{{.*}}This function returns `None`, which a compiled function cannot return while it declares a return type
+# CHECK: suggestion:{{.*}}If the function returns nothing, remove its return type annotation.
 # CHECK: POINTER ERROR: TYPE_RETURN_MISMATCH
 # CHECK: error[TYPE_RETURN_MISMATCH]:{{.*}}This function returns a `Pointer`, which a compiled function cannot return (a `Pointer` result is memory: write through the pointer instead).
-# EXEC: NONE ERROR: TYPE_RETURN_NONE
+# EXEC: NONE ERROR: TYPE_RETURN_MISMATCH
 # EXEC: POINTER ERROR: TYPE_RETURN_MISMATCH
 
 
-# --- `m.compile` (Design 5b) ------------------------------------------------
+# --- `m.compile` ------------------------------------------------
 # Compiles for representative arguments without running and returns the
 # compiled function: callable with matching arguments (positional or keyword),
 # a Meta argument baked in, the in-memory cache left alone; the compiled
@@ -325,6 +339,9 @@ def scaled(s: Scaled) -> m.Int32:
 
 
 if not dsl.envar.dryrun:
+    # Entries die with their Python function; collect first so an unrelated
+    # finalizer cannot run inside the window this section measures.
+    gc.collect()
     entries = len(dsl.jit_cache)
     fn = m.compile(twice, 5)
     three = m.compile(unrolled, 3)
@@ -343,8 +360,8 @@ if not dsl.envar.dryrun:
     report("SHAPE_TUPLE", by_three, (5, 3))
 # EXEC:      COMPILE: JitCompiledFunction twice 10 16
 # EXEC-NEXT: COMPILE_META: unrolled_3_2 6 0
-# EXEC-NEXT: TOO_MANY ERROR: CALL_TOO_MANY_ARGS
-# EXEC-NEXT: MISSING ERROR: CALL_MISSING_ARG
+# EXEC-NEXT: TOO_MANY ERROR: CALL_ARGUMENTS
+# EXEC-NEXT: MISSING ERROR: CALL_ARGUMENTS
 # EXEC-NEXT: MISMATCH ERROR: ARG_ANNOTATION_MISMATCH
 # EXEC-NEXT: PLAIN ERROR: CALL_MISSING_JIT_DECORATOR
 # EXEC:      error[CALL_MISSING_JIT_DECORATOR]:{{.*}}The function passed to `compile()` is a plain Python function
@@ -354,8 +371,8 @@ if not dsl.envar.dryrun:
 # EXEC-NEXT: SHAPE_TUPLE ERROR: ARG_ANNOTATION_MISMATCH
 
 
-# --- the host entry (Design 11b.1) ------------------------------------------
-# The host entry is DkgDSL's `func.func` with `llvm.emit_c_interface`;
+# --- the host entry ------------------------------------------
+# The host entry is `func.Entry`'s `func.func` with `llvm.emit_c_interface`;
 # `convert-func-to-llvm` lowers it right after the `cf` lowering (`core_only.py`
 # prints the pass list) and the packed `_mlir_<name>` wrapper calls it.
 @m.jit
@@ -374,11 +391,13 @@ def cumsum_func(n: m.Int32) -> m.Int32:
 # EXEC:          FUNC_ENTRY: 45
 print("FUNC_ENTRY:", cumsum_func(10))
 
-# --- the `Plugin`/`DialectPlugin` protocol (Design 2c row 13, 11b.6) ---------
+# --- the `Plugin` protocol ---------------------------
 # `install` binds a per-instance copy (the class-level instance stays
-# unbound); a `DialectPlugin`'s `pipeline_passes` lead the pass list (a plain
-# `Plugin` is never asked for passes or dialects); `attach_to_module` edits the
-# traced module before it is hashed; `wrap_compiled_function` replaces the
+# unbound); the sub-DSL owns the pipeline (`pipeline()`) and names its
+# plugins in the `Plugins` record (an add-on is a decorator or adapter plugin);
+# `attach_to_module` edits the
+# traced module before it is hashed; `after_lowering` sees the lowered module
+# before the engine is built; `wrap_compiled_function` replaces the
 # compiled function, and a replacement that `prefers_python_args` is called
 # with the Python arguments, also on a cache hit and from `compile()`. The
 # engine's libraries (`<PREFIX>_LIBS`, the plugins' `shared_libs()`, the call's
@@ -400,29 +419,41 @@ class PythonArgsWrapper:
         return self.inner(*args, **kwargs)
 
 
-class Recorder(m.DialectPlugin):
+class Recorder(m.AdapterPlugin):
     name = "recorder"
-
-    def pipeline_passes(self):
-        return ["canonicalize", "cse"]
 
     def attach_to_module(self, dsl, module, function_name, sig, args, kwargs):
         calls.append(("attach", function_name, list(sig.parameters)))
         module.operation.attributes["recorder.entry"] = ir.StringAttr.get(function_name)
+
+    def after_lowering(self, dsl, module):
+        ops = sorted({op.operation.name for op in module.body.operations})
+        calls.append(("lowered", ops))
 
     def wrap_compiled_function(self, dsl, jit_function):
         calls.append(("wrap", type(jit_function).__name__))
         return PythonArgsWrapper(jit_function)
 
 
-class PluggedDSL(m.MlirDSL):
-    plugins = m.MlirDSL.plugins + [Recorder()]
+class PluggedDSL(m.MlirTestDSL):
+    plugins = dataclasses.replace(
+        m.MlirTestDSL.plugins,
+        adapters=[*m.MlirTestDSL.plugins.adapters, Recorder()],
+    )
+
+    def pipeline(self):
+        return ["canonicalize", "cse", *super().pipeline()]
 
 
 plugged = PluggedDSL()
-recorder = plugged._plugin_named("recorder")
-bound = (recorder is not PluggedDSL.plugins[-1], recorder.dsl is plugged)
-print("INSTALLED:", *bound, PluggedDSL.plugins[-1].dsl, plugged.plugins[-1].name)
+recorder = plugged.plugins.named("recorder")
+bound = (recorder is not PluggedDSL.plugins.adapters[-1], recorder.dsl is plugged)
+print(
+    "INSTALLED:",
+    *bound,
+    PluggedDSL.plugins.adapters[-1].dsl,
+    plugged.plugins.adapters[-1].name,
+)
 print("PIPELINE:", plugged._get_pipeline(None))
 here = os.path.realpath(__file__)
 extra = dsl.get_shared_libs((__file__, here, os.path.relpath(__file__)))
@@ -446,7 +477,7 @@ def plugged_twice(n: m.Int32) -> m.Int32:
 # CHECK-LABEL: func.func @plugged_twice(
 # CHECK:         HOOKS: ? [('attach', 'plugged_twice', ['n'])]
 # EXEC:          WRAPPER_CALL: (21,) {}
-# EXEC-NEXT:     HOOKS: 42 [('attach', 'plugged_twice', ['n']), ('wrap', 'JitCompiledFunction')]
+# EXEC-NEXT:     HOOKS: 42 [('attach', 'plugged_twice', ['n']), ('lowered', ['llvm.func']), ('wrap', 'JitCompiledFunction')]
 print("HOOKS:", plugged_twice(21), calls)
 del calls[:]
 # EXEC:      WRAPPER_CALL: (4,) {}
@@ -459,7 +490,7 @@ if not dsl.envar.dryrun:
     print("COMPILED:", type(compiled).__name__, compiled(2))
 
 
-# --- `collected_remarks` (Design 8b) ----------------------------------------
+# --- `collected_remarks` ----------------------------------------
 # Every compile replaces the list with that compile's records (it does not
 # accumulate); a cached call re-traces, so a trace-time remark is collected
 # again; without `<PREFIX>_REMARKS` nothing is collected. `remarks.py` covers
@@ -502,12 +533,13 @@ print("KEYS:", sorted(dsl.collected_remarks[0]) if dsl.collected_remarks else "n
 # --- `LaunchConfig` and the public surface ----------------------------------
 # Dimensions are padded with 1s to three entries, a tuple becomes a list, the
 # cluster is kept only when given. Every name in `__all__` is importable and
-# unique; the decorators are `MlirDSL`'s.
+# unique; the decorators are `MlirTestDSL`'s and `LaunchConfig` is the kernels
+# plugin's.
 print("LAUNCH:", m.LaunchConfig(grid=4, block=(8, 8), cluster=(1, 2, 3), smem=1024))
 names = list(m.__all__)
 missing = [n for n in names if not hasattr(m, n)]
 unique = len(names) == len(set(names))
-print(f"API: {unique} {missing} {m.jit == m.MlirDSL.jit}", end=" ")
-print(m.LaunchConfig is m.BaseDSL.LaunchConfig)
+print(f"API: {unique} {missing} {m.jit == m.MlirTestDSL.jit}", end=" ")
+print(m.LaunchConfig.__module__ == "mlir.dsl.plugins.decorators.kernels.launch")
 # CHECK:      LAUNCH: LaunchConfig(cluster=[1, 2, 3], grid=[4, 1, 1], block=[8, 8, 1], smem=1024, async_deps=[])
 # CHECK-NEXT: API: True [] True True

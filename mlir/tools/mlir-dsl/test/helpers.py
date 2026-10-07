@@ -3,16 +3,16 @@
 # RUN: env MLIR_DSL_DRYRUN=1 MLIR_DSL_DEBUG=1 %PYTHON %s %t 2>&1 | FileCheck %s --check-prefix=DEBUG
 # RUN: %PYTHON %s %t 2>&1 | FileCheck %s --check-prefix=EXEC
 # REQUIRES: host-supports-jit
-# The DSL-owned helper layers (Design 4, 5, 8, 9, 10): the `dialects/arith`
+# The DSL-owned helper layers: the `plugins/type_ops/arith`
 # emitter's choice of op by signedness and float-ness (the `signed=` keyword,
 # MLIR integers being signless), its literal rules and its conversion helpers
-# (`cvtf`, `fptoi`/`itofp`, `int_to_int`, `cast`, `bitcast`); the math helper's
-# integer rejection; `dsl_user_op` locations under MLIR_DSL_DEBUGINFO (one
+# (`cvtf`, `fptoi`/`itofp`, `int_to_int`, `cast`, `bitcast`) and `arith.pow`'s
+# rejection of a staged int ** int; `dsl_user_op` locations under MLIR_DSL_DEBUGINFO (one
 # `NameLoc(FileLineColLoc)` per op at the first user frame; the MLIR_DSL_DEBUG
 # master switch keeps the closest frame and verifies at trace time),
-# `loc_transform` and trace-time verification; the `tree_utils` leaf registry,
+# MLIR's traceback locations and trace-time verification; the `tree_utils` leaf registry,
 # frozen-dataclass flattening, its rejections and the join type-stability rule;
-# `is_dynamic_expression`; the `phase_profiler` report modes (`%t` is the
+# `is_mlir_op`; the `profiler` report modes (`%t` is the
 # report file). The lowering of the emitted ops is MLIR's and is not checked.
 import contextlib
 import dataclasses
@@ -23,11 +23,11 @@ from typing import NamedTuple
 import mlir.mlir_dsl as m
 from mlir import ir
 from mlir.dialects import llvm, scf
-from mlir.dsl import is_dynamic_expression as dyn
-from mlir.dsl.plugins.dialects.llvm import arith as A
-from mlir.dsl.plugins.dialects.llvm import math as dsl_math
-from mlir.dsl.core.user_op import dsl_user_op, loc_transform
-from mlir.dsl.util import phase_profiler
+from mlir.dsl import is_mlir_op as dyn
+from mlir.dsl.plugins.type_ops import arith as A
+from mlir.dsl.core.user_op import dsl_user_op
+from mlir.dsl.core.common import active_dsl
+from mlir.dsl.util import profiler
 from mlir.dsl.util import tree_utils as tu
 from mlir.extras import types as T
 
@@ -37,7 +37,9 @@ def function(name, arg_types, result_type):
     fty = llvm.FunctionType.get(result_type, arg_types)
     fn = llvm.LLVMFuncOp(name, ir.TypeAttr.get(fty))
     block = fn.body.blocks.append(*arg_types)
-    with ir.InsertionPoint(block):
+    # The types ask the tracing DSL's `type_ops` plugin for their MLIR types
+    # and ops, so the hand-built body runs with the test DSL active.
+    with ir.InsertionPoint(block), active_dsl(m.MlirTestDSL()):
         yield block.arguments
         llvm.ReturnOp(arg=block.arguments[0])
     print(fn)
@@ -84,7 +86,7 @@ with ir.Context(), ir.Location.unknown():
 
         with function("signed", [i32, i32], i32) as (a, b):
             A.add(a, b), A.floordiv(a, b), A.mod(a, b), A.shr(a, b)
-            A.cmp("lt", a, b), A._minmax(a, b, is_min=True), A.truediv(a, b)
+            A.cmp("lt", a, b), A.minmax(a, b, is_min=True), A.truediv(a, b)
             A.neg(a), A.abs(a)
             report(A.pow, a, b)  # staged int ** int has no arith op
         # CHECK:       ERROR: TYPE_INT_POW_UNSUPPORTED
@@ -106,7 +108,7 @@ with ir.Context(), ir.Location.unknown():
         with function("unsigned", [i32, i32], i32) as (a, b):
             A.floordiv(a, b, signed=False), A.mod(a, b, signed=False)
             A.shr(a, b, signed=False), A.cmp("lt", a, b, signed=False)
-            A._minmax(a, b, is_min=False, signed=False)
+            A.minmax(a, b, is_min=False, signed=False)
             A.truediv(a, b, signed=False)
         # CHECK-LABEL: llvm.func @unsigned(
         # CHECK-SAME:    %[[A:[^:]+]]: i32, %[[B:[^:]+]]: i32)
@@ -121,7 +123,7 @@ with ir.Context(), ir.Location.unknown():
         with function("floating", [f32, f32, i32], f32) as (x, y, a):
             A.add(x, y), A.floordiv(x, y), A.mod(x, y), A.neg(x), A.abs(x)
             A.cmp("lt", x, y), A.cmp("ne", x, y)  # ordered, but `!=` unordered
-            A._minmax(x, y, is_min=True), A.pow(x, y), A.pow(x, a), A.pow(a, x)
+            A.minmax(x, y, is_min=True), A.pow(x, y), A.pow(x, a), A.pow(a, x)
         # CHECK-LABEL: llvm.func @floating(
         # CHECK-SAME:    %[[X:[^:]+]]: f32, %[[Y:[^:]+]]: f32, %[[A:[^:]+]]: i32)
         # CHECK:         arith.addf %[[X]], %[[Y]] : f32
@@ -173,7 +175,7 @@ with ir.Context(), ir.Location.unknown():
         # CHECK-NEXT:    arith.constant dense<1.500000e+00> : vector<4xf32>
         # CHECK-NEXT:    arith.constant dense<-1> : vector<2xi16>
 
-        # The re-encoding itself, and `_minmax` folding two Python scalars.
+        # The re-encoding itself, and `minmax` folding two Python scalars.
         enc = A._python_int_for_integer_attr
         print(
             "ENCODE:",
@@ -184,18 +186,18 @@ with ir.Context(), ir.Location.unknown():
         report(enc, 256, 8, signed=False)
         report(enc, 128, 8, signed=True)
         report(enc, 0, 0, signed=True)
-        print("FOLD:", A._minmax(2, 3, is_min=True), A._minmax(2.5, -1.0, is_min=False))
+        print("FOLD:", A.minmax(2, 3, is_min=True), A.minmax(2.5, -1.0, is_min=False))
         # CHECK:      ENCODE: -1 -128 -1
         # CHECK-NEXT: INTERNAL: Unsigned integer literal 256 does not fit in unsigned i8
         # CHECK-NEXT: INTERNAL: Signed integer literal 128 does not fit in i8
         # CHECK-NEXT: INTERNAL: Invalid integer width: 0
         # CHECK-NEXT: FOLD: 2 2.5
 
-        # `_minmax` with one Python scalar materializes it in the other's type;
+        # `minmax` with one Python scalar materializes it in the other's type;
         # `cmp` takes the `operator` function as the predicate name and equality
         # has no signedness; `select` is `arith.select`.
         with function("compare", [i32, f32, i1], i32) as (a, x, c):
-            A._minmax(a, 3, is_min=True), A._minmax(2.5, x, is_min=False)
+            A.minmax(a, 3, is_min=True), A.minmax(2.5, x, is_min=False)
             A.cmp(operator.le, a, a), A.cmp("eq", a, a, signed=False)
             A.cmp(operator.eq, x, x), A.select(c, a, a), A.select(c, x, x)
         # CHECK-LABEL: llvm.func @compare(
@@ -288,132 +290,59 @@ with ir.Context(), ir.Location.unknown():
 
 
 # =============================================================================
-# The math helper: float-only functions, `abs` by type, literal promotion
+# dsl_user_op: source locations (MLIR's traceback locations), verification
 # =============================================================================
-@m.jit
-def math_rules(x: m.Float32, a: m.Int32) -> m.Float32:
-    return dsl_math.sqrt(16.0) + m.Float32(dsl_math.abs(a)) + dsl_math.floor(x)
-
-
-# CHECK-LABEL: func.func @math_rules(
-# CHECK-SAME:    %[[X:[^:]+]]: f32, %[[A:[^:]+]]: i32) -> f32
-# CHECK:         %[[C16:.+]] = arith.constant 1.600000e+01 : f32
-# CHECK-NEXT:    math.sqrt %[[C16]] : f32
-# CHECK:         math.absi %[[A]] : i32
-# CHECK:         math.floor %[[X]] : f32
-# EXEC:          RESULT: 9.0
-report(math_rules, 2.5, -3)  # 4 + 3 + 2
-
-
-@m.jit
-def sin_of_int(a: m.Int32) -> m.Int32:
-    return dsl_math.sin(a)
-
-
-@m.jit
-def sqrt_of_str(a: m.Int32) -> m.Int32:
-    return dsl_math.sqrt("four")
-
-
-# CHECK:      ERROR: ARG_ANNOTATION_MISMATCH
-# CHECK-NEXT: ERROR: ARG_NOT_NUMERIC
-# CHECK-NEXT: ERROR: CALL_OUTSIDE_JIT
-report(sin_of_int, 1)
-report(sqrt_of_str, 1)
-report(dsl_math.sin, 1.0)  # no trace, no context: a user error, not a crash
-
-
-# =============================================================================
-# dsl_user_op: user-site locations, loc_transform, trace-time verification
-# =============================================================================
-# A helper in a module of the DSL package: its frames are skipped by the walk.
-LIB_SRC = "def lib_sqrt(x):\n    return dsl_math.sqrt(x)\n"
-lib_namespace = {"__name__": "mlir.dsl._test_lib", "dsl_math": dsl_math}
+# Locations come from MLIR's traceback locations, which `BaseDSL` turns on
+# under DEBUGINFO (depth 1): an op carries the user line and column range that
+# built it; the frames of the DSL packages, the bindings and the standard
+# library are skipped, and DEBUG keeps the DSL frames instead so an op is
+# attributed to the DSL line that built it. An explicit `loc=` always wins.
+# A helper in a module of a DSL package: its frames are skipped by the walk.
+# (The exec'd module has no file on disk, so the test registers its pseudo
+# filename the way a package directory is registered.)
+LIB_SRC = "def lib_twice(x):\n    return x + x\n"
+lib_namespace = {"__name__": "mlir.dsl._test_lib"}
 exec(compile(LIB_SRC, "<dsl-lib>", "exec"), lib_namespace)
-lib_sqrt = lib_namespace["lib_sqrt"]
-
-
-def wrap(name):
-    def transform(loc):
-        return ir.Location.name(name, childLoc=loc) if loc else ir.Location.name(name)
-
-    return transform
+lib_twice = lib_namespace["lib_twice"]
+ir._globals.register_traceback_file_exclusion("<dsl-lib>")
 
 
 @m.jit(preprocess=False)
 def located(a: m.Int32, x: m.Float32) -> m.Float32:
     b = a + 1
     print("LOC addi:", b.value.owner.location)
-    # DEBUGINFO: LOC addi: loc("b = a + 1"("{{.*}}helpers.py":[[#@LINE-2]]:8))
-    # DEBUG:     LOC addi: loc("b = a + 1"("{{.*}}helpers.py":[[#@LINE-3]]:8))
+    # DEBUGINFO: LOC addi: loc("located"("{{.*}}helpers.py":[[#@LINE-2]]:8 to :13))
+    # DEBUG:     LOC addi: loc("{{.*}}"("{{.*}}/mlir/dsl/{{.*}}.py":{{.*}}))
     # CHECK:     LOC addi: loc(unknown)
-    r = lib_sqrt(x)
-    print("LOC sqrt:", r.value.owner.location)
-    # The op was built inside the package: the user line is its caller, except
-    # under MLIR_DSL_DEBUG=1, which names the library frame (the function name
-    # stands in for the source text of the exec'd module).
-    # DEBUGINFO: LOC sqrt: loc("r = lib_sqrt(x)"("{{.*}}helpers.py":[[#@LINE-5]]:8))
-    # DEBUG:     LOC sqrt: loc("lib_sqrt"("<dsl-lib>":2:11))
-    # CHECK:     LOC sqrt: loc(unknown)
+    r = lib_twice(x)
+    print("LOC lib:", r.value.owner.location)
+    # The op was built through a helper in a DSL package: the user line is
+    # its caller, except under MLIR_DSL_DEBUG=1, which names the DSL line
+    # that built the op (the scalar type ops).
+    # DEBUGINFO: LOC lib: loc("located"("{{.*}}helpers.py":[[#@LINE-5]]:8 to :20))
+    # DEBUG:     LOC lib: loc("{{.*}}"("{{.*}}/mlir/dsl/{{.*}}.py":{{.*}}))
+    # CHECK:     LOC lib: loc(unknown)
     y = a + x
     print("LOC promoted:", y.value.owner.operands[0].owner.location)
-    # Defect (types/typing.py, `_binary_op`): the `sitofp` that operand
-    # promotion emits is built without the `loc` the operator's wrapper
-    # computed, so it carries the function's location (`<module>` at the
-    # decorator line) instead of the user line's `NameLoc(FileLineColLoc)`
-    # that the `addf` next to it gets. Pinned here until fixed.
-    # DEBUGINFO: LOC promoted: loc("<module>"("{{.*}}helpers.py":{{[0-9]+}}:0))
-    # DEBUG:     LOC promoted: loc("<module>"("{{.*}}helpers.py":{{[0-9]+}}:0))
+    # The `sitofp` that operand promotion emits inside the DSL gets the user
+    # line too: every op built during the statement does, whichever DSL frame
+    # builds it.
+    # DEBUGINFO: LOC promoted: loc("located"("{{.*}}helpers.py":[[#@LINE-5]]:8 to :13))
+    # DEBUG:     LOC promoted: loc("{{.*}}"("{{.*}}/mlir/dsl/{{.*}}.py":{{.*}}))
     # CHECK:     LOC promoted: loc(unknown)
-    with loc_transform(wrap("outer")):
-        with loc_transform(wrap("inner")):
-            c = b * 2
-            print("LOC nested:", c.value.owner.location)
-            # The innermost transform runs first, so `outer` wraps `inner`.
-            # DEBUGINFO: LOC nested: loc("outer"("inner"("c = b * 2"("{{.*}}helpers.py":[[#@LINE-3]]:16))))
-            # CHECK:     LOC nested: loc("outer"("inner"))
-    d = c - 1
-    print("LOC after:", d.value.owner.location)
-    # DEBUGINFO: LOC after: loc("d = c - 1"("{{.*}}helpers.py":[[#@LINE-2]]:8))
-    # CHECK:     LOC after: loc(unknown)
-    return m.Float32(d) + r
+    c = b.__add__(1, loc=ir.Location.name("given"))  # a caller's `loc=` wins
+    print("LOC explicit:", c.value.owner.location)
+    # DEBUGINFO: LOC explicit: loc("given")
+    # DEBUG:     LOC explicit: loc("given")
+    # CHECK:     LOC explicit: loc("given")
+    return m.Float32(c) + r
 
 
 report(located, 1, 4.0)
 # DEBUGINFO: RESULT: ?
 # DEBUG:     RESULT: ?
 # CHECK:     RESULT: ?
-# EXEC:      RESULT: 5.0
-
-
-@m.jit(preprocess=False)
-def transformed(a: m.Int32) -> m.Int32:
-    try:
-        with loc_transform(wrap("scope")):
-            raise KeyError("body failed")
-    except KeyError:
-        pass
-    # The transform stack is restored after the body raised.
-    b = a + 1
-    print("LOC restored:", b.value.owner.location)
-    # DEBUGINFO: LOC restored: loc("b = a + 1"("{{.*}}helpers.py":[[#@LINE-2]]:8))
-    # CHECK:     LOC restored: loc(unknown)
-    with loc_transform(wrap("scope")):
-        c = b.__add__(1, loc=ir.Location.name("given"))  # a caller's `loc=` too
-    print("LOC explicit:", c.value.owner.location)
-    # DEBUGINFO: LOC explicit: loc("scope"("given"))
-    # CHECK:     LOC explicit: loc("scope"("given"))
-    return c
-
-
-report(transformed, 1)
-try:
-    with loc_transform("not callable"):
-        pass
-except m.DSLRuntimeError as e:
-    print("INTERNAL:", e.message)
-# CHECK:      RESULT: ?
-# CHECK-NEXT: INTERNAL: loc_transform(transform): transform must be callable
+# EXEC:      RESULT: 11.0
 
 
 @dsl_user_op
@@ -715,7 +644,7 @@ with ir.Context(), ir.Location.unknown():
             cyclic = [n]
             cyclic.append(cyclic)
             expect("cycle", lambda: tu.tree_flatten((n, cyclic)))
-            # CHECK-NEXT: not frozen: CONTAINER_DATACLASS_NOT_FROZEN
+            # CHECK-NEXT: not frozen: CONTAINER_INVALID_RECORD
             # CHECK-NEXT: meta-only not frozen: no error, 0 values
             # CHECK-NEXT: list: no error, 2 values
             # CHECK-NEXT: dict: CONTAINER_UNSUPPORTED
@@ -723,7 +652,7 @@ with ir.Context(), ir.Location.unknown():
             # CHECK-NEXT: tuple subclass: CONTAINER_UNSUPPORTED
             # CHECK-NEXT: meta list: no error, 1 values
             # CHECK-NEXT: leaf twice: no error, 3 values
-            # CHECK-NEXT: cycle: CONTAINER_CYCLE
+            # CHECK-NEXT: cycle: CONTAINER_TOO_DEEP
 
             # A record is carried field by field: a field without a value
             # (`init=False`, never assigned) and an instance attribute holding
@@ -751,8 +680,8 @@ with ir.Context(), ir.Location.unknown():
                 tu.tree_unflatten(pair_def, [a])
             except m.DSLRuntimeError:
                 print("unflatten count: DSLRuntimeError")
-            # CHECK-NEXT: field unset: CONTAINER_FIELD_UNSET
-            # CHECK-NEXT: extra leaf: CONTAINER_EXTRA_ATTRIBUTE
+            # CHECK-NEXT: field unset: CONTAINER_INVALID_RECORD
+            # CHECK-NEXT: extra leaf: CONTAINER_INVALID_RECORD
             # CHECK-NEXT: extra meta: 1 hello True
             # CHECK-NEXT: too deep: CONTAINER_TOO_DEEP
             # CHECK-NEXT: too deep (host): CONTAINER_TOO_DEEP
@@ -782,11 +711,11 @@ with ir.Context(), ir.Location.unknown():
             # CHECK-NEXT: vector signedness: 0 '`state[0]` changed from `Vector[Int32, 4]` (type `vector<4xi32>`) to `Vector[Uint32, 4]` (type `vector<4xi32>`)'
             # CHECK-NEXT: vector dtype: 0 '`state[0]` changed from `Vector[Float32, 4]` (type `vector<4xf32>`) to `Vector[Int32, 4]` (type `vector<4xi32>`)'
 
-            # `is_dynamic_expression`, the executors' staged-value test: true
-            # for a raw SSA value or block-argument list, a leaf whose payload
-            # is an SSA value and a tuple or list holding one anywhere; false
-            # for Python values, host-side leaves and the containers it does
-            # not walk (dicts, records).
+            # `is_mlir_op` tells an MLIR op from a Python value: true for a
+            # raw SSA value or block-argument list, a leaf whose payload is an
+            # SSA value and a tuple, list or frozen record holding one
+            # anywhere; false for Python values, host-side leaves and the
+            # containers it does not walk (dicts).
             host = (m.Int32(1), m.Pointer(0x1000), State(n, 2, 4), {"k": n}, [[]])
             print(
                 "DYNAMIC:",
@@ -799,23 +728,23 @@ with ir.Context(), ir.Location.unknown():
             )
             print("DYNAMIC containers:", dyn((1, [n])), *[dyn(h) for h in host])
             # CHECK-NEXT: DYNAMIC: True True True True True True
-            # CHECK-NEXT: DYNAMIC containers: True False False False False False
+            # CHECK-NEXT: DYNAMIC containers: True False False True False False
 
 
 # =============================================================================
-# phase_profiler: the default, deep and file report modes
+# profiler: the default, deep and file report modes
 # =============================================================================
 def profiled_compile():
-    phase_profiler.begin_compile()
-    phase_profiler.profile_build(lambda: sum(range(1000)))()
-    phase_profiler.begin_mlir_phase()
-    phase_profiler.end_mlir_phase()
-    phase_profiler.finish_compile()
+    profiler.begin_compile()
+    profiler.profile_build(lambda: sum(range(1000)))()
+    profiler.begin_mlir_phase()
+    profiler.end_mlir_phase()
+    profiler.finish_compile()
 
 
 # The reports go to stderr as the phases end: keep stdout in step with them.
 sys.stdout.flush()
-phase_profiler.configure("T_PROFILE_COMPILER", "1")
+profiler.configure("T_PROFILE_COMPILER", "1")
 profiled_compile()
 # The tracing section is emitted as soon as the build phase ends, the mlir
 # section at the end of the compile; both name the variable.
@@ -825,7 +754,7 @@ profiled_compile()
 # CHECK:      DSL compile profile — mlir  (T_PROFILE_COMPILER)
 # CHECK:      mlir      : {{ *[0-9.]+}} ms   (pass pipeline)
 # CHECK-NOT:  per-pass
-phase_profiler.configure("T_PROFILE_COMPILER", "deep")
+profiler.configure("T_PROFILE_COMPILER", "deep")
 profiled_compile()
 # CHECK:      DSL compile profile — tracing
 # CHECK:      (deep mode: cProfile active — times inflated vs default mode)
@@ -834,14 +763,14 @@ profiled_compile()
 # CHECK:      mlir      : {{ *[0-9.]+}} ms   (pass pipeline; single-threaded for timing)
 # CHECK:      (no MLIR per-pass report captured — pass pipeline did not run,
 report_path = sys.argv[1]
-phase_profiler.configure("T_PROFILE_COMPILER", report_path)
+profiler.configure("T_PROFILE_COMPILER", report_path)
 profiled_compile()
 with open(report_path, encoding="utf-8") as f:
     found = [line.strip() for line in f if "compile profile" in line]
     print("FILE:", found, flush=True)
 # CHECK:      [T_PROFILE_COMPILER] compile profile written to {{.*}}
 # CHECK:      FILE: ['DSL compile profile — tracing  (T_PROFILE_COMPILER)', 'DSL compile profile — mlir  (T_PROFILE_COMPILER)']
-phase_profiler.configure("T_PROFILE_COMPILER", "off")
+profiler.configure("T_PROFILE_COMPILER", "off")
 profiled_compile()
-print("OFF:", phase_profiler.enabled(), phase_profiler.deep(), flush=True)
+print("OFF:", profiler.enabled(), profiler.deep(), flush=True)
 # CHECK-NEXT: OFF: False False

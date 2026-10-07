@@ -4,14 +4,17 @@
 
 """GPU kernels: `@m.kernel` bodies launched from a `@m.jit` host over CUDA tensors.
 
+`@m.kernel` is not the core's: it is the decorator of the gpu kernels plugin
+(`plugins/decorators/kernels/gpu/`, listed in `MlirTestDSL`'s `decorators`).
 A `@m.kernel` function becomes a `gpu.func` inside the module's `gpu.module`.
 Calling it from a `@m.jit` host only prepares the launch; `.launch(grid=,
 block=)` emits the synchronous `gpu.launch_func`. CUDA tensors adapt to device
-pointers without a copy, so the kernel works on the caller's memory. The `gpu`
-plugin is listed on `MlirDSL` only when `MLIR_DSL_ARCH` is set (or a CUDA
-runtime library is found), so the arch is derived from the device before the
-import. MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR=1 MLIR_DSL_ARCH=sm_90 prints the
-traced IR on any machine, GPU or not.
+pointers without a copy, so the kernel works on the caller's memory. The plugin
+only checks `MLIR_DSL_ARCH` (when the DSL is first used and at every launch) and
+detects nothing, so this example sets it from the visible device before the
+import. MLIR_DSL_DRYRUN=1
+MLIR_DSL_PRINT_IR=1 MLIR_DSL_ARCH=sm_90 prints the traced IR on any machine,
+GPU or not.
 """
 
 import os
@@ -35,7 +38,7 @@ THREADS = 256
 def axpy_kernel(
     n: m.Int32, a: m.Float32, x: m.Pointer[m.Float32], y: m.Pointer[m.Float32]
 ):
-    # The gpu plugin's index helpers read the NVVM special registers as Int32.
+    # The gpu index helpers (`plugins/decorators/kernels/gpu/indices.py`) read the NVVM special registers as Int32.
     i = m.block_idx()[0] * m.block_dim()[0] + m.thread_idx()[0]
     if i < n:  # scf.if in the kernel: the last block is only partially filled
         y[i] = a * x[i] + y[i]

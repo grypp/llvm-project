@@ -45,7 +45,7 @@ def sum_in_lanes(chunks: m.Int32, p: m.Pointer[m.Float32]) -> m.Float32:
 
 def check(label, got, want):
     # Under MLIR_DSL_DRYRUN=1 results are placeholders, so only print them.
-    if not m.is_dynamic_expr(got):
+    if not m.is_mlir_op(got):
         assert abs(float(got) - want) < 1e-6, (label, float(got), want)
     print(f"{label}: {got}")
 

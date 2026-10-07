@@ -11,7 +11,7 @@ from lit.llvm import llvm_config
 # Configuration file for the 'lit' test runner of the mlir.mlir_dsl sub-DSL.
 
 # name: The name of this test suite.
-config.name = "MLIR-DSL-MlirDSL"
+config.name = "MLIR-DSL-MlirTestDSL"
 
 config.test_format = lit.formats.ShTest()
 

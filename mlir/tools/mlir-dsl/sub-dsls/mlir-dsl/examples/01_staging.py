@@ -7,7 +7,7 @@
 The parameter annotation decides what a value is. `a: m.Int32` is a staged
 runtime value (an IR block argument); the unannotated `scale` is a Meta value,
 a plain Python int that is folded into the trace and into the symbol name.
-Watch `m.is_dynamic_expr` tell the two apart, a Python `if` on the Meta value
+Watch `m.is_mlir_op` tell the two apart, a Python `if` on the Meta value
 disappear from the IR, and the cache counters show one compiled function per
 distinct Meta value. MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR=1 prints the traced IR
 (`func.func @scaled_2`, `@scaled_3`) instead of running.
@@ -17,13 +17,13 @@ import os
 
 import mlir.mlir_dsl as m
 
-dsl = m.MlirDSL()
+dsl = m.MlirTestDSL()
 
 
 def describe(name, value):
     # An ordinary Python helper, called while `scaled` is traced: it sees the
     # staged `a` as an IR value and `scale` as the Python int it always was.
-    print(f"  {name}: is_dynamic_expr={m.is_dynamic_expr(value)}")
+    print(f"  {name}: is_mlir_op={m.is_mlir_op(value)}")
 
 
 @m.jit
@@ -57,7 +57,7 @@ def compiled():
 
 def main():
     # Outside a trace nothing is staged: a Python int is Meta.
-    print(f"host: is_dynamic_expr={m.is_dynamic_expr(5)}")
+    print(f"host: is_mlir_op={m.is_mlir_op(5)}")
 
     # First Meta value: trace and compile (a miss).
     check("scaled(5, 2)", scaled(5, 2), 10)

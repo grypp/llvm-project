@@ -2,7 +2,7 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Flattening of staged values: leaves, tuples and frozen records.
+"""Flattening of staged values: leaves, tuples, lists and frozen records.
 
 ``tree_flatten`` turns a value carried through a staged region or passed at
 the ``@jit`` boundary into its SSA values plus a ``PyTreeDef``;
@@ -11,7 +11,7 @@ on purpose: a leaf is an instance of a registered leaf class (``Numeric``,
 ``Pointer``, ``Vector``, whatever a sub-DSL adds with ``register_leaf``); a
 container is a ``tuple``, a ``list`` or a frozen dataclass (a ``@struct`` is
 one), nested as deep as needed; ``None`` is an empty slot; any other object
-is a compile-time (Meta) value written back verbatim. A dict, set, frozenset,
+is a Python value written back verbatim. A dict, set, frozenset,
 namedtuple, tuple subclass or non-frozen dataclass holding DSL values is
 rejected, not flattened; so is a container that contains itself or that is
 nested deeper than Python's recursion limit. Containers come back as fresh objects, leaves are restored from
@@ -30,7 +30,6 @@ from ... import ir
 from ..core.common import DSLRuntimeError, DSLUserCodeError
 from ..core.diagnostics import DiagId
 from ..core.mlir_op import current_emitter
-from ..types import typing as _typing
 from ..types.typing import Numeric, Pointer, _lookup_mlir_type
 from ..types.vector import Vector
 
@@ -51,6 +50,8 @@ __all__ = [
     "tree_flatten",
     "tree_leaves",
     "tree_unflatten",
+    "trees_equal",
+    "leaf_type_name",
     "wrap_ir_value",
 ]
 
@@ -181,7 +182,7 @@ def contains_leaf(value: Any) -> bool:
     The walk is wider than ``tree_flatten`` on purpose: tuples, lists, sets,
     frozensets, dict keys and values and the fields of any dataclass (frozen
     or not), so that a DSL value hidden in a container ``tree_flatten`` would
-    treat as Meta is found and refused. A leaf stops the walk.
+    treat as a Python value is found and refused. A leaf stops the walk.
     """
     active: set[int] = set()
 
@@ -275,11 +276,11 @@ class Leaf:
 
     ``prototype`` restores the leaf: the dtype class of a ``Numeric``,
     ``(dtype, addrspace)`` of a ``Pointer``, ``(Vector, dtype, lanes)`` of a
-    ``Vector``, the entering instance of any other registered leaf; it is None for a None slot and for a META
-    slot, whose Python value ``meta`` is written back verbatim.
+    ``Vector``, the entering instance of any other registered leaf; it is None
+    for a None slot and for a Python-value slot, whose value ``meta`` is
+    written back verbatim.
     """
 
-    is_numeric: bool = False
     is_none: bool = False
     node_metadata: SimpleNamespace | None = None
     ir_type_str: str | None = None
@@ -304,10 +305,10 @@ def _record_to_iterable(x: Any, path: str = "") -> tuple[SimpleNamespace, list[A
         value = getattr(x, name, _UNSET)
         if value is _UNSET:
             raise DSLUserCodeError(
-                DiagId.CONTAINER_FIELD_UNSET,
+                DiagId.CONTAINER_INVALID_RECORD,
                 var=_display_path(path),
                 type=type(x).__name__,
-                field=name,
+                detail=f"its field `{name}` has no value",
             )
         members.append(value)
     extras = (
@@ -318,10 +319,10 @@ def _record_to_iterable(x: Any, path: str = "") -> tuple[SimpleNamespace, list[A
     for attr, value in extras.items():
         if contains_leaf(value):
             raise DSLUserCodeError(
-                DiagId.CONTAINER_EXTRA_ATTRIBUTE,
+                DiagId.CONTAINER_INVALID_RECORD,
                 var=_display_path(path),
                 type=type(x).__name__,
-                attr=attr,
+                detail=f"its attribute `{attr}` is not a dataclass field but holds a DSL value",
             )
     metadata = SimpleNamespace(
         kind="dataclass",
@@ -412,7 +413,6 @@ def _flatten_leaf(
         num_values=1,
     )
     leaf = Leaf(
-        is_numeric=isinstance(x, Numeric),
         node_metadata=metadata,
         prototype=entry.prototype(x),
     )
@@ -437,8 +437,8 @@ def tree_flatten(
 ) -> tuple[list[Any], list[ir.Attribute], PyTreeDef | Leaf]:
     """Flatten ``x`` into its values and a tree definition.
 
-    :param x: A leaf, a tuple or frozen record of leaves (nested), None, or a
-        Meta value
+    :param x: A leaf, a tuple, list or frozen record of leaves (nested), None,
+        or a Python value
     :param return_ir_values: Return the leaves' ``ir.Value`` s (one per SSA
         value) instead of the leaf objects themselves
     :param root: The name of ``x`` in diagnostics (``acc``), prefixed to the
@@ -475,11 +475,14 @@ def _tree_flatten(
         return _flatten_leaf(wrapped, entry, return_ir_values)
     node_type = _container_node_type(x)
     if node_type is None:
-        # A Meta value, unless it hides DSL values the rebuild would lose.
+        # A Python value, unless it hides DSL values the rebuild would lose.
         if not isinstance(x, type) and contains_leaf(x):
             if dataclasses.is_dataclass(x):
                 raise DSLUserCodeError(
-                    DiagId.CONTAINER_DATACLASS_NOT_FROZEN, type=type(x).__name__
+                    DiagId.CONTAINER_INVALID_RECORD,
+                    var=_display_path(path),
+                    type=type(x).__name__,
+                    detail="it is a dataclass that is not frozen, so an update made on one path would be lost",
                 )
             raise DSLUserCodeError(
                 DiagId.CONTAINER_UNSUPPORTED,
@@ -489,7 +492,7 @@ def _tree_flatten(
         return [], [], Leaf(meta=x)
     if id(x) in active:
         raise DSLUserCodeError(
-            DiagId.CONTAINER_CYCLE, var=_display_path(path), type=type(x).__name__
+            DiagId.CONTAINER_TOO_DEEP, var=_display_path(path), type=type(x).__name__
         )
     active.add(id(x))
     node_metadata, children = (
@@ -530,7 +533,7 @@ def _value_count(treedef: PyTreeDef | Leaf) -> int:
 
 def tree_unflatten(treedef: PyTreeDef | Leaf, xs: list[Any]) -> Any:
     """Rebuild the value ``treedef`` describes from ``xs``: leaves from their
-    prototypes, Meta slots verbatim, every container a fresh object."""
+    prototypes, Python-value slots verbatim, every container a fresh object."""
     _require_tree(treedef, "tree_unflatten")
     xs = list(xs)
     needed = _value_count(treedef)
@@ -587,7 +590,7 @@ def tree_leaves(treedef: PyTreeDef | Leaf) -> list[tuple[str, Leaf]]:
 
 
 def _meta_equal(lhs: Any, rhs: Any) -> bool:
-    """Compare two META values with ``==``, falling back to identity."""
+    """Compare two Python values with ``==``, falling back to identity."""
     if lhs is rhs:
         return True
     try:
@@ -622,11 +625,11 @@ def _node_shape(tree: PyTreeDef) -> tuple:
     )
 
 
-def _check_tree_equal(lhs: PyTreeDef | Leaf, rhs: PyTreeDef | Leaf) -> bool:
+def trees_equal(lhs: PyTreeDef | Leaf, rhs: PyTreeDef | Leaf) -> bool:
     """
     Check if two tree definitions are structurally equal.
 
-    Leaves match when both are None, both META with equal values, or both
+    Leaves match when both are None, both Python values that compare equal, or both
     leaves of the same IR types and equal prototypes (same dtype, same
     ``(dtype, addrspace)``, same struct class, same registered class).
     """
@@ -640,7 +643,7 @@ def _check_tree_equal(lhs: PyTreeDef | Leaf, rhs: PyTreeDef | Leaf) -> bool:
         )
     if isinstance(lhs, PyTreeDef) and isinstance(rhs, PyTreeDef):
         return _node_shape(lhs) == _node_shape(rhs) and all(
-            map(_check_tree_equal, lhs.child_treedefs, rhs.child_treedefs)
+            map(trees_equal, lhs.child_treedefs, rhs.child_treedefs)
         )
     return False
 
@@ -704,14 +707,14 @@ def describe_tree_difference(
     """
     _require_tree(lhs, "describe_tree_difference")
     _require_tree(rhs, "describe_tree_difference")
-    if _check_tree_equal(lhs, rhs):
+    if trees_equal(lhs, rhs):
         return ""
     if isinstance(lhs, PyTreeDef) and isinstance(rhs, PyTreeDef):
         if _node_shape(lhs) == _node_shape(rhs):
             for index, (lhs_child, rhs_child) in enumerate(
                 zip(lhs.child_treedefs, rhs.child_treedefs)
             ):
-                if not _check_tree_equal(lhs_child, rhs_child):
+                if not trees_equal(lhs_child, rhs_child):
                     child_path = _child_path(lhs.node_metadata, path, index)
                     return describe_tree_difference(lhs_child, rhs_child, child_path)
     return (
@@ -731,14 +734,14 @@ def check_tree_equal(lhs: PyTreeDef, rhs: PyTreeDef) -> int:
     _require_tree(lhs, "check_tree_equal")
     _require_tree(rhs, "check_tree_equal")
     if isinstance(lhs, Leaf) or isinstance(rhs, Leaf):
-        return -1 if _check_tree_equal(lhs, rhs) else 0
+        return -1 if trees_equal(lhs, rhs) else 0
     if len(lhs.child_treedefs) != len(rhs.child_treedefs):
         raise DSLRuntimeError(
             "check_tree_equal expects trees with the same number of children, "
             f"got {len(lhs.child_treedefs)} and {len(rhs.child_treedefs)}"
         )
     for index, (l, r) in enumerate(zip(lhs.child_treedefs, rhs.child_treedefs)):
-        if not _check_tree_equal(l, r):
+        if not trees_equal(l, r):
             return index
     return -1
 
@@ -794,7 +797,3 @@ _add_entry(
         ),
     )
 )
-
-# ``typing.py`` cannot import this module; hand it the registry-aware wrapper
-# so ``Pointer.load(count=)`` and ``masked_load`` return a ``Vector``.
-_typing._wrap_ir_value = wrap_ir_value

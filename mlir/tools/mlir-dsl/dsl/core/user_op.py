@@ -2,24 +2,29 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""MLIR op helper functions: user-site locations and trace-time verification.
+"""MLIR op helper functions: source locations and trace-time verification.
 
-``dsl_user_op`` wraps every user-facing op builder of the DSL. It attributes
-the ops the builder emits to the first frame outside the DSL package, as one
-``NameLoc(FileLineColLoc)`` per op, and optionally verifies them as soon as
-they are built. Both behaviours are driven by the active environment manager
-(``debuginfo``, ``debug``, ``verify_trace``); outside a DSL call neither runs.
+Source locations come from MLIR itself. ``enter_traceback_locations`` turns
+on the bindings' traceback locations (``ir.loc_tracebacks``): every op built
+while they are on carries the Python line and column range that built it,
+with the frames of the DSL packages, the ``mlir`` bindings and the standard
+library skipped, so the location is the user's line. ``BaseDSL`` enters it
+around a trace when ``debuginfo`` is set (depth 1) or ``LOC_TRACEBACKS=N``
+asks for a call chain; under ``debug`` the DSL's own frames are kept, so DSL
+developers see where inside the DSL an op was built. An explicit ``loc=``
+always wins.
+
+``dsl_user_op`` wraps every user-facing op builder of the DSL: it passes the
+caller's ``loc=`` through, verifies the ops the builder emits as soon as they
+are built when ``verify_trace`` (or ``debug``) is set, and turns a builder
+called outside any trace into ``CALL_OUTSIDE_JIT``.
 """
 
-import dis
-import inspect
-import itertools
-import linecache
-import types
-from contextlib import contextmanager
-from contextvars import ContextVar
+import importlib
+import sysconfig
 from functools import wraps
-from typing import Any, Callable, Iterator, Optional
+from pathlib import Path
+from typing import Any, Callable
 
 from ... import ir
 from .common import (
@@ -29,38 +34,90 @@ from .common import (
     DSLUserCodeTypeError,
     get_current_env_manager,
 )
-from .diagnostics import DiagId, _is_dsl_module, register_dsl_package
+from .diagnostics import DiagId, _DSL_PACKAGES, _is_dsl_module
 from ..util.logger import log
 
-__all__ = ["dsl_user_op", "loc_transform", "register_dsl_package"]
+__all__ = ["dsl_user_op", "enter_traceback_locations"]
 
 
-# Scoped stack of loc transforms used by dialect-specific compilation contexts.
-# This module stays unaware of any particular dialect or debug-info schema;
-# callers decide what a transformed loc means.
-_LOC_TRANSFORMS: ContextVar[tuple[Callable[[Any], Any], ...]] = ContextVar(
-    "_LOC_TRANSFORMS", default=()
-)
-
-
-def _active_env_flags() -> tuple[bool, bool, bool]:
-    """Return ``(debuginfo, include_lib_frame, verify_trace)`` for this call.
-
-    ``debuginfo`` turns on source locations; ``debug`` attributes ops to the
-    closest (library) frame, so DSL developers see where inside the DSL an op
-    was built, and also turns on trace-time verification; ``verify_trace``
-    turns on verification alone. Outside a DSL call there is no manager and
-    every flag is off.
-    """
+def _verify_trace_enabled() -> bool:
+    """Whether the active environment asks for trace-time verification
+    (``verify_trace``, or ``debug`` which implies it); off outside a DSL call."""
     mgr = get_current_env_manager()
     if mgr is None:
-        return False, False, False
-    debug = bool(mgr.debug)
-    return bool(mgr.debuginfo), debug, bool(mgr.verify_trace) or debug
+        return False
+    return bool(mgr.verify_trace) or bool(mgr.debug)
+
+
+# =============================================================================
+# Source locations: MLIR's traceback locations with the DSL frames skipped
+# =============================================================================
+
+
+def _frame_filter_paths(include_dsl_frames: bool) -> tuple[list[str], list[str]]:
+    """The file prefixes whose frames a location must skip, and the DSL
+    package prefixes kept when ``include_dsl_frames`` is set.
+
+    Skipped: the standard library (``contextlib`` mediates the ``with``
+    builders), every top-level member of the ``mlir`` package (the bindings,
+    the dialect wrappers) and the registered DSL packages wherever they are
+    installed. Under ``include_dsl_frames`` the DSL packages are kept instead.
+    """
+    skipped: list[str] = []
+    dsl_dirs: list[str] = []
+    paths = sysconfig.get_paths()
+    for key in ("stdlib", "platstdlib"):
+        if paths.get(key):
+            skipped.append(paths[key])
+    for prefix in _DSL_PACKAGES:
+        try:
+            module = importlib.import_module(prefix)
+        except Exception:  # noqa: BLE001 - a registered but uninstalled sub-DSL
+            continue
+        dsl_dirs.extend(str(Path(p)) for p in getattr(module, "__path__", []))
+    mlir_root = importlib.import_module("mlir")
+    for root in getattr(mlir_root, "__path__", []):
+        for child in Path(root).iterdir():
+            if child.name == "__pycache__":
+                continue
+            if _is_dsl_module(f"mlir.{child.stem}"):
+                dsl_dirs.append(str(child))
+            else:
+                skipped.append(str(child))
+    return skipped, dsl_dirs
+
+
+def enter_traceback_locations(depth: int, *, include_dsl_frames: bool = False) -> Any:
+    """Turn on MLIR's traceback locations for the ops built until the returned
+    context manager exits; ``None`` when ``depth`` is 0 or the bindings lack
+    the feature (a limited-API build).
+
+    :param depth: How many Python frames a location records, innermost first
+        (``1`` is the user's line; more adds the callers as a call site chain)
+    :param include_dsl_frames: Keep the DSL packages' frames (``debug``), so
+        an op is attributed to the DSL line that built it
+    """
+    if depth <= 0:
+        return None
+    try:
+        globals_ = ir._globals  # type: ignore[attr-defined]
+        skipped, dsl_dirs = _frame_filter_paths(include_dsl_frames)
+        for path in skipped:
+            globals_.register_traceback_file_exclusion(path)
+        for path in dsl_dirs:
+            if include_dsl_frames:
+                globals_.register_traceback_file_inclusion(path)
+            else:
+                globals_.register_traceback_file_exclusion(path)
+        context = ir.loc_tracebacks(max_depth=depth)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    context.__enter__()
+    return context
 
 
 def _verify_new_block_ops(snap_block: Any, snap_n_ops: int, snap_tail: Any) -> Any:
-    """Verify the ops ``opFunc`` appended to ``snap_block``.
+    """Verify the ops the wrapped builder appended to ``snap_block``.
 
     ``snap_tail`` is the block's last operation before the call, ``None`` for an
     empty block; the ops after it are the ones the wrapper appended. Anything
@@ -95,72 +152,6 @@ def _verify_new_block_ops(snap_block: Any, snap_n_ops: int, snap_tail: Any) -> A
     return verified_tail
 
 
-@contextmanager
-def loc_transform(transform: Callable[[Any], Any]) -> Iterator[None]:
-    """Temporarily rewrite locs produced by ``@dsl_user_op``.
-
-    The decorator still owns the generic work: find the Python user frame and
-    build the usual MLIR source loc. This hook lets a frontend or dialect wrap
-    that loc while it is building a scoped construct::
-
-        with loc_transform(lambda loc: ir.Location.name("scope", childLoc=loc)):
-            dsl_add(a, b)  # receives loc=scope("file.py":line:col)
-
-    Transforms are scoped and stackable; the innermost runs first. ``transform``
-    receives each generated or caller-provided location, which may be ``None``,
-    and returns its replacement; the stack is restored on every exit.
-
-    :param transform: Callable used to rewrite locations within this scope.
-    :type transform: Callable[[Any], Any]
-    """
-    if not callable(transform):
-        raise DSLRuntimeError("loc_transform(transform): transform must be callable")
-
-    token = _LOC_TRANSFORMS.set(_LOC_TRANSFORMS.get() + (transform,))
-    try:
-        yield
-    finally:
-        _LOC_TRANSFORMS.reset(token)
-
-
-def _apply_loc_transforms(loc: Any) -> Any:
-    """Apply the active scoped loc transforms to ``loc``."""
-    for transform in reversed(_LOC_TRANSFORMS.get()):
-        loc = transform(loc)
-    return loc
-
-
-def _is_framework_stack_frame(frame: types.FrameType) -> bool:
-    """Return True when ``frame`` runs DSL code rather than the user's.
-
-    Frames are classified by module name against the ``register_dsl_package``
-    registry, which is robust across source, build-tree and installed layouts.
-    ``contextlib`` frames mediate the explicit ``with`` builders and are
-    infrastructure rather than the user's call site.
-    """
-    module_name = frame.f_globals.get("__name__", "") or ""
-    return module_name == "contextlib" or _is_dsl_module(module_name)
-
-
-def _find_user_frame(
-    start_frame: Optional[types.FrameType], *, include_lib_frame: bool = False
-) -> Optional[types.FrameType]:
-    """Walk up from ``start_frame`` to the first user (non-library) frame.
-
-    Falls back to ``start_frame`` when every frame is framework code, and
-    returns it directly when ``include_lib_frame`` is set.
-    """
-    if include_lib_frame:
-        return start_frame
-
-    frame = start_frame
-    while frame is not None:
-        if not _is_framework_stack_frame(frame):
-            return frame
-        frame = frame.f_back
-    return start_frame
-
-
 def _is_missing_context_error(e: BaseException) -> bool:
     """Return True for the raw errors the MLIR bindings raise when an
     IR-building call runs with no active ``ir.Context``: the ``RuntimeError``
@@ -179,157 +170,46 @@ def _is_missing_context_error(e: BaseException) -> bool:
     return False
 
 
-# Cache of ``inspect.getsourcefile(frame) or inspect.getfile(frame)`` keyed on
-# ``co_filename``: one lookup per distinct source file for the per-op hot path.
-_SOURCE_FILE_CACHE: dict[str, str] = {}
-
-# Python >= 3.11: code objects carry a position table and ``inspect.Traceback``
-# accepts ``positions=``. Older interpreters fall back to ``getframeinfo``; the
-# 3.11+ names are resolved dynamically so the module imports there too.
-_HAS_CO_POSITIONS: bool = hasattr(types.CodeType, "co_positions")
-_CO_POSITIONS: Any = getattr(types.CodeType, "co_positions", None)
-_DIS_POSITIONS: Any = getattr(dis, "Positions", None)
-
-
-def _fast_frameinfo(frame: types.FrameType) -> inspect.Traceback:
-    """Build the same ``inspect.Traceback`` as ``inspect.getframeinfo(frame)``
-    without its per-call cost.
-
-    ``getframeinfo`` re-resolves the source file and runs ``inspect.findsource``
-    on every call, the single largest trace-time cost of a compile (it runs
-    once per built op). The same fields come straight from the frame:
-    positions from the code object's position table, the context line from
-    ``linecache``, the filename from a per-file cache.
-    """
-    if not _HAS_CO_POSITIONS:
-        return inspect.getframeinfo(frame)
-    code = frame.f_code
-    lasti = frame.f_lasti
-    if lasti >= 0:
-        positions = next(itertools.islice(_CO_POSITIONS(code), lasti // 2, None))
-    else:
-        positions = (None, None, None, None)
-    if positions[0] is None:
-        positions = (frame.f_lineno,) + tuple(positions[1:])
-    lineno = positions[0]
-
-    co_filename = code.co_filename
-    filename = _SOURCE_FILE_CACHE.get(co_filename)
-    if filename is None:
-        filename = inspect.getsourcefile(frame) or inspect.getfile(frame)
-        _SOURCE_FILE_CACHE[co_filename] = filename
-
-    line = linecache.getline(filename, lineno, frame.f_globals)
-    code_context = [line] if line else None
-    return inspect.Traceback(
-        filename,
-        lineno,
-        code.co_name,
-        code_context,
-        0 if code_context else None,
-        positions=_DIS_POSITIONS(*positions),
-    )
-
-
-def _get_caller_frame_info(
-    *, include_lib_frame: bool = False
-) -> Optional[inspect.Traceback]:
-    """Return lightweight frame info for the DSL user call site.
-
-    Skips the wrapper frame, applies framework-frame filtering, and avoids
-    ``inspect.getframeinfo()``'s source-context lookup on the hot path.
-    """
-    cur_frame = inspect.currentframe()
-    if cur_frame is None:
-        return None
-    wrapper_frame = cur_frame.f_back
-    start_frame = wrapper_frame.f_back if wrapper_frame is not None else None
-    frame = _find_user_frame(start_frame, include_lib_frame=include_lib_frame)
-    del cur_frame
-    if frame is None:
-        return None
-    return _fast_frameinfo(frame)
-
-
-def _get_location_from_frame_info(frameInfo: inspect.Traceback) -> ir.Location:
-    """Build an MLIR location from captured Python frame information.
-
-    The file/line/column portion becomes the child ``FileLineColLoc``, while
-    the name location carries either the source snippet, when available, or
-    the Python function name.
-    """
-    # In Python < 3.11, getframeinfo returns a NamedTuple without positions.
-    if not hasattr(frameInfo, "positions"):
-        file_loc = ir.Location.file(frameInfo.filename, frameInfo.lineno, 0)
-    else:
-        file_loc = ir.Location.file(
-            frameInfo.filename,
-            frameInfo.positions.lineno,  # type: ignore[attr-defined]
-            frameInfo.positions.col_offset or 0,  # type: ignore[attr-defined]
-        )
-    return ir.Location.name(
-        (
-            "".join([c.strip() for c in frameInfo.code_context])
-            if frameInfo.code_context
-            else frameInfo.function
-        ),
-        childLoc=file_loc,
-    )
-
-
-def dsl_user_op(opFunc: Callable[..., Any]) -> Callable[..., Any]:
+def dsl_user_op(op_func: Callable[..., Any]) -> Callable[..., Any]:
     """Decorator for user-facing DSL op wrappers.
 
-    1. Attaches source locations when ``debuginfo`` is on, so diagnostics and
-       IR dumps point back at the user's Python call site.
+    1. Passes the caller's ``loc=`` through (source locations otherwise come
+       from MLIR's traceback locations, see :func:`enter_traceback_locations`).
     2. Runs trace-time MLIR verification on each newly-built op when
        ``verify_trace`` (or ``debug``) is on, so verifier errors surface at
        the call site rather than at module-verify time.
 
     Verification snapshots ``InsertionPoint.current.block`` and its last op
-    before invoking ``opFunc``, then calls ``verify()`` on the ops left after
+    before invoking ``op_func``, then calls ``verify()`` on the ops left after
     that anchor; ``verify()`` recurses through regions. The anchor, not the op
     count, bounds the walk: a wrapper may insert *before* it, and the ops
     already in the block can include one still under construction (the
     enclosing ``scf.if`` whose body is not filled in yet). A wrapper that
     returns an ``OpView`` directly is always verified.
 
-    :param opFunc: The user-facing API function; must accept ``loc=None``.
-    :type opFunc: Callable
+    :param op_func: The user-facing API function; must accept ``loc=None``.
+    :type op_func: Callable
     :return: The wrapped user-facing API function.
     :rtype: Callable
     """
 
-    @wraps(opFunc)
+    @wraps(op_func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        log().debug("[dsl_user_op] %s called with %d args", opFunc.__name__, len(args))
-        # Pop loc= from kwargs so callers that still pass it don't break. The
-        # wrapper replaces it only when source-location tracking is enabled.
+        log().debug("[dsl_user_op] %s called with %d args", op_func.__name__, len(args))
+        # The caller's loc= is passed through; None lets MLIR's traceback
+        # locations fill it when they are on.
         loc: Any = kwargs.pop("loc", None)
-        frameInfo = None
         verifier_error = False
-        debuginfo, include_lib_frame, verify_trace = _active_env_flags()
-
-        if loc is None and debuginfo and ir.Context.current is not None:
-            frameInfo = _get_caller_frame_info(include_lib_frame=include_lib_frame)
-            try:
-                if frameInfo is not None:
-                    loc = _get_location_from_frame_info(frameInfo)
-            except RuntimeError:
-                # The bindings could not build the location (the context went
-                # away under a validation-only call): proceed with loc=None so
-                # the wrapped function's own validation can still fire.
-                pass
-        loc = _apply_loc_transforms(loc)
+        verify_trace = _verify_trace_enabled()
 
         # __init__ wrappers either wrap an existing ir.Value or build a trivial
         # constant that always verifies, and run on hot paths: skip the
         # block-diff for them, materializing `block.operations` per call would
         # turn a kernel build into O(N^2).
-        is_init = getattr(opFunc, "__name__", "") == "__init__"
+        is_init = getattr(op_func, "__name__", "") == "__init__"
 
         # Snapshot the insertion block so newly-built ops can be verified after
-        # opFunc returns; the bindings strip `.result` for value-producing ops,
+        # op_func returns; the bindings strip `.result` for value-producing ops,
         # so the return value alone does not see every op.
         snap_block: Any = None
         snap_n_ops: int = 0
@@ -340,7 +220,7 @@ def dsl_user_op(opFunc: Callable[..., Any]) -> Callable[..., Any]:
                 snap_ops = snap_block.operations
                 snap_n_ops = len(snap_ops)
                 # Anchor the diff on the tail op rather than on the count: the
-                # ops opFunc appends land after it, whatever it inserts higher
+                # ops op_func appends land after it, whatever it inserts higher
                 # up the block does not (see `_verify_new_block_ops`).
                 if snap_n_ops:
                     tail = snap_ops[-1]
@@ -350,10 +230,10 @@ def dsl_user_op(opFunc: Callable[..., Any]) -> Callable[..., Any]:
                 snap_block = None
 
         try:
-            res_or_list = opFunc(*args, **kwargs, loc=loc)
+            res_or_list = op_func(*args, **kwargs, loc=loc)
             verifier_error = True
             # A context manager (if_, for_) has its body filled by the
-            # surrounding `with` block after opFunc returns; verifying here
+            # surrounding `with` block after op_func returns; verifying here
             # would see an empty region. Module-verify time covers it.
             is_cm = hasattr(res_or_list, "__enter__") and hasattr(
                 res_or_list, "__exit__"
@@ -385,7 +265,7 @@ def dsl_user_op(opFunc: Callable[..., Any]) -> Callable[..., Any]:
         except DSLBaseError:
             raise
         except Exception as e:
-            func_name = getattr(opFunc, "__name__", str(opFunc))
+            func_name = getattr(op_func, "__name__", str(op_func))
             if "unexpected keyword argument 'loc'" in str(e):
                 raise DSLRuntimeError(
                     f"Function '{func_name}' decorated with @dsl_user_op does not "
@@ -400,10 +280,7 @@ def dsl_user_op(opFunc: Callable[..., Any]) -> Callable[..., Any]:
                 ) from e
             if verifier_error:
                 raise DSLRuntimeError(
-                    f"Operation verification failed in '{func_name}'",
-                    filename=frameInfo.filename if frameInfo is not None else None,
-                    line=frameInfo.lineno if frameInfo is not None else None,
-                    cause=e,
+                    f"Operation verification failed in '{func_name}'", cause=e
                 ) from e
 
             # A missing-context failure means the op was invoked outside any

@@ -18,6 +18,7 @@ configure_lit_site_cfg(
 set(MLIR_DSL_TEST_DEPENDS
   FileCheck count not
   MLIRPythonModules
+  MLIRPythonModulesMlirTestDSL
 )
 if(MLIR_ENABLE_EXECUTION_ENGINE)
   # Provides the `host-supports-jit` feature probe.

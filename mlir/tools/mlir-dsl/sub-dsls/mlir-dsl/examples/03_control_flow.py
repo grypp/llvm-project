@@ -67,7 +67,7 @@ def odd_sum(x: m.Int32, limit) -> m.Int32:
 
 
 def check(name, got, want):
-    if not m.is_dynamic_expr(got):  # under MLIR_DSL_DRYRUN the result is `?`
+    if not m.is_mlir_op(got):  # under MLIR_DSL_DRYRUN the result is `?`
         assert got == want, (name, got, want)
     print(f"{name} = {got}")
 

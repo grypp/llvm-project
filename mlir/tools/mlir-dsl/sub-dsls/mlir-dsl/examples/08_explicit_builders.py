@@ -53,7 +53,7 @@ def ceil_log2(n: m.Int32) -> m.Int32:
 
 
 def check(name, got, want):
-    if m.is_dynamic_expr(got):  # DRYRUN traces only: no value to compare
+    if m.is_mlir_op(got):  # DRYRUN traces only: no value to compare
         return
     assert int(got) == want, (name, int(got), want)
     print(f"{name} = {want}")

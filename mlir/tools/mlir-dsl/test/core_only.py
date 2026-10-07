@@ -1,23 +1,21 @@
 # RUN: env MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR=1 %PYTHON %s 2>&1 | FileCheck %s
-# Import graph: the core (`core/`, `types/`, `util/`, `runtime/`, `compiler/`)
-# imports without the `mlir.mlir_dsl` sub-DSL and without any plugin, hence
-# without the `gpu`/`nvvm` bindings; the default dialects (`scf`, the LLVM
-# world) are imported only when a DSL is built. A `BaseDSL` subclass with
-# `plugins = []` traces through the core and reports their pass list.
+# Import graph: the core (`core/`, `types/`, `util/`) imports without the
+# `mlir.mlir_dsl` sub-DSL, without any plugin or dialect module, hence without
+# the `gpu`/`nvvm` bindings; a dialect is imported only when a DSL names a
+# plugin that emits it. A `BaseDSL` subclass naming the builtin type ops, the
+# `func.func` entry and the execution-engine compiler traces through the core
+# and reports its own pass list.
 import sys
 
 import numpy as np
 
-from mlir import execution_engine, passmanager
-from mlir.dsl.core import executor, mlir_op, user_op
-from mlir.dsl.compiler import jit_executor
-from mlir.dsl.compiler.compiler import Compiler
-from mlir.dsl.core import common, diagnostics, env_manager, plugin
+from mlir.dsl.core import mlir_op, remarks, staging, user_op
+from mlir.dsl.core import arguments, common, diagnostics, env_manager
 from mlir.dsl.core.dsl import BaseDSL
-from mlir.dsl.runtime import jit_arg_adapters
+from mlir.dsl.core.plugin import Plugins
 from mlir.dsl.types import vector
 from mlir.dsl.types.typing import Float32, Int32, Pointer
-from mlir.dsl.util import logger, phase_profiler, tree_utils
+from mlir.dsl.util import logger, profiler, tree_utils
 
 for name in (
     "mlir.mlir_dsl",
@@ -25,9 +23,11 @@ for name in (
     "mlir.dialects.scf",
     "mlir.dialects.llvm",
     "mlir.dialects.func",
+    "mlir.dsl.plugins.type_ops",
     "mlir.dsl.plugins",
     "mlir.dsl.plugins.ast_preprocessor",
-    "mlir.dsl.plugins.dialects.gpu",
+    "mlir.dsl.plugins.decorators",
+    "mlir.dsl.plugins.compiler",
     "mlir.dialects.gpu",
     "mlir.dialects.nvvm",
 ):
@@ -38,23 +38,43 @@ assert "mlir.dialects.gpu" not in sys.modules
 # CHECK: loaded mlir.dialects.scf: False
 # CHECK: loaded mlir.dialects.llvm: False
 # CHECK: loaded mlir.dialects.func: False
+# CHECK: loaded mlir.dsl.plugins.type_ops: False
 # CHECK: loaded mlir.dsl.plugins: False
 # CHECK: loaded mlir.dsl.plugins.ast_preprocessor: False
-# CHECK: loaded mlir.dsl.plugins.dialects.gpu: False
+# CHECK: loaded mlir.dsl.plugins.decorators: False
+# CHECK: loaded mlir.dsl.plugins.compiler: False
 # CHECK: loaded mlir.dialects.gpu: False
 # CHECK: loaded mlir.dialects.nvvm: False
 
+# The plugins a CPU-only DSL needs, imported only now.
+from mlir.dsl.plugins.compiler import execution_engine
+from mlir.dsl.plugins.func_entry import func
+from mlir.dsl.plugins.type_ops import arith, llvm, vector
+from mlir.dsl.plugins.type_ops import TypeOps
+
 
 class CpuOnlyDSL(BaseDSL):
-    plugins = []
-    _jit_arg_adapter_scope = "mlir"
+    plugins = Plugins(
+        type_ops=TypeOps(scalars=arith, vectors=vector, memory=llvm),
+        func_entry=func.Entry(),
+        compiler=execution_engine.Compiler(),
+    )
+
+    def pipeline(self):
+        # The sub-DSL owns its pipeline: the passes lowering arith, scf and the
+        # func entry to the LLVM dialect, spelled here (no plugin publishes any).
+        return [
+            "convert-scf-to-cf",
+            "convert-cf-to-llvm",
+            "convert-arith-to-llvm",
+            "convert-func-to-llvm",
+            "reconcile-unrealized-casts",
+        ]
 
     def __init__(self):
         super().__init__(
             name="MLIR_DSL",
             dsl_package_name=["mlir", "dsl"],
-            compiler_provider=Compiler(passmanager, execution_engine),
-            pass_sm_arch_name="cubin-chip",
             preprocess=False,
         )
 
@@ -77,8 +97,12 @@ def scale_store(a: Int32, out: Pointer[Float32]) -> Int32:
 # CHECK-NOT:     gpu.
 # CHECK-NOT:     nvvm.
 # CHECK:         RESULT: ?
-# CHECK:         pipeline: builtin.module(convert-scf-to-cf,convert-cf-to-llvm,convert-vector-to-llvm,convert-arith-to-llvm,convert-math-to-llvm,convert-func-to-llvm,reconcile-unrealized-casts)
+# CHECK:         plugins: ['arith+vector+llvm', 'func', 'execution_engine'] {}
+# CHECK:         pipeline: builtin.module(convert-scf-to-cf,convert-cf-to-llvm,convert-arith-to-llvm,convert-func-to-llvm,reconcile-unrealized-casts)
 # CHECK:         gpu bindings loaded: False
 print("RESULT:", scale_store(3, np.zeros(4, np.float32)))
+print(
+    "plugins:", [p.name for p in CpuOnlyDSL().plugins], CpuOnlyDSL().unavailable_plugins
+)
 print("pipeline:", CpuOnlyDSL()._get_pipeline(None))
 print("gpu bindings loaded:", "mlir.dialects.gpu" in sys.modules)

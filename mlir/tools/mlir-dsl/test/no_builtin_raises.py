@@ -1,5 +1,5 @@
 # RUN: %PYTHON %s | FileCheck %s
-# Design 8 (lit kind (h)): package code raises DSLUserCodeError for user
+# Package code raises DSLUserCodeError for user
 # mistakes and DSLRuntimeError for internal invariants, never a bare builtin
 # exception. Every `raise` under the package is inspected syntactically, so
 # comments and strings can neither hide nor fake a hit; a bare `raise` and a

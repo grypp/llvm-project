@@ -1,7 +1,7 @@
 # RUN: env MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR=1 %PYTHON %s 2>&1 | FileCheck %s
 # RUN: %PYTHON %s 2>&1 | FileCheck %s --check-prefix=EXEC
 # REQUIRES: host-supports-jit
-# The scalar type system (Design 5): the dtype catalogue the DSL defines (MLIR
+# The scalar type system: the dtype catalogue the DSL defines (MLIR
 # spelling, width, ctypes/NumPy names, lookups, the open metaclass), the
 # literal and mixed-type promotion rules, the operator-to-op selection for
 # signed/unsigned/float operands (arithmetic, comparisons, bitwise, shifts),
@@ -15,8 +15,9 @@ from typing import Annotated as A
 import numpy as np
 
 import mlir.mlir_dsl as m
+from mlir.dsl.core.common import active_dsl
 from mlir import ir
-from mlir.dsl.plugins.dialects.gpu import GridConstant as GC
+from mlir.dsl.plugins.decorators.kernels.gpu import GridConstant as GC
 
 I8, I16, I32, I64 = m.Int8, m.Int16, m.Int32, m.Int64
 U8, U32, U64 = m.Uint8, m.Uint32, m.Uint64
@@ -54,7 +55,9 @@ def family(label, pred):
     print(f"{label}:", *(row(dt) for dt in dts))
 
 
-with ir.Context():
+# The MLIR spelling of a dtype is the tracing DSL's `type_ops` answer, so the
+# catalogue is read with the test DSL active.
+with ir.Context(), active_dsl(m.MlirTestDSL()):
     family("SIGNED", lambda t: t.is_integer and t.signed and t is not B)
     family("UNSIGNED", lambda t: t.is_integer and not t.signed)
     family("FLOAT", lambda t: t.is_float and t.width >= 16)
@@ -70,7 +73,7 @@ with ir.Context():
 # to the signed dtype of its width, the explicitly signed/unsigned MLIR types
 # to their own); `dtype()` indexes the class names, `from_numpy_dtype()` the
 # NumPy spellings (strings or `np.dtype`s); the abstract bases are not dtypes.
-with ir.Context():
+with ir.Context(), active_dsl(m.MlirTestDSL()):
     si32, ui8 = ir.IntegerType.get_signed(32), ir.IntegerType.get_unsigned(8)
     show("FROM_MLIR", name(back(U8.mlir_type)), name(back(FP8.mlir_type)))
     show("FROM_MLIR si/ui", name(back(si32)), name(back(ui8)))
@@ -119,7 +122,7 @@ class Int24(
 
 
 x24 = Int24(5)
-with ir.Context():
+with ir.Context(), active_dsl(m.MlirTestDSL()):
     show("SUBDSL", Int24 in m.ALL_DTYPES, m.dtype("Int24") is Int24, Int24.bytes)
     show("SUBDSL range", Int24.min, Int24.max, Int24.ctype, Int24._np_dtype_name)
     show("SUBDSL lookup", back(ir.IntegerType.get_signless(24)) is Int24)
@@ -186,7 +189,7 @@ err("NARROW Int8+fp8", lambda: I8(1) + m.Float8E5M2(2.0))
 # constant of the promoted dtype; equal-width signed/unsigned needs no op.
 @m.jit
 def staged_promote(a: I64, f: F32, u: U32, h: F16, b: I8) -> F64:
-    x = a + f  # Int64 + Float32 -> Float64 (Design 5, example 2)
+    x = a + f  # Int64 + Float32 -> Float64
     y = u + a  # Uint32 + Int64 -> Int64: zero-extend the unsigned side
     z = h + 2  # Float16 + Int32 literal -> Float32: extf, f32 constant
     w = b + a  # Int8 + Int64 -> Int64: sign-extend
@@ -212,8 +215,8 @@ def staged_promote(a: I64, f: F32, u: U32, h: F16, b: I8) -> F64:
 print("RESULT:", staged_promote(1, 0.5, 2**32 - 1, 1.5, -3))
 
 
-# --- Operator-to-op selection (`plugins/dialects/llvm/arith.py`, through the
-# LLVM world's emitter): the promoted dtype
+# --- Operator-to-op selection (`plugins/type_ops/arith.py`, through the
+# `TypeOps` plugin): the promoted dtype
 # picks the signed, unsigned or float form; `//` on floats is `divf` +
 # `math.floor`; `-x` on an integer is `0 - x`; `~x` is `xor(x, -1)`; `>>` is
 # arithmetic for signed and logical for unsigned dtypes; `**` is `math.powf`
@@ -486,7 +489,7 @@ err("Int32(nan)", lambda: I32(float("nan")))
 err("Int32(str)", lambda: I32("5"))
 err("dtype(float32)", lambda: m.dtype("float32"))
 err("from_numpy_dtype(complex64)", lambda: npd("complex64"))
-with ir.Context():
+with ir.Context(), active_dsl(m.MlirTestDSL()):
     err("from_mlir_type(index)", lambda: back(ir.IndexType.get()))
 err("align(6)", lambda: m.align(6))
 # CHECK: Int32(str): ARG_NOT_NUMERIC
@@ -523,7 +526,7 @@ staged_errors(1, 2, 1.5)
 # representative passes through an owning `c_void_p` (a payload widens to the
 # dtype); Float16/BFloat16 travel as bit patterns the DSL computes itself
 # (f16 rounds and saturates to inf, bf16 truncates); the staged-only dtypes
-# are full Numerics in a trace but raise `ARG_NOT_MARSHALABLE` at the boundary.
+# are full Numerics in a trace but raise `ARG_UNSUPPORTED_TYPE` at the boundary.
 def ms(dt, v):
     c = dt.marshal(v)._keepalive
     return f"{name(dt)}={ctypes.sizeof(c)}:{c.value!r}"
@@ -539,13 +542,13 @@ show("BF16", bf16(1.0), bf16(3.14159), bf16(1e-40), bf16(float("nan")), bf16(-1e
 # CHECK: BF16: 0x3f80 0x4049 0x1 0x7fc0 0xff80
 for dt in (m.Int4, m.Int128, TF32, FP8):
     err(f"marshal {name(dt)}", lambda: dt.marshal(dt(1), arg_name="x"))
-# CHECK: marshal Int4: ARG_NOT_MARSHALABLE
-# CHECK: marshal Int128: ARG_NOT_MARSHALABLE
-# CHECK: marshal TFloat32: ARG_NOT_MARSHALABLE
-# CHECK: marshal Float8E4M3FN: ARG_NOT_MARSHALABLE
+# CHECK: marshal Int4: ARG_UNSUPPORTED_TYPE
+# CHECK: marshal Int128: ARG_UNSUPPORTED_TYPE
+# CHECK: marshal TFloat32: ARG_UNSUPPORTED_TYPE
+# CHECK: marshal Float8E4M3FN: ARG_UNSUPPORTED_TYPE
 
 # Known defects, reported separately and not asserted here: widening a signed
 # staged integer to a wider unsigned dtype emits `extui` instead of `extsi`;
-# `ARG_NOT_MARSHALABLE` for a staged-only `@jit` parameter names `value`
+# `ARG_UNSUPPORTED_TYPE` for a staged-only `@jit` parameter names `value`
 # instead of the parameter; a plain `int` under `Annotated[Int32, ...]` is
 # rejected (`ARG_UNSUPPORTED_TYPE`) where a bare `Int32` annotation casts it.

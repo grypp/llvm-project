@@ -77,7 +77,7 @@ def check(label, got, want):
 
 
 def main():
-    dsl = m.MlirDSL()
+    dsl = m.MlirTestDSL()
 
     def compiled():
         # A specialization is compiled, or loaded from the on-disk cache of an
@@ -101,7 +101,7 @@ def main():
         broken(Mutable(scale=m.Float32(2.0)))
     except m.DSLUserCodeError as e:
         diag = e.diag_id
-    assert diag is m.DiagId.CONTAINER_DATACLASS_NOT_FROZEN, diag
+    assert diag is m.DiagId.CONTAINER_INVALID_RECORD, diag
     print("non-frozen dataclass:", diag.name)
     print("Dataclass arguments and carries: passed")
 

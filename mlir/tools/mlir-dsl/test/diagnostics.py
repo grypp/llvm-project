@@ -1,5 +1,5 @@
 # RUN: env MLIR_DSL_DRYRUN=1 %PYTHON %s 2>&1 | FileCheck %s
-# Diagnostics (Design 8), the DSL-owned half only: the DiagId/WarnId catalogue
+# Diagnostics, the DSL-owned half only: the DiagId/WarnId catalogue
 # invariants and `fill`; DSLUserCodeError attributes, locations and rendering;
 # the author-frame finder and sub-DSL registration; the code frame renderer;
 # one rendered error per catalogue category from a real trigger; the
@@ -15,7 +15,7 @@ import tempfile
 import warnings
 
 import mlir.mlir_dsl as m
-from mlir.dsl.compiler.compiler import OptLevel
+from mlir.dsl.plugins.compiler.execution_engine import OptLevel
 from mlir.dsl.core.common import (
     DSLRuntimeError,
     DSLUserCodeError,
@@ -37,7 +37,7 @@ from mlir.dsl.core.diagnostics import (
     render_user_diagnostic,
 )
 from mlir.dsl.core.env_manager import EnvironmentVarManager
-from mlir.dsl.plugins.dialects.gpu import GpuDiagId, check_arch
+from mlir.dsl.plugins.decorators.kernels.gpu import GpuDiagId, check_arch
 
 HERE = os.path.abspath(__file__)
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -288,7 +288,7 @@ show("nofile", render_code_frame(None, 2, 0, 1))
 
 
 # --- One rendered error per catalogue category, each from a real trigger ----
-# PHASE: a Python value changed inside a staged loop (Design 7.6).
+# PHASE: a Python value changed inside a staged loop.
 @m.jit
 def phase(n: m.Int32) -> m.Int32:
     acc = 0
@@ -337,12 +337,12 @@ def unsup(n: m.Int32) -> m.Int32:
 
 
 report(unsup, 3)
-# CHECK:      error[UNSUP_LOOP_ELSE]:{{.*}} A `for`/`while` loop with an `else:` clause is not supported in compiled code.
+# CHECK:      error[UNSUP_SYNTAX]:{{.*}} A `for`/`while` loop with an `else:` clause is not supported in a compiled function: put the `else:` code after the loop.
 # CHECK-NEXT: -->{{.*}}diagnostics.py:[[#@LINE-9]]:5
 # CHECK:      {{[0-9]+}} |     for i in range(n):
 # CHECK-NEXT: |{{.*}}^^^^^^^^^^^^^^^^^
 # CHECK:      = category: unsupported (a Python construct the DSL does not compile yet)
-# CHECK:      suggestion:{{.*}}Remove the `else:` and put its code after the loop.
+# CHECK:      suggestion:{{.*}}Compiled functions accept a subset of Python: rewrite this part with a
 
 
 # TYPE, ARG, CALL, CONFIG, STRUCT, POINTER and the gpu plugin's CONFIG: direct
@@ -370,10 +370,10 @@ report(lambda: m.compile(plain, 3))
 # CHECK:      error[CALL_MISSING_JIT_DECORATOR]:{{.*}} The function passed to `compile()` is a plain Python function
 # CHECK:      = category: usage (compiling and reusing functions)
 report(lambda: OptLevel(5))
-# CHECK:      error[CONFIG_INVALID_OPT_LEVEL]:{{.*}} Optimization level must be between 0 and 3, but got 5.
+# CHECK:      error[CONFIG_INVALID]:{{.*}} `opt-level` has an invalid setting: the optimization level must be an integer between 0 and 3, but got 5.
 # CHECK:      = category: usage (compile options)
 report(lambda: Vec(z=1))
-# CHECK:      error[STRUCT_UNEXPECTED_KWARG]:{{.*}} `Vec(...)` got unexpected keyword argument(s) ['z'].
+# CHECK:      error[STRUCT_CONSTRUCTION]:{{.*}} `Vec(...)` cannot be built: unexpected keyword argument(s) ['z']
 # CHECK:      = category: usage (structs)
 report(lambda: m.Pointer[1, 2, 3])
 # CHECK:      error[POINTER_BAD_SUBSCRIPT]:{{.*}} `Pointer[1, 2, 3]` is not a valid pointer annotation.
@@ -410,7 +410,7 @@ cause = Exception(
     "for all operands and results\n"
     'see current operation: %0 = "arith.addi"(%arg0, %arg1) : (i32, f32) -> i32'
 )
-print(str(DSLRuntimeError("ICE IR Verification Failed", cause=cause)))
+print(str(DSLRuntimeError("IR verification failed", cause=cause)))
 # CHECK:      error[INTERNAL]:{{.*}} The compiler could not build valid IR for this code.
 # CHECK:      -->{{.*}}kernel.py:6:12
 # CHECK:      > 6 |     return a + b

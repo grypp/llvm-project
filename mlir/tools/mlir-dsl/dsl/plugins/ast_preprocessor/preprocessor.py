@@ -8,16 +8,16 @@ The AST preprocessor: rewrites native Python control flow into region functions.
 ``DSLPreprocessor`` parses the source of a decorated function and rewrites
 ``for`` loops into ``@loop_selector`` bodies, ``if``/``elif``/``else`` into
 ``@if_selector`` regions and ``while`` loops into ``@while_selector`` regions
-(Design 7.1, 7.2). Each region decides at trace time whether it is staged or
+. Each region decides at trace time whether it is staged or
 runs as native Python; a ``for`` over a bare ``range`` is likewise dispatched
-at trace time between a staged loop and a native Python loop (Design 7.4). Ternaries, ``and``/``or``/``not``, comparison chains, ``assert``
+at trace time between a staged loop and a native Python loop. Ternaries, ``and``/``or``/``not``, comparison chains, ``assert``
 and ``bool()`` are routed through the helpers of ``helpers``.
 
 A ``ScopeManager`` tracks the names bound so far; ``analyze_region_variables``
 classifies the names a region stores, mutates or invokes and the rewrite
 threads the stored ones through the region (the write_args protocol). The
 preprocessor is generic: the DSL supplies the executors behind the selectors
-(``core.executor.Executor.set_functions``).
+(``core.staging.Executor.set_functions``).
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from typing import Any, ClassVar, TypeVar
 from .... import ir
 from ...core.common import DSLRuntimeError, DSLUserCodeError
 from ...core.diagnostics import DiagId
-from ...util import phase_profiler
+from ...util import profiler
 from ...util.logger import log
 from .helpers import register_deferred_for_error
 
@@ -598,12 +598,12 @@ _ComprehensionT = TypeVar(
 
 
 class DSLPreprocessor(ast.NodeTransformer):
-    """The AST transformer behind ``@jit``/``@kernel`` (Design 7.1).
+    """The AST transformer behind ``@jit``/``@kernel``.
 
     - ``for`` loops become ``@loop_selector`` body functions, ``if``/``elif``/
       ``else`` become ``@if_selector`` regions and ``while`` loops
       ``@while_selector`` regions; each returns the names it stores (the
-      write_args protocol, Design 7.2).
+      write_args protocol).
     - Ternaries, ``and``/``or``/``not``, comparison chains, ``assert``,
       ``bool()``, zero-argument ``super()`` and calls into MLIR dialect modules
       are routed through ``helpers`` and the client DSL package.
@@ -611,8 +611,8 @@ class DSLPreprocessor(ast.NodeTransformer):
       cannot be read, and the DSL decorator must be the innermost one.
 
     :param client_module_name: The DSL package the rewrite imports as
-        ``__module_dsl__`` (``["mlir", "dsl"]`` for ``MlirDSL``), as path parts
-    :param warnings_ignore: Reserved for a sub-DSL's own warnings
+        ``__module_dsl__`` (the DSL's ``dsl_package_name``, ``["mlir", "mlir_dsl"]``
+        for ``MlirTestDSL``), as path parts
     :param if_born_locals_escape: Whether a name first bound in an arm of a
         staged ``if`` and read after it is threaded through the region (seeded
         ``None``); when False such a read is ``SCOPE_REGION_LOCAL_ESCAPES``
@@ -622,7 +622,7 @@ class DSLPreprocessor(ast.NodeTransformer):
     DECORATOR_IF_STATEMENT = "if_selector"
     DECORATOR_WHILE_STATEMENT = "while_selector"
     IF_EXECUTOR = "if_executor"
-    IFEXP_EXECUTOR = "ifExp_executor"
+    IFEXP_EXECUTOR = "ifexp_executor"
     WHILE_EXECUTOR = "while_executor"
     ASSERT_EXECUTOR = "assert_executor"
     IMPLICIT_DOWNCAST_NUMERIC_TYPE = "as_ir_value"
@@ -681,7 +681,6 @@ class DSLPreprocessor(ast.NodeTransformer):
         self,
         client_module_name: list[str],
         *,
-        warnings_ignore: bool = False,
         if_born_locals_escape: bool = True,
         closure_check: bool = True,
     ) -> None:
@@ -689,7 +688,6 @@ class DSLPreprocessor(ast.NodeTransformer):
         # Persistent state
         self.processed_functions: set[Callable[..., Any]] = set()
         self.client_module_name = client_module_name
-        self.warnings_ignore: bool = warnings_ignore
         # False: a region calling nested functions gets no ``closure_check`` call.
         self.closure_check: bool = closure_check
         # A name first bound inside an arm of a staged ``if`` and read after
@@ -819,7 +817,7 @@ class DSLPreprocessor(ast.NodeTransformer):
             if source_name is not None and source_name not in exec_globals:
                 exec_globals[source_name] = default_val
 
-    @phase_profiler.timed("ast-build")
+    @profiler.timed("ast-build")
     def transform_function(
         self, func_name: str, function_pointer: Callable[..., Any]
     ) -> list[ast.stmt]:
@@ -828,7 +826,7 @@ class DSLPreprocessor(ast.NodeTransformer):
         Parses the source, re-bases line and column offsets onto the original
         file, checks the decorator, rewrites the body, prepends the runtime
         alias imports, strips the decorators and, when the function has free
-        variables, wraps it in a factory that binds them (Design 7.1).
+        variables, wraps it in a factory that binds them.
 
         :param func_name: The function's name
         :param function_pointer: The function whose source is rewritten
@@ -843,7 +841,7 @@ class DSLPreprocessor(ast.NodeTransformer):
 
         # Step 1. Parse the given function
         try:
-            parse_start = phase_profiler.start("ast-build/parse")
+            parse_start = profiler.start("ast-build/parse")
             file_name = inspect.getsourcefile(function_pointer) or "<unknown>"
             lines, start_line = inspect.getsourcelines(function_pointer)
             raw_source = "".join(lines)
@@ -871,7 +869,7 @@ class DSLPreprocessor(ast.NodeTransformer):
                         walked.col_offset += col_shift  # type: ignore[attr-defined]
                     if getattr(walked, "end_col_offset", None) is not None:
                         walked.end_col_offset += col_shift  # type: ignore[attr-defined]
-            phase_profiler.stop("ast-build/parse", parse_start)
+            profiler.stop("ast-build/parse", parse_start)
         except (OSError, TypeError) as e:
             # No retrievable source (REPL / exec())
             raise DSLUserCodeError(DiagId.UNSUP_NO_SOURCE, func=func_name, cause=e)
@@ -901,9 +899,9 @@ class DSLPreprocessor(ast.NodeTransformer):
         )
 
         # Step 2. Transform the function
-        visit_start = phase_profiler.start("ast-build/visit")
+        visit_start = profiler.start("ast-build/visit")
         transformed_tree = self.visit(tree)
-        phase_profiler.stop("ast-build/visit", visit_start)
+        profiler.stop("ast-build/visit", visit_start)
 
         # Step 3. Import the runtime aliases: the client DSL package (only when
         # a rewrite needs it) and this package's helpers module.
@@ -1389,7 +1387,9 @@ class DSLPreprocessor(ast.NodeTransformer):
         args = iter_node.args
         if not 1 <= len(args) <= 3:
             raise DSLUserCodeError(
-                DiagId.UNSUP_RANGE_ARGS,
+                DiagId.UNSUP_SYNTAX,
+                what="`range(...)` with this number of positional arguments",
+                detail=": call it as `range(stop)`, `range(start, stop)` or `range(start, stop, step)`, with loop options such as `unroll=` by keyword",
                 filename=self.session_data.file_name,
                 lineno=getattr(iter_node, "lineno", None),
                 col_offset=getattr(iter_node, "col_offset", None),
@@ -1897,7 +1897,7 @@ class DSLPreprocessor(ast.NodeTransformer):
         return [iter_assign, visited]
 
     def visit_For(self, node: ast.For) -> ast.For | list[ast.stmt]:
-        """Dispatch a ``for`` to its loop form (Design 7.4).
+        """Dispatch a ``for`` to its loop form.
 
         Under the NATIVE policy a loop owning an early exit stays native; a ``<module>.range(...)`` call
         is staged; a list/tuple display is a native loop; anything else (a
@@ -1957,7 +1957,7 @@ class DSLPreprocessor(ast.NodeTransformer):
 
         Rejects early exits and a loop ``else``; a loop target that is live
         before the loop is carried through ``loop_carried_var_N`` and restored
-        after it (Design 7.2).
+        after it.
 
         :return: the statements replacing the loop: optional carry setup and
             ``closure_check``, the decorated body and the write-back
@@ -1965,7 +1965,9 @@ class DSLPreprocessor(ast.NodeTransformer):
         self.check_early_exit(node, "for")
         if node.orelse:
             raise DSLUserCodeError(
-                DiagId.UNSUP_LOOP_ELSE,
+                DiagId.UNSUP_SYNTAX,
+                what="A `for`/`while` loop with an `else:` clause",
+                detail=": put the `else:` code after the loop",
                 filename=self.session_data.file_name,
                 lineno=node.lineno,
                 col_offset=node.col_offset,
@@ -2248,7 +2250,9 @@ class DSLPreprocessor(ast.NodeTransformer):
             )
         elif node.id == "_" and is_load:
             raise DSLUserCodeError(
-                DiagId.UNSUP_READ_UNDERSCORE,
+                DiagId.UNSUP_SYNTAX,
+                what="Reading the throwaway name `_`",
+                detail=": give the value a real name",
                 filename=self.session_data.file_name,
                 lineno=getattr(node, "lineno", None),
                 col_offset=getattr(node, "col_offset", None),
@@ -2295,7 +2299,7 @@ class DSLPreprocessor(ast.NodeTransformer):
         """Whether ``node`` is a function carrying a DSL decorator.
 
         The DSL decorator must be the innermost one (written directly above
-        ``def``); otherwise ``UNSUP_DECORATOR_ORDER`` is raised.
+        ``def``); otherwise ``UNSUP_SYNTAX`` is raised.
         """
         if not isinstance(node, ast.FunctionDef):
             return False
@@ -2311,12 +2315,13 @@ class DSLPreprocessor(ast.NodeTransformer):
         ):
             decorator_node = decorator_list[dsl_decorator_index]
             raise DSLUserCodeError(
-                DiagId.UNSUP_DECORATOR_ORDER,
+                DiagId.UNSUP_SYNTAX,
                 filename=self.session_data.file_name,
                 lineno=getattr(decorator_node, "lineno", None),
                 col_offset=getattr(decorator_node, "col_offset", None),
                 end_col_offset=getattr(decorator_node, "end_col_offset", None),
-                decorator=ast.unparse(decorator_node),
+                what=f"`{ast.unparse(decorator_node)}` above another decorator",
+                detail=": it must be the innermost decorator, written directly above `def`",
             )
 
         return dsl_decorator_index is not None
@@ -2326,9 +2331,11 @@ class DSLPreprocessor(ast.NodeTransformer):
         return [d for d in decorator_list if self._dsl_decorator_name(d) is None]
 
     def visit_Global(self, node: ast.Global) -> None:
-        """``global`` is not compiled (``UNSUP_GLOBAL``)."""
+        """``global`` is not compiled (``UNSUP_SYNTAX``)."""
         raise DSLUserCodeError(
-            DiagId.UNSUP_GLOBAL,
+            DiagId.UNSUP_SYNTAX,
+            what="`global`",
+            detail=": compiled code cannot assign to a module-level variable; pass the value in as an argument and return the updated value",
             filename=self.session_data.file_name,
             lineno=getattr(node, "lineno", None),
             col_offset=getattr(node, "col_offset", None),
@@ -2343,13 +2350,13 @@ class DSLPreprocessor(ast.NodeTransformer):
         for name in node.names:
             if name not in intersect:
                 raise DSLUserCodeError(
-                    DiagId.UNSUP_NONLOCAL,
+                    DiagId.UNSUP_SYNTAX,
                     filename=self.session_data.file_name,
                     lineno=getattr(node, "lineno", None),
                     col_offset=getattr(node, "col_offset", None),
                     end_col_offset=getattr(node, "end_col_offset", None),
-                    stmt=ast.unparse(node),
-                    name=name,
+                    what=f"`{ast.unparse(node)}`",
+                    detail=f": `{name}` belongs to an enclosing function, which compiled code cannot assign to; pass it in as an argument and return the updated value",
                 )
         self.generic_visit(node)
         return node
@@ -2455,7 +2462,9 @@ class DSLPreprocessor(ast.NodeTransformer):
         # the staged ``for ... else`` rejection).
         if node.orelse:
             raise DSLUserCodeError(
-                DiagId.UNSUP_LOOP_ELSE,
+                DiagId.UNSUP_SYNTAX,
+                what="A `for`/`while` loop with an `else:` clause",
+                detail=": put the `else:` code after the loop",
                 filename=self.session_data.file_name,
                 lineno=node.lineno,
                 col_offset=node.col_offset,
@@ -2815,7 +2824,7 @@ class DSLPreprocessor(ast.NodeTransformer):
         full_write_args_count: int,
         mutated_names: Sequence[str] = (),
     ) -> ast.FunctionDef:
-        """Create the ``@if_selector`` region of an ``if`` (Design 7.2).
+        """Create the ``@if_selector`` region of an ``if``.
 
         The region defines ``then_block_N``/``else_block_N`` over the
         write_args and returns ``if_executor(...)``; an ``elif`` becomes a

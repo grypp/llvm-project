@@ -1,7 +1,7 @@
 # RUN: env MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR=1 %PYTHON %s 2>&1 | FileCheck %s
 # RUN: %PYTHON %s 2>&1 | FileCheck %s --check-prefix=EXEC
 # REQUIRES: host-supports-jit
-# The composite leaf types (Design 4, 4b, 6): the `Pointer` API (annotation,
+# The composite leaf types: the `Pointer` API (annotation,
 # host object, indexing, load/store, masked access, conversions, host-boundary
 # adaptation, region carries) and its `POINTER_*`/`ARG_*` errors; `@struct`/
 # `make_struct`/`Struct` semantics (fields, replace,
@@ -14,7 +14,7 @@ import sys
 import numpy as np
 
 import mlir.mlir_dsl as m
-from mlir.dsl.plugins.thirdparty.pytorch import from_torch_dtype
+from mlir.dsl.plugins.adapters.pytorch import from_torch_dtype
 
 I8, I32, I64, U8, U32 = m.Int8, m.Int32, m.Int64, m.Uint8, m.Uint32
 F16, F32, B, V, P, S = m.Float16, m.Float32, m.Boolean, m.Vector, m.Pointer, m.Struct
@@ -81,7 +81,7 @@ err("Pointer(-5)", lambda: P(-5))
 err("host toint", lambda: hp.toint())
 print(str(err("host ir_value", lambda: hp.ir_value())))
 # CHECK: Pointer(str): ARG_UNSUPPORTED_TYPE
-# CHECK: Pointer(-5): ARG_POINTER_NEGATIVE
+# CHECK: Pointer(-5): ARG_ANNOTATION_MISMATCH
 # CHECK: host toint: CALL_OUTSIDE_JIT
 # CHECK: host ir_value: <free-form>
 # CHECK: error:{{.*}}A host pointer{{.*}}can only enter compiled code as an argument
@@ -248,7 +248,7 @@ def addr_of(p: P[F32]) -> I64:
 ints = np.zeros(3, np.int32)
 unannotated(ints, 9)
 addr = buf.ctypes.data
-same = lambda r: "?" if m.is_dynamic_expression(r) else r == addr
+same = lambda r: "?" if m.is_mlir_op(r) else r == addr
 results = [addr_of(addr), addr_of(ctypes.c_void_p(addr)), addr_of(buf)]
 results.append(addr_of(P(addr, dtype=F32)))
 print("ADDRESSES:", ints.tolist(), *(same(r) for r in results))
@@ -263,11 +263,11 @@ bad_args = [
 ]
 for label, arg in bad_args:
     err(f"arg {label}", lambda: addr_of(arg))
-# CHECK: arg negative: ARG_POINTER_NEGATIVE
+# CHECK: arg negative: ARG_ANNOTATION_MISMATCH
 # CHECK: arg float64 array: ARG_ANNOTATION_MISMATCH
 # CHECK: arg other space: ARG_ANNOTATION_MISMATCH
-# CHECK: arg strided: ARG_BUFFER_NOT_CONTIGUOUS
-# CHECK: arg device on host: ARG_DEVICE_BUFFER_ON_HOST
+# CHECK: arg strided: ARG_BUFFER_INVALID
+# CHECK: arg device on host: ARG_BUFFER_INVALID
 # CHECK: arg str: ARG_ANNOTATION_MISMATCH
 # CHECK: arg bool: ARG_ANNOTATION_MISMATCH
 
@@ -325,7 +325,7 @@ err("join dtype", lambda: join_dtype(buf, a4, 3))
 # iterates the fields, struct and `Pointer` fields nest, a struct result is
 # its leaves in the packed host result and a rebound struct is carried leaf by
 # leaf. No `llvm.struct` appears anywhere; `make_struct` builds the same class
-# as the decorator; a Python-typed field is `STRUCT_FIELD_TYPE`.
+# as the decorator; a Python-typed field is `STRUCT_DEFINITION`.
 @m.struct
 class Vec2:
     x: I32
@@ -391,7 +391,7 @@ fbuf = np.array([0.0, 7.0], np.float32)
 hptr = P(fbuf.ctypes.data, dtype=F32, kind="host", keepalive=fbuf)
 o = Outer(inner=Inner(x=3, y=4.0), u=200, h=1.5, p=hptr)
 total, pair = nested(o, fbuf)  # 200 + 1.5 + 1 + 0.5 + 7
-if not m.is_dynamic_expression(total):
+if not m.is_mlir_op(total):
     print("RESULT:", total, repr(pair), fbuf.tolist())
 # EXEC: RESULT: 210.0 Pair(lo=Int32(1), hi=Int32(2)) [4.0, 7.0]
 
@@ -450,10 +450,10 @@ err("field value", lambda: Vec2(x="a"))
 err("nested kind", lambda: m.make_struct("N", v=Vec2)(v=3))
 err("assign", lambda: setattr(o, "u", 1))
 err("jit int arg", lambda: vec2_ops(3))
-# CHECK: no fields: STRUCT_NO_FIELDS
-# CHECK: python field: STRUCT_FIELD_TYPE
-# CHECK: unexpected kwarg: STRUCT_UNEXPECTED_KWARG
-# CHECK: positional: STRUCT_VALUE_TYPE
+# CHECK: no fields: STRUCT_DEFINITION
+# CHECK: python field: STRUCT_DEFINITION
+# CHECK: unexpected kwarg: STRUCT_CONSTRUCTION
+# CHECK: positional: STRUCT_CONSTRUCTION
 # CHECK: field value: ARG_NOT_NUMERIC
 # CHECK: nested kind: ARG_ANNOTATION_MISMATCH
 # CHECK: assign: STRUCT_FIELD_ASSIGNMENT
@@ -468,9 +468,9 @@ def staged_struct_errors(v: Vec2, i: I32):
 
 staged_struct_errors(Vec2(x=1), 2)
 print(str(err("rendered", lambda: Vec2(1, 2.0))))
-# CHECK: staged arity: STRUCT_FIELD_ARITY
+# CHECK: staged arity: STRUCT_CONSTRUCTION
 # CHECK: staged assign: STRUCT_FIELD_ASSIGNMENT
-# CHECK: error[STRUCT_VALUE_TYPE]:{{.*}}`Vec2(...)` takes keyword arguments naming its fields
+# CHECK: error[STRUCT_CONSTRUCTION]:{{.*}}`Vec2(...)` cannot be built: it takes keyword arguments naming its fields
 # CHECK: suggestion:{{.*}}`Vec2(x=
 
 
@@ -589,7 +589,7 @@ staged_vec("bool", lambda a, g, v: bool(v))
 # CHECK: mixed lanes: TYPE_IMPLICIT_PROMOTION_UNSUPPORTED
 # CHECK: lane oob: ARG_ANNOTATION_MISMATCH
 # CHECK: lane staged: PHASE_DYNAMIC_INDEX
-# CHECK: empty: CALL_MISSING_ARG
+# CHECK: empty: CALL_ARGUMENTS
 # CHECK: splat staged lanes: PHASE_REQUIRES_CONSTANT
 # CHECK: wrap scalar: TYPE_UNSUPPORTED_MLIR_TYPE
 # CHECK: bool: PHASE_DYNAMIC_TO_STATIC_BOOL

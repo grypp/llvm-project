@@ -8,7 +8,7 @@
 import numpy as np
 
 import mlir.mlir_dsl as m
-from mlir.dsl.plugins.thirdparty import dlpack
+from mlir.dsl.plugins.adapters import dlpack
 
 
 class Wrapped:
@@ -32,7 +32,7 @@ def err(label, fn):
         print(f"{label}: {e.diag_id.name}")
 
 
-dsl = m.MlirDSL()
+dsl = m.MlirTestDSL()
 # CHECK: PLUGIN: True ['dlpack']
 print(
     "PLUGIN:", dlpack.available(), [p.name for p in dsl.plugins if p.name == "dlpack"]
@@ -99,7 +99,7 @@ print("AXPY:", ys)
 # CHECK-SAME:    %{{.+}}: !llvm.ptr) -> i32
 # EXEC:          FIRST: 7
 print("FIRST:", first(Wrapped(np.array([7, 8], dtype=np.int32))))
-# CHECK: strided: ARG_BUFFER_NOT_CONTIGUOUS
+# CHECK: strided: ARG_BUFFER_INVALID
 err("strided", lambda: axpy(2, 1.0, Wrapped(xs[::2]), Wrapped(ys)))
 # CHECK: dtype: ARG_ANNOTATION_MISMATCH
 err("dtype", lambda: axpy(2, 1.0, Wrapped(grid), Wrapped(ys)))

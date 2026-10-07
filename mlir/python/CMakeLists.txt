@@ -993,6 +993,10 @@ add_mlir_python_modules(MLIRPythonModules
   COMMON_CAPI_LINK_LIBS
     MLIRPythonCAPI
 )
+if(TARGET MLIRPythonModulesMlirTestDSL)
+  # The reference sub-DSL of mlir/tools/mlir-dsl is installed by its own target.
+  add_dependencies(MLIRPythonModules MLIRPythonModulesMlirTestDSL)
+endif()
 if(MLIR_PYTHON_STUBGEN_ENABLED)
   add_dependencies(MLIRPythonModules "${_mlir_typestub_gen_target}")
   if(MLIR_INCLUDE_TESTS)

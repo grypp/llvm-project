@@ -11,10 +11,8 @@ instance and its environment manager.
 
 import contextlib
 import contextvars
-import sys
-import types
 import warnings
-from typing import Any, Callable, Dict, Generator, Optional, Union
+from typing import Any, Dict, Generator, Optional, Union
 
 from .diagnostics import (
     DiagCatalog,
@@ -35,7 +33,6 @@ __all__ = [
     "get_current_env_manager",
     "active_dsl",
     "get_current_dsl",
-    "install_excepthook",
 ]
 
 
@@ -365,59 +362,3 @@ def report_warning(
         DSLWarning(warn_id, filename=filename, lineno=lineno, **fields),
         stacklevel=stacklevel,
     )
-
-
-# =============================================================================
-# Exception hook (opt-in)
-# =============================================================================
-
-_original_excepthook: Optional[Callable[..., Any]] = None
-
-
-def _dsl_excepthook(
-    exc_type: type,
-    exc_value: BaseException,
-    exc_traceback: Optional[types.TracebackType],
-) -> None:
-    """
-    Custom exception hook that shows clean error messages for DSL exceptions.
-    For DSL errors, shows only the formatted message without traceback.
-    For other exceptions, uses the default Python traceback.
-    """
-    original = _original_excepthook or sys.__excepthook__
-
-    # Check if show_stacktrace is enabled via registered env manager
-    show_stacktrace = False
-    env_manager = getattr(exc_value, "_dsl_env_manager", None)
-    if env_manager is None:
-        env_manager = get_current_env_manager()
-    if env_manager is not None:
-        show_stacktrace = getattr(env_manager, "show_stacktrace", False)
-
-    if issubclass(exc_type, DSLBaseError):
-        if show_stacktrace:
-            # Show full traceback in verbose mode
-            original(exc_type, exc_value, exc_traceback)
-        else:
-            # Just print the formatted message (which is in __str__)
-            print(str(exc_value), file=sys.stderr)
-        # Don't kill an interactive session (REPL, `python -i`, PYTHONINSPECT)
-        if not (hasattr(sys, "ps1") or sys.flags.interactive or sys.flags.inspect):
-            sys.exit(1)
-    else:
-        # Use the original exception hook for other exceptions
-        original(exc_type, exc_value, exc_traceback)
-
-
-def install_excepthook() -> None:
-    """Install the DSL exception hook (opt-in; nothing is installed at import).
-
-    Uncaught DSL errors are then printed as their rendered diagnostic only,
-    without a Python traceback, unless the active env manager has
-    ``show_stacktrace`` set.  Calling it twice is harmless.
-    """
-    global _original_excepthook
-    if sys.excepthook is _dsl_excepthook:
-        return
-    _original_excepthook = sys.excepthook
-    sys.excepthook = _dsl_excepthook
