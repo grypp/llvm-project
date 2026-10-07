@@ -1,55 +1,31 @@
 group,feature,extraction_status,slide_numbers,scope_and_evidence
-Language,BaseDSL entry points,same,"13, 18",Existing DKG entry points; target chooses host/device launch
-Language,Unannotated Python arguments,annotation + adapted value,"7, 21",Plain Python config is Meta; adapted registered leaves can stage without annotation
-Language,Constexpr,removed,26,No marker: Python config is Meta; typed/leaf arguments stage
-Language,Annotated staged scalars,same,"19, 21",Definition-site numeric annotation
-Language,Native AST control flow,same,34,Shared preprocessor and executor callback protocol
-Language,range binding-time policy,changed,"5, 35",Bare range follows bound; m.range forces staging
-Language,Loop options and early exits,reduced / same restriction,38,"Discussed in notes: unroll options, downstream annotations, early-exit restriction"
-Language,const_expr / dynamic markers / opt-out,preprocessor API changed,38,preprocess=False bypasses AST rewriting; use typed values and selected builders
-Language,Explicit region builders,SCF plugin,38,"SCF builders are re-exported by the reference DSL, not unconditional core exports"
-Language,Boolean helpers,SCF plugin,38,Selected syntax and SCF plugins supply the reference helpers
-Language,Advanced PyIR mutation,not ported; Amir section,"41, 42",No implementation or technical slides authored for Amir
-Language,f-string / printf,dropped from current subset,42,Omitted from the main core tutorial; target-specific printing remains possible
-Types,"Numeric hierarchy, promotion, casts, align, dtype",same,"19, 20, 21, 22, 23","Type families; materialization, promotion, upcast/downcast, int/float casts, staging errors"
-Types,Constexpr / GridConstant,marker removed / GPU plugin,"20, 26",Meta uses ordinary Python; GridConstant belongs to GPU integration
-Types,Pointer family,emitter protocol,"20, 40",pointer_type/load/store/ptr_add dispatch through active emitter; LLVM default is !llvm.ptr
-Types,Struct and frozen records,field-wise pytree,"20, 36",Frozen fields flatten and rebuild; no aggregate SSA type or packed/zero_init options
-Types,Vector leaf,emitter protocol,20,vector_type/vector_shape/broadcast/extract/reduce are dialect hooks
-Types,Array / TensorDescriptor / DeviceTensor,Pointer + DLPack plugin,28,"No Array API: DlpackTensor inspects metadata and holds lease; contiguous Pointer ABI, explicit sizes"
-Types,Runtime type annotations + registered leaves,changed interface,"24, 45",Leaf registration; Tile IR uses direct typed annotations in the intended extracted interface
-Types,Pytrees and value reconstruction,changed,"24, 36",DKG dunder protocols packaged as explicit leaf registration
-Types,Math helper set,LLVM dialect plugin,20,Core numeric operators dispatch; LLVM plugin supplies math operations
-Types,Torch dtype bridge,PyTorch plugin,"20, 30",Lazy framework integration under plugins/thirdparty/pytorch
-Compile / runtime,Host entry llvm or func,dialect-provided,30,"host_gen_helper; LLVM default func.func + C interface, no host_entry selector"
-Compile / runtime,Core dialect set,dialect-neutral core,"10, 11, 16",Core emits via OpEmitter; SCF+LLVM default plugins resolved on construction
-Compile / runtime,GPU launch,GPU dialect plugin,"18, 47",Kernel helper + target passes/runtime; direct Tile launch is port design
-Compile / runtime,Pass pipeline,changed,"14, 16, 46",Pipeline override and plugin/provider composition
-Compile / runtime,DialectPlugin lifecycle,three plugin protocols,"15, 16, 17, 30",Plugin shared lifecycle; DialectPlugin and ASTPreprocessorPlugin specialize ownership
-Compile / runtime,JIT argument adapter registry,same,30,Retains scoped adapters; DKG already had scopes
-Compile / runtime,In-memory JIT cache,same,33,Compiled function + engine; capacity policy
-Compile / runtime,Persistent JIT cache,same,33,Lowered MLIR bytecode with CRC32 and atomic persistence
-Compile / runtime,CompileCallable bracket options and artifact export,not current API,29,Plain m.compile; optional TVM-FFI export; no compile[...] or export_to_c
-Compile / runtime,TVM-FFI export,same; plugin packaging,30,Optional plugin and builder; does not imply generic JAX ingestion
-Compile / runtime,External bitcode FFI,pending,30,"@extern pending, noted rather than claimed"
-Tooling,Environment manager,core service,"13, 32",Per-DSL prefix and compile-affecting fields retained; catalog counts are not API claims
-Tooling,Diagnostics,same renderer; reduced categories,31,Target-specific error catalogs stay downstream
-Tooling,Structured remarks,same; new MLIR bindings,"31, 32","Local mlir-c and Python API work, not an upstream release claim"
-Tooling,Compiler profiler and source/debug locations,same / reduced,32,"PROFILE_COMPILER, DEBUGINFO, LOC_TRACEBACKS, VERIFY_TRACE"
-Validation,15 Python/binding tests and C API remarks test,historical baseline,32,Superseded by focused v8 validation; one existing diagnostic mismatch recorded
-Validation,40 files / 24.8k lines / 29 environment vars,historical snapshot,15,No current package-size claim; current source and loaded-module fingerprints recorded
-Packaging,License and packaging,separate release work,"10, 11",Inventory is not a relicensing statement; no DKG implementation copied into the slide package
-Target example,Existing CUDA Tile sub-DSL,port design,"43, 44, 45, 46, 47",Existing DKG backend maps to new TileDialect/TileAST; not an implemented or GPU-validated plugin here
-Architecture,Core / reference package split,current,"10, 11, 13, 14",mlir.dsl authoring core; mlir.mlir_dsl reference user namespace
-Plugins,OpEmitter and default replacement,current,"16, 22, 23",Any listed dialect emitter suppresses all default dialect plugins
-Plugins,ASTPreprocessorPlugin,current,"15, 34, 37",Rewrite and callback map are selected independently from dialect lowering
-Plugins,Host/kernel/compiler providers,current,"17, 18, 46",First matching provider; explicit constructor compiler wins
-Plugins,Optional dependency discovery,current,"15, 30",available() guides reference selection; core imports no optional target dependencies
-Plugins,Per-instance installation,current,17,"Shallow-copy listed plugins, install and resolve provider slots"
-Plugins,Module and callable wrappers,current,"17, 30",Attach before module hash; wrap after engine and before memory cache
-Interop,DLPack protocol adapter,current,28,Implemented optional extension; contiguous pointer adaptation and producer lifetime
-Motivation,Four DSL use-case diagrams,current,2,"Four numbered pictures: IR tests, recipe generator, modular services, complete language"
-Architecture,Compiler and frontend diversity,illustrative,"8, 10, 11","Different dialect sets, passes and frontends motivate replaceable plugins"
-Control flow,Tile loop break versus SCF loops,source-checked,8,Optional presenter notes only: Tile loop has break; scf.for has no direct break; while can exit by condition
-Plugins,Define plugin before architecture,current,"9, 10, 11",Selected component supplies behavior through hooks; shared core invokes it
-Architecture,Reusable plugins and end-to-end assemblies,current,"10, 11",Four shared core feature boxes; three plugin families; selected existing plugins over the same core in the reference mlir dsl and a downstream DSL
+Motivation,"Hand-written IR, bindings and DSL",current source / v15,"1, 2, 3",Complete scalar raw bindings program and complete PyTorch DSL program; both executed. Content numbering excludes the cover.
+Motivation,Four NVIDIA use cases,current source / v14,4,Internal dialect tests; recipe IR consumers; reusable services; full user-facing DSL.
+Architecture,Dialect-agnostic core,current source / v14,"5, 6, 7, 8",Empty Plugins record in BaseDSL; no default dialect or compiler.
+Architecture,Tracing with optional syntax capture,current source / v14,"9, 11, 12",Python executes metaprograms; AST plugin captures staged keywords.
+Language,Tracing JIT,current source / v14,14,Selected entry and compiler provide an end-to-end path.
+Language,Two kinds of values,current source / v14,"15, 16, 17",Python payloads versus MLIR-backed leaves; annotations and adapted registered leaves affect staging.
+Types,Numeric families,current source / v14,"18, 19","Numeric wrappers, promotion, materialization, casts and runtime-to-Python errors."
+Types,Replace physical representation,current source / v14,20,TypeOps composition; rank-zero tensor alternate representation is checked in trace-only mode.
+Types,"Vectors, pointers and structs",current source / v14,"21, 22",Type-ops hooks for vectors/pointers; frozen structs flatten as fields.
+Types,Custom leaf registration,current source / v14,23,"Keyword-only ir_types, ir_values and from_ir_values; host marshal is separate."
+Language,Native control flow,current source / v14,"24, 25, 26, 27",Optional AST role captures keywords; SCF implementation supplies rewrite/executors/builders.
+Language,Explicit builders,current source / v14,28,"for_, if_, while_, yield_ without source preprocessing."
+Runtime,Host boundary,current source / v14,29,Core adapters plus optional PyTorch/DLPack; contiguous Pointer ABI and explicit sizes.
+Runtime,Outbound ABI,current source / v14,30,AdapterPlugin attach/after_lowering/wrap; optional TVM-FFI.
+Runtime,Kernels,current source / v14,"31, 32","DecoratorPlugin adds @kernel; LaunchConfig, guarded GPU launches and buffer checks."
+Runtime,Compilation,current source / v14,"33, 34",CompilerPlugin owns lowering/invocation; sub-DSL owns pipeline; plain m.compile ahead of invocation.
+Runtime,Caches,current source / v14,35,In-memory traced-module identity; persistent lowered bytecode with CRC32.
+Runtime,Trace-only,current source / v14,"8, 36",A DSL may omit compiler; type operations and entry still selected for generated IR.
+Tooling,Diagnostics,current source / v14,37,"Stable DiagId, source frames, suggestions, user/runtime exception classes."
+Tooling,Locations and remarks,current source / v14,38,DEBUGINFO traceback locations; REMARKS sessions via compiler.
+Tooling,Observability,current source / v14,39,"Name-prefixed environment settings; profiler, JIT timing and logging."
+Authoring,Sub-DSL class and namespace,current source / v14,"41, 42, 43",One Plugins record; own pipeline and registration; variant via dataclasses.replace.
+Plugins,Four roles,current source / v14,"40, 41","type_ops, func_entry, ast_preprocessor, compiler; each optional singleton."
+Plugins,Two families,current source / v14,"40, 41",decorators and adapters; arbitrary numbers of implementations.
+Plugins,Eight shipped implementations,current source / v14,40,"TypeOps, func.Entry, scf.ASTPreprocessor, execution_engine.Compiler, gpu.Kernels, PyTorchPlugin, DlpackPlugin, TvmFfiPlugin."
+Plugins,Operation modules are not plugins,current source / v14,"40, 20","arith, vector and llvm are modules composed by TypeOps."
+Plugins,Shared lifecycle,current source / v14,44,"available, install, shared_libs, register_dialects; role/family hooks remain separate."
+Execution,Polymorphic recipe,current source / v14,"17, 45","Current-source checks: scalar18 and fused[6,9,12,15]."
+Mutation,Amir handoff,current source / v14,"46, 47",Ten-minute placeholder only; no PyIR technical slides authored.
+Target,Tile integration sketch,current source / v14,"48, 49, 50, 51, 52",New role/family mapping; proposed direct typed API; no executed Tile/GPU port claim.

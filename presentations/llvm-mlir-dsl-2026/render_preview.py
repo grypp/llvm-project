@@ -6,7 +6,7 @@ import pymupdf as fitz
 from PIL import Image, ImageDraw, ImageFont
 
 HERE = Path(__file__).resolve().parent
-doc = fitz.open(HERE / "llvm-mlir-dsl-tutorial-v13.pdf")
+doc = fitz.open(HERE / "llvm-mlir-dsl-tutorial-v16.pdf")
 preview = HERE / "preview"
 preview.mkdir(exist_ok=True)
 font = ImageFont.truetype(str(HERE / "assets" / "fonts" / "NVIDIASans_Rg.ttf"), 14)
@@ -19,7 +19,8 @@ for i, page in enumerate(doc, 1):
     thumb.thumbnail((400, 225))
     card = Image.new("RGB", (420, 255), "#eeeeee")
     card.paste(thumb, (10, 8))
-    ImageDraw.Draw(card).text((12, 236), f"{i:02}", font=font, fill="#616161")
+    label = "Title" if i == 1 else f"{i - 1:02}"
+    ImageDraw.Draw(card).text((12, 236), f"{label}  /  PDF {i:02}", font=font, fill="#616161")
     thumbs.append(card)
 cols = 4
 rows = (len(thumbs) + cols - 1) // cols

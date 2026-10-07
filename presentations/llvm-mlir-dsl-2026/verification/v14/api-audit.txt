@@ -1,0 +1,489 @@
+V14 current API audit — 2026-10-07
+=================================
+Read source tree: /home/gozen/work/llvm-project/mlir/tools/mlir-dsl
+Do not derive implementation claims from old v8/v13 evidence: architecture changed.
+Source references below are relative to that directory.
+
+Naming and architecture
+-----------------------
+Installed core: mlir.dsl. Reference e2e namespace: import mlir.mlir_dsl as m.
+Reference class: MlirTestDSL; it subclasses BaseDSL and names one Plugins record.
+BaseDSL.plugins = Plugins() is empty. The core imports no dialect or plugin.
+It supplies @jit, argument staging, type policy/value model, shared tracing,
+cache orchestration, diagnostics, environment management, and extension contracts.
+Types/operator emission, entry construction, AST rewriting, compilation and extra
+decorators/adapters are selected by the sub-DSL. The core is not an e2e language.
+
+A plugin is a component implementing one named extension contract in Plugins.
+Four single-valued ROLES (at most one plugin per role):
+  type_ops -> TypeOpsPlugin -> OpEmitter type/operator hooks.
+  func_entry -> FuncEntryPlugin -> generate_func_op, generate_return,
+                pack_results, unpack_result.
+  ast_preprocessor -> ASTPreprocessorPlugin -> preprocessor_class,
+                      closure_check, executors(dsl).
+  compiler -> CompilerPlugin -> compile, jit, compile_and_jit, load,
+              remark_session, print_ir_after_passes.
+Two multi-valued FAMILIES (zero or more each):
+  decorators -> DecoratorPlugin -> decorators(dsl_cls), before_trace,
+                after_trace, check_arguments, finish_compiled_function.
+  adapters -> AdapterPlugin -> register(dsl), attach_to_module,
+              after_lowering, wrap_compiled_function.
+Eight shipped plugins:
+  TypeOps, func.Entry, scf.ASTPreprocessor, execution_engine.Compiler,
+  gpu.Kernels, PyTorchPlugin, DlpackPlugin, TvmFfiPlugin.
+TypeOps(scalars=arith, vectors=vector, memory=llvm) is ONE plugin.
+arith/vector/llvm are op modules beside it, not separate plugins.
+Every group of TypeOps is optional. An omitted group diagnoses when used.
+
+Plugin base only shares available(), install(dsl), shared_libs(),
+register_dialects(ctx). BaseDSL resolves record once per concrete singleton
+instance; unavailable optional components are dropped and listed in
+unavailable_plugins; remaining components are shallow-copied and installed in
+record order. An untyped bare Plugin cannot be placed into any Plugins field.
+
+The sub-DSL, not its plugins, owns pipeline(). No plugin contributes passes.
+BaseDSL.pipeline() is []; pipeline= call keyword or <PREFIX>_PIPELINE overrides.
+The reference class explicitly lists the upstream-to-LLVM passes and optionally
+the GPU pipeline when ARCH is set. register_dialects(ctx) is also a sub-DSL hook;
+plugins may register their own dialects via their lifecycle hook.
+
+Primary sources:
+  README.md
+  dsl/core/plugin.py
+  dsl/core/dsl.py
+  dsl/__init__.py
+  sub-dsls/mlir-dsl/dsl/mlir_dsl.py
+  sub-dsls/mlir-dsl/dsl/__init__.py
+  test/core_only.py
+
+Concrete class setup, no reference-DSL dependency
+-------------------------------------------------
+The following is a source-correct CPU DSL for scalar expressions. Keep the long
+imports/pipeline in speaker notes if visible code needs to stay short. A native
+control-flow DSL additionally names scf.ASTPreprocessor(), sets preprocess=True
+and exports the preprocessor helpers through its own dsl_package_name namespace.
+
+from mlir.dsl import BaseDSL, Plugins, Int32
+from mlir.dsl.plugins.type_ops import TypeOps, arith
+from mlir.dsl.plugins.func_entry import func
+from mlir.dsl.plugins.compiler import execution_engine
+
+class MyDSL(BaseDSL):
+    plugins = Plugins(
+        type_ops=TypeOps(scalars=arith),
+        func_entry=func.Entry(),
+        compiler=execution_engine.Compiler(),
+    )
+
+    def __init__(self):
+        super().__init__(name="MY_DSL", preprocess=False)
+
+    def pipeline(self):
+        return ["convert-arith-to-llvm", "convert-func-to-llvm",
+                "reconcile-unrealized-casts"]
+
+@MyDSL.jit
+def add(a: Int32, b: Int32):
+    return a + b
+
+add(5, 7)  # 12
+
+To show the complete assembled record (imports in notes):
+plugins = Plugins(
+    type_ops=TypeOps(scalars=arith, vectors=vector, memory=llvm),
+    func_entry=func.Entry(),
+    ast_preprocessor=scf.ASTPreprocessor(),
+    compiler=execution_engine.Compiler(),
+    decorators=[gpu.Kernels(chip_option="cubin-chip")],
+    adapters=[pytorch.PyTorchPlugin(), dlpack.DlpackPlugin(),
+              tvm_ffi.TvmFfiPlugin()],
+)
+
+Lifecycle details and every hook name belong in notes or later detail slides,
+not the opening architecture picture. A clear figure uses core services on one
+side and the six record fields on the other, with roles and families grouped.
+Reference mlir dsl and Your DSL can select the same shipped components.
+
+Tracing, Meta and runtime values
+-------------------------------
+Python evaluates ordinary objects/imports/classes/dicts/polymorphism while
+tracing. A Numeric holds .value: a Python literal or an ir.Value; its .dtype is
+its class. Both operands with Python payload fold through Python's operator.
+A staged operand makes the type-ops plugin materialize constants and emit IR.
+The active BaseDSL.is_mlir_op judges leaves; public is_mlir_op recursively walks
+tuples, lists and frozen records. Dicts and arbitrary objects remain Python.
+
+IMPORTANT documentation nuance: README says annotations alone decide staging,
+but executable is_argument_meta explicitly also inspects contains_leaf(arg).
+A plain unannotated int/float/bool is Meta. A DSL annotation selects a runtime
+argument. An adapted registered-leaf value can stage even without annotation.
+A reserved receiver, type argument or None is Meta. Plain int annotation is
+Meta, not equivalent to Int32. There is no Constexpr marker.
+
+Python tracing is the selected approach, with optional AST capture for native
+staged if/for/while. Do not say the implementation contains no AST pass.
+The accurate design argument is that Python semantics/metaprogramming need not
+be reimplemented per target: types and operations dispatch through plugins;
+restricted syntax capture handles keywords Python cannot proxy-overload.
+It is not a general theorem that an AST-based frontend cannot target many
+dialects. Present this as the tutorial's scaling/design choice.
+
+Sources: dsl/core/staging.py; dsl/types/typing.py; dsl/core/mlir_op.py;
+         sub-dsls/mlir-dsl/examples/01_staging.py.
+
+Type system and conversions
+---------------------------
+Classes carry width/signedness/type properties. Numeric carries Python or SSA
+payload, not a separate runtime annotation wrapper.
+Literal defaults when entering typed expressions:
+  bool -> Boolean; int -> Int32, or Int64 outside signed i32 range;
+  float -> Float32. Plugin decides the actual MLIR representation.
+Int32.scalar_mlir_type is the underlying scalar i32;
+Int32.mlir_type consults the active DSL type_ops and requires an active trace.
+A plugin instance can answer its mlir_type(Int32) outside a trace.
+
+Promotion is common Python policy before op emission:
+  same types stay the same; same signedness integers choose wider;
+  mixed signedness chooses unsigned when width >= signed width, otherwise signed;
+  floats choose the supported common width; Float16 beats BFloat16 at equal width,
+  Float32 beats TFloat32; unsupported mixed narrow formats diagnose and require
+  an explicit conversion. Comparisons produce Boolean.
+Use examples Int16+Int32 -> Int32 and Int32+Float32 -> Float32.
+
+x.to(m.Float32), m.Float32(x), m.cast(x,m.Float32) convert explicitly.
+Staged operands emit type-ops cast operations. Python payloads fold.
+Narrowing is supported, not always an error. Explicit integer literals can wrap;
+out-of-range magnitude warns. Runtime -> int/float/bool raises
+PHASE_REQUIRES_CONSTANT. Distinguish unsupported promotion errors from explicit
+narrowing warnings and invalid host annotation errors.
+Core type families: signed Int2..Int128, Uint8..Uint128, Boolean; Float16/32/64,
+BFloat16/TFloat32; fp8/fp6/fp4 variants. Availability of a type does not promise
+that every backend/host ABI supports it.
+
+TypeOps replacement (real shipped example, trace-only stand-in):
+class RankZeroTensorTypeOps(TypeOps):
+    def mlir_type(self, dtype):
+        return ir.RankedTensorType.get([], dtype.scalar_mlir_type)
+    def scalar_type(self, ty):
+        if isinstance(ty, ir.RankedTensorType) and ty.rank == 0:
+            return ty.element_type
+        return None
+    # Also override const to build DenseElementsAttr splats.
+
+A slide may label this an implementation excerpt. The full executable sample
+also overrides const; do not present the two methods as the complete plugin.
+sub-dsls/mlir-dsl/examples/14_type_ops_plugin.py gives full code. Its stand-in
+uses tensor<i32> and arith operations, not a working Tile IR backend.
+A real tile plugin supplies scalar/vector/pointer type hooks and each target op.
+No longer say emitter replacement suppresses default dialect plugins: core
+already has no defaults.
+
+Extending a downstream Tensor value model
+----------------------------------------
+register_leaf records a class once at module import. The class may hold raw
+ir.Value in ordinary fields; no prohibited annotation wrappers are needed.
+Illustrative staged-only implementation excerpt:
+
+class Tensor:
+    def __init__(self, value):
+        self.value = value
+
+register_leaf(
+    Tensor,
+    ir_types=lambda x: [x.value.type],
+    ir_values=lambda x: [x.value],
+    from_ir_values=lambda prototype, values: Tensor(values[0]),
+)
+
+This lets a downstream dialect's result participate in calls/region carries.
+It does not define Tensor arithmetic, create that dialect's ops, or marshal a
+host tensor; those are separate behavior/adapters. A host boundary requires a
+marshal function, and an annotation may need a richer type/prototype contract.
+Frozen dataclasses/structs flatten fields; @struct is NOT an LLVM SSA aggregate.
+Reference leaves mark Pointer as reference=True so memory stores don't force
+an SSA carry, unless the pointer name is rebound.
+Sources: dsl/util/tree_utils.py; test/helpers.py (Pair leaf example).
+
+Control flow
+------------
+scf.ASTPreprocessor owns both the rewrite and executors selecting SCF regions.
+There is no separate SCF dialect plugin. Explicit builders are in
+plugins/ast_preprocessor/scf/builders.py and reference namespace re-exports them.
+Native for/if/while, ternaries, comparisons and supported bool/builtin functions
+route on staged operands. Meta control flow remains Python. Bare range with
+Python bounds executes at trace time; m.range explicitly stages.
+Assignment analysis identifies carried names; executors flatten/rebuild values
+and emit iter_args/yields. Frozen records work; unsupported mutable captured
+state diagnoses. Closures inside staged regions are rejected by default;
+scf.ASTPreprocessor(closure_check=False) is an explicit option.
+
+A custom AST plugin can replace preprocessor_class and executors(dsl).
+Current mapping keys are loop_execute_range_dynamic, if_dynamic, while_dynamic,
+compare_executor, builtin_redirector, ifexp_dynamic.
+The old is_dynamic_expression executor key is gone; use is_mlir_op predicate.
+First-listed-AST-plugin semantics no longer apply: exactly one ast_preprocessor
+role in Plugins. Preprocess can be bypassed by @jit(preprocess=False) or env.
+A staged early exit still diagnoses; don't state MLIR scf.while itself cannot
+express early termination. Those are frontend restrictions, not all of MLIR.
+
+Compilation, host boundary, caching
+----------------------------------
+Host entry plugin func.Entry builds func.func + C interface, pack/unpack results.
+No core host_entry='llvm' switch. CompilerPlugin owns lowering AND invocation.
+Reference execution_engine.Compiler runs pass manager + ExecutionEngine + packed
+ctypes calls. A DSL with no compiler traces only and returns traced result;
+explicit compile_only without compiler diagnoses. DRYRUN also traces only.
+No compiler does not mean no type_ops/func_entry: IR generation still needs the
+roles for the values and entry it emits. PRINT_IR displays it; KEEP_IR retains it.
+
+import mlir.mlir_dsl as m
+@m.jit
+def add(a: m.Int32, b: m.Int32):
+    return a + b
+compiled = m.compile(add, 5, 7)  # trace/lower/JIT, do not execute
+result = compiled(8, 9)          # 17
+
+This is compilation ahead of the call, not an object-file AOT export API.
+No bracketed flags syntax. compile_only bypasses normal memory-cache retention.
+Call parameters include pipeline, extra_link_libs, container_attrs, no_cache.
+
+NumPy arrays adapt in core. PyTorchPlugin adapts torch.Tensor through data_ptr,
+dtype and device, keeping ownership with caller. DlpackPlugin adapts the protocol
+through compiled TensorView extension. Both yield a contiguous Pointer; sizes
+are explicit arguments. No m.Array/memref descriptor built by this implementation.
+TvmFfiPlugin is outbound ABI wrapping; optional dependency must be installed.
+
+Cache key: traced module bytecode + affects_compile environment settings +
+pipeline + extra link libraries + toolchain identity. In-memory stores callable;
+disk stores lowered MLIR bytecode with CRC32; file hit skips passes, still builds
+engine. Do not promise that Python tracing is skipped: caching occurs after IR.
+Sources: dsl/core/dsl.py, dsl/util/cache.py, dsl/core/arguments.py,
+         plugins/compiler/execution_engine.py,
+         plugins/adapters/pytorch/plugin.py, plugins/adapters/dlpack/plugin.py,
+         sub-dsls/mlir-dsl/examples/09_compile_and_cache.py.
+
+Kernels and LaunchConfig
+------------------------
+Core only knows @jit. gpu.Kernels in decorators adds @kernel. The generic kernel
+plugin helper is itself a DecoratorPlugin template for downstream targets.
+
+@m.kernel
+def add_one(p: m.Pointer[m.Float32]):
+    i = m.thread_idx()[0]
+    p[i] = p[i] + 1.0
+
+@m.jit
+def run(p: m.Pointer[m.Float32]):
+    add_one(p).launch(m.LaunchConfig(grid=[1], block=[32]))
+
+LaunchConfig also supports keyword .launch(grid=[1], block=[32]); dimensions
+pad to three. Generic GPU path requires launch inside @jit and device memory,
+uses synchronous gpu.launch_func, and checks architecture/buffer kind. Non-empty
+async_deps is rejected. m.kernel call alone only creates pending launcher.
+No general direct Python->GPU-kernel e2e path in this shipped plugin.
+Target custom decorator/compiler may choose a different launch model.
+Sources: plugins/decorators/kernels/launch.py;
+         plugins/decorators/kernels/gpu/__init__.py;
+         sub-dsls/mlir-dsl/examples/12_gpu_kernels.py.
+
+Diagnostics, remarks, observability
+----------------------------------
+User mistakes: DSLUserCodeError with DiagId, source frame/caret/suggestion.
+Framework/configuration failures: DSLRuntimeError. Dialect plugin-specific
+catalogues may define their own stable codes. Do not portray remarks as errors.
+DEBUGINFO adds source/traceback locations; LOC_TRACEBACKS configures depth.
+Compiler's remark_session spans trace and passes, default no-op without compiler.
+MLIR_DSL_REMARKS='.*' enables matched remarks; POLICY all/final; OUTPUT .yaml or
+.bitstream streams output; without OUTPUT records collect in collected_remarks.
+Profiling/logging/cache/IR-print controls use each DSL's <PREFIX>_* environment.
+Reference prefix MLIR_DSL; user prefix e.g. MY_DSL via BaseDSL(name=...).
+
+Current diagnostic code example is verified, no old regression remains:
+@m.jit
+def two_types(n: m.Int32):
+    acc = m.Int32(0)
+    for i in range(n):
+        acc = m.Float32(acc) + 1.0
+    return acc
+# TYPE_UNSTABLE_JOIN, source frame and conversion advice.
+
+Verification performed for this audit
+------------------------------------
+Interpreter: /usr/bin/python3.12
+PYTHONPATH=/home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core
+No source changes, rebuilds or broad suites performed.
+
+Focused import/staging/promotion probe returned:
+  core roles: ('type_ops', 'func_entry', 'ast_preprocessor', 'compiler')
+  core families: ('decorators', 'adapters')
+  base plugins: []
+  core imports dialects: False
+  core imports plugins: False
+  unannotated int meta: True
+  unannotated Numeric meta: False
+  Int32 annotation meta: False
+  literal dtypes: ['Boolean', 'Int32', 'Int64', 'Float32']
+  promote i16+i32: Int32
+  promote i32+f32: Float32
+
+Ran sub-dsls/mlir-dsl/examples/10_diagnostics.py (exit 0):
+  ARG_ANNOTATION_MISMATCH: expected Float32, got str.
+  UNSUP_EARLY_EXIT: staged if owning return.
+  TYPE_UNSTABLE_JOIN: acc Int32 versus Float32.
+  SCOPE_CLOSURE_CAPTURE: nested inc captures k in staged region.
+  Diagnostics: passed.
+The old v8 TYPE_UNSTABLE_JOIN regression note must be removed.
+
+Old v13 claims/interfaces to remove globally
+--------------------------------------------
+DialectPlugin; ScfDialectPlugin; LLVMDialectPlugin; ScfASTPreprocessorPlugin;
+plugins=[...]; default_ast_preprocessor; first-applicable provider selection;
+emitter replacement suppresses SCF/LLVM defaults; pipeline_passes;
+host_gen_helper; kernel_gen_helper; compiler_provider; host_entry='llvm';
+is_dynamic_expression executor callback; runtime/jit_arg_adapters.py;
+plugins/dialects/* paths; util/cache_helpers.py/cache_key.py paths.
+Do not show three plugin kinds anymore: four roles and two families.
+Do not call arith/vector/llvm modules individual plugins.
+Do not make AST-preprocessing implementation a mandatory core feature;
+show shared orchestration in core and chosen capture plugin outside.
+Keep Tile walkthrough labeled port design/sketch until separately implemented.
+
+Focused example execution (requested by parent)
+----------------------------------------------
+All run 2026-10-07 with /usr/bin/python3.12 and PYTHONPATH=build/tools/mlir/python_packages/mlir_core.
+MLIR_DSL_DISABLE_FILE_CACHING=1 on the 7 CPU example invocations; example09 deliberately enables disk cache in its isolated child directory.
+
+01_staging (exit 0)
+host: is_mlir_op=False
+  a: is_mlir_op=True
+  scale: is_mlir_op=False
+scaled(5, 2) = 10
+  a: is_mlir_op=True
+  scale: is_mlir_op=False
+scaled(7, 2) = 14
+cache after scale=2 twice = (1, 1)
+  a: is_mlir_op=True
+  scale: is_mlir_op=False
+scaled(5, 3) = 15
+cache after scale=3 = (2, 1)
+  a: is_mlir_op=True
+  scale: is_mlir_op=False
+scaled(5, 1) = 5
+cache after scale=1 = (3, 1)
+Staging: runtime vs Meta values: passed
+
+02_numeric_types (exit 0)
+int_math(7, 2) -> Int32(16)
+float_math(2.0, 4.0) -> Float32(5.5)
+convert(7, 1.0) -> Int64(11)
+half_scale(1.5, 2.0) -> Float16(1.5)
+is_less(3, 3.5) -> Boolean(True)
+is_less(5, 3.5) -> Boolean(False)
+Numeric types: passed
+
+03_control_flow (exit 0)
+fib(10) = 55
+power(2.0, 10) = 1024.0
+magnitude(-7) = 7
+magnitude(7) = 7
+halvings(1000) = 9
+odd_sum(100, 10) = 123
+odd_sum(100, 0) = -100
+Native control flow: passed
+
+05_structs (exit 0)
+step: ((Float32(2.0), Float32(0.0)), (Float32(0.5), Float32(-1.0)))
+norm2: 25.0
+around: (Int32(7), Int32(13))
+divmod: (Int32(3), Int32(2))
+Structs: passed
+
+07_dataclass_arguments (exit 0)
+affine(3, scale=2, bias=1): 7.0
+affine(4, scale=3, bias=1): 13.0
+compilations after a new scale: 0
+affine(3, scale=2, bias=5): 11.0
+compilations after a new bias: 1
+accumulate(5): Stats(total=Int32(10), count=Int32(5))
+norm2(3, 4): 25.0
+non-frozen dataclass: CONTAINER_INVALID_RECORD
+Dataclass arguments and carries: passed
+
+09_compile_and_cache (exit 0)
+m.compile returns a: JitCompiledFunction
+compiled(2.0, 3.0, 1): 7.0
+axpb(2, 3, 1), axpb(5, 3, 1), axpb(2, 3, 2): [7.0, 16.0, 8.0]
+in-memory (hits, misses): (1, 3)
+child run 1 with MLIR_DSL_CACHE_DIR=/tmp/tmphhvx6ekw
+  child: axpb(2, 3, 1) = 7.0, entries found = 0, file hits: 0
+child run 2 with MLIR_DSL_CACHE_DIR=/tmp/tmphhvx6ekw
+  child: axpb(2, 3, 1) = 7.0, entries found = 1, file hits: 1
+on disk: ['mlir_dsl_f13459e1505a91c5b6084455268e0d45334d742dcc78245661f18956dd6fd3ab.mlir']
+on-disk entries after two runs: 1
+Compilation and caches: passed
+
+14_type_ops_plugin (exit 0)
+Type-ops plugin: passed
+
+AST plugin focused test (exit 0)
+CAPTURED: 15
+PREPROCESSOR: ASTPreprocessor False
+DEFAULT PREPROCESSOR: ASTPreprocessor True []
+NO PREPROCESSOR: the DSL preprocesses (preprocess=True) but names no `ast_preprocessor` plugin wi
+EXPLICIT: 10
+LOOPS: 2 counting_preprocessor
+
+TypeOps example14 DRYRUN=1 PRINT_IR=1 (exit 0)
+
+//===--- ------ Generated IR ------ ---====
+
+module {
+  func.func @on_arith(%arg0: i32) -> i32 attributes {llvm.emit_c_interface} {
+    %c6_i32 = arith.constant 6 : i32
+    %0 = arith.addi %c6_i32, %arg0 : i32
+    return %0 : i32
+  }
+}
+
+//===--- --- End of Generated IR -- ---====
+
+
+//===--- ------ Generated IR ------ ---====
+
+module {
+  func.func @on_tiles(%arg0: tensor<i32>) -> tensor<i32> attributes {llvm.emit_c_interface} {
+    %cst = arith.constant dense<6> : tensor<i32>
+    %0 = arith.addi %cst, %arg0 : tensor<i32>
+    return %0 : tensor<i32>
+  }
+}
+
+//===--- --- End of Generated IR -- ---====
+
+Type-ops plugin: passed
+
+Results update: host numeric results now return Numeric wrappers (repr Int32(12), .value == 12), not raw scalar objects. int(result), float(result) unwrap on host. Above comments showing result 12 or 17 mean its numeric value.
+
+Minimal source-correct AST replacement excerpt (from test/plugins_ast_preprocessor.py):
+from mlir.dsl.plugins.ast_preprocessor import scf
+
+class MyAST(scf.ASTPreprocessor):
+    def executors(self, dsl):
+        hooks = super().executors(dsl)
+        hooks["loop_execute_range_dynamic"] = my_loop_executor
+        return hooks
+
+class MyDSL(BaseDSL):
+    plugins = Plugins(
+        type_ops=...,
+        func_entry=...,
+        ast_preprocessor=MyAST(),
+        compiler=...,
+    )
+
+The ellipses/my_loop_executor are clearly a downstream implementation sketch.
+For a complete working example use CountingPreprocessor in the test: it wraps
+one existing SCF callback, increments a counter and invokes original callback.
+Its runtime result printed LOOPS: 2 counting_preprocessor. A new target's loop
+executor must emit that target's valid regions; changing this one callback does
+not automatically supply its types, func entry, other flow or lowering.

@@ -1,83 +1,83 @@
-mlir dsl tutorial — draft v13
+mlir dsl tutorial — draft v16
 
 How to build a Python DSL for MLIR
 2026 US LLVM Developers’ Meeting · 27 October 2026
 Guray Ozen — Principal Compiler Engineer, NVIDIA
 Amir Tavakkoli — role and affiliation not yet supplied
 
-V13: CORE FEATURES AND PLUGINS AS SIMPLE BOX DIAGRAMS
-Slides 10–11 now use box diagrams with short labels. Slide 10 contains one
-Core DSL foundation with four feature boxes: diagnostics, AST preprocessing
-hooks, JIT cache and type inference. Slide 11 shows the three plugin families
-and reusable implementations, then two DSL assemblies built from selected
-plugins over that same Core DSL: the working mlir dsl and Your DSL.
-There are no code listings, IR fragments or hook-call examples on these two
-slides. Detailed behavior remains in later technical slides and notes.
-The existing opening order, 47-slide count and 45-minute timing are retained.
+V16: AGENDA LABEL
+The final agenda item now reads “Amir: OpenAI Triton DSL”.
 
-CURRENT PLUGIN ARCHITECTURE
-Based on the October 6 working tree at:
-  /home/gozen/work/llvm-project/mlir/tools/mlir-dsl
+V15: A SIMPLER OPENING
+The title is unnumbered. Content slides 1–9 follow the requested sequence:
+1. Existing options: hand-written IR and Python bindings, as plain bullets.
+2. Complete scalar a+b bindings program; all setup, lowering, JIT and call code.
+3. PyTorch tensors and the short mlir dsl program: this is what we want.
+4. Four NVIDIA use cases, with the existing numbered diagrams.
+5. Design questions: dialects, control flow, and IR generation versus execution.
+6. Four shared core services, without nested architecture diagrams.
+7. What a plugin changes: staged a+b emits arith.addi or your dialect's op.
+8. Shared core + selected plugins = your DSL; compilation is optional.
+9. AST frontend versus tracing, with optional AST capture for control flow.
+The four-role/two-family record now appears beside the sub-DSL authoring
+example, after the audience has learned what those features do.
 
-The reusable authoring core is mlir.dsl. Programs for the reference language
-use import mlir.mlir_dsl as m. Custom sub-DSLs assemble BaseDSL with selected
-plugins and expose their own namespace.
+The feature walkthrough follows the supplied inventory in order: tracing,
+two kinds of values, numeric and aggregate types, native control flow,
+explicit builders, host boundary, kernels, compilation, caches, trace-only,
+diagnostics, locations/remarks, observability, sub-DSL authoring.
+The Tile closing sketch now uses the same role/family contracts.
 
-New editable diagrams show core/plugin composition, three plugin families,
-installation-to-call lifecycle, OpEmitter dispatch, and AST capture ownership.
-Examples now use the current imports, plain Meta configuration, field-wise
-structs, Pointer-based DLPack adaptation, and plain m.compile.
-
-The five closing Tile IR slides map the existing DkgDSL target onto the new
-plugin interfaces. They are labeled port sketches, not a newly implemented
-Tile plugin or a GPU run. Direct typed annotations remain throughout.
+CURRENT SOURCE
+/home/gozen/work/llvm-project/mlir/tools/mlir-dsl — October 7, 2026
+Core namespace: mlir.dsl
+Reference namespace: mlir.mlir_dsl; concrete class: MlirTestDSL
+Plugins: type_ops, func_entry, ast_preprocessor, compiler; decorators, adapters.
+The sub-DSL owns pipeline() and register_dialects(). Op modules are not plugins.
+The old list-valued plugin record and default dialect/compiler story are gone.
 
 ARTIFACTS
-  llvm-mlir-dsl-tutorial-v13.pptx  Editable slides and speaker notes
-  llvm-mlir-dsl-tutorial-v13.pdf   PDF preview
-  overview.png / preview/       Rendered visual review
-  slide-skeleton.html          Outline and evidence notes
-  slide-skeleton.csv           Rehearsal timing
-  speaker-notes.txt            Presenter detail, not slide prose
-  extraction-feature-map.csv   Updated feature-to-slide mapping
-  verification/v8/             Current architecture and runtime audit
-  verification/v9/             Early-exit comparison sources
-  validation.txt               Artifact and validation summary
+  llvm-mlir-dsl-tutorial-v16.pptx  Editable slides and speaker notes
+  llvm-mlir-dsl-tutorial-v16.pdf   PDF preview
+  overview.png / preview/        Rendered visual review
+  slide-skeleton.html/.csv       Outline and rehearsal timing
+  speaker-notes.txt              Detail and source references
+  extraction-feature-map.csv     Current feature-to-slide mapping
+  verification/v14/              Source audit and feature execution evidence
+  verification/v15/              Complete scalar and PyTorch opening programs
+  validation.txt                Artifact validation summary
 
 TIMING
-47 slides: Guray’s core 30 minutes, Amir’s placeholder 10 minutes, Guray’s
-five target slides 5 minutes. No visible timestamps or boxed agenda.
-Amir supplies his own mutation/PyIR content. Minimal slide wording and green
-code headers remain; detailed contracts and limitations live in the notes.
+53 pages: title + 52 numbered slides; Guray core30min, Amir10min, target5min.
+The core has47 pages, mixing short diagram beats with selected code excerpts.
+No visible timing labels. Amir supplies his own mutation content.
+Slide numbers in the feature map exclude the title. PDF page = slide number +1.
+The rehearsal CSV and notes include both slide numbers and PDF page numbers.
 
-EVIDENCE
-Read-only source review and focused execution use the current LLVM working
-tree and its built Python bindings. Audit files record loaded module paths,
-source hashes, commands and results. The retained v8 checks cover numeric types, struct and
-frozen-record behavior, native control flow, cache, DLPack, remarks, TVM-FFI,
-plus GPU/alternate-emitter tracing. No GPU execution is claimed.
+CHECKED EXECUTION
+Complete scalar Python-bindings addition prints5. Complete PyTorch DSL program
+produces [10,11,12,13]. The displayed programs are in verification/v15/.
+Raw bindings and DSL PyTorch CPU addition match exactly at lengths0,1,4,17.
+Current CPU examples01,02,03,05,07,09,14 passed. Diagnostics and AST extension
+tests passed. TypeOps alternate rank-zero representation was traced only.
+Metaprogram examples: scale12, dictionary/polymorphic pipeline18, fused array
+[6,9,12,15]. Host scalar results are Numeric wrappers, unwrapped for assertions.
+The older v8 diagnostic mismatch is historical: current diagnostics passed.
+Commands, outputs and source identities are recorded under verification/v14.
+Tile remains a port sketch; no new GPU execution or performance claim.
+No compiler implementation was changed for this presentation.
 
-One existing diagnostics example fails: a type-unstable loop reports
-CONTAINER_UNSUPPORTED instead of TYPE_UNSTABLE_JOIN. This does not imply
-normal loop carries fail; native-loop and frozen-record examples passed.
-No compiler implementation was edited for this presentation revision.
+PUBLICATION SCOPE
+This update changes presentation artifacts and verification evidence only.
+Compiler source updates are preserved from the repository's existing history.
+Local source identities used for validation are recorded under verification/v14.
+Historical deck/evidence versions are preserved but are not the current API reference.
 
-The private publication checkout’s compiler source snapshot predates the
-current refactor. This presentation update does not silently replace that
-source snapshot. Historical v6/v7 audits and older decks are preserved, but
-are not evidence for the current API. Source publication is separate work.
-
-STYLE
+STYLE AND REBUILD
 Same supplied cutlass-python-pytorch-v22 template: exact theme, masters,
-fonts, editable NVIDIA logo; 10 × 5.625 inches. Native editable diagrams.
-Previous v1–v12 PowerPoint/PDF artifacts preserved.
-
-REBUILD
-From this directory, with python-pptx, Pillow and PyMuPDF installed:
+fonts and editable NVIDIA logo;10×5.625in; native editable diagrams.
+Previous v1–v15 PowerPoint/PDF artifacts preserved.
   python build_deck.py
-  libreoffice -env:UserInstallation=file:///tmp/llvm-dsl-slides-lo --headless --convert-to pdf --outdir . llvm-mlir-dsl-tutorial-v13.pptx
+  libreoffice -env:UserInstallation=file:///tmp/llvm-dsl-slides-lo --headless --convert-to pdf --outdir . llvm-mlir-dsl-tutorial-v16.pptx
   python render_preview.py
-
-Use requirements.txt for dependencies. Install assets/fonts/*.ttf before
-LibreOffice export. deck.json holds content/timing; build_deck.py and
-tutorial_layouts.py render it with the bundled assets/template.pptx.
+Dependencies in requirements.txt. Install assets/fonts/*.ttf for PDF export.

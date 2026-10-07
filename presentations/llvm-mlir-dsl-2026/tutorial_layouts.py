@@ -6,6 +6,9 @@ color palette, and measured text audit shared with the rest of the deck.
 
 from pptx.dml.color import RGBColor
 from pptx.util import Pt
+from pathlib import Path
+
+from PIL import ImageFont
 
 
 C = dict(ink="000000", gray="616161", line="D5D5D5", pale="F7F7F7",
@@ -58,12 +61,325 @@ def _flow(deck, slide, labels, x, y, w, size=10.8):
                        nx + node_w + gap - .035, y + .15)
 
 
+def _compact_code(deck, slide, panel, x, y, w, h):
+    """Complete programs use compact leading, keeping every line editable."""
+    code = panel["code"].strip("\n")
+    rows = code.splitlines()
+    size, leading = 10.5, 1.08
+    font_path = Path(__file__).resolve().parent / "assets/fonts/JetBrainsMono-Regular.ttf"
+    while True:
+        font = ImageFont.truetype(str(font_path), round(size * 10))
+        widest = max(font.getlength(row) / 720 for row in rows)
+        if widest <= w - .34 and len(rows) * size / 72 * leading <= h - .58:
+            break
+        size -= .25
+        assert size >= 9.5, (deck.i, "Compact source does not fit", code)
+    deck.rect(slide, x, y, w, h, C["pale"])
+    deck.rect(slide, x, y, w, .40, C["green"])
+    deck.text(slide, panel["label"], x + .17, y + .105,
+              w - .34, .24, 10, C["ink"], True)
+    shape = deck.text(slide, "", x + .17, y + .50,
+                      w - .34, h - .58, size, C["code"], mono=True)
+    shape.name = code[:100].replace("\n", " / ")
+    deck.audit[-1]["text"] = code
+    frame = shape.text_frame
+    frame.clear()
+    for index, row in enumerate(rows):
+        paragraph = frame.paragraphs[0] if index == 0 else frame.add_paragraph()
+        paragraph.space_before = paragraph.space_after = Pt(0)
+        paragraph.line_spacing = Pt(size * leading)
+        run = paragraph.add_run()
+        run.text = row
+        run.font.name = "JetBrains Mono"
+        run.font.size = Pt(size)
+        run.font.bold = row.lstrip().startswith("@")
+        run.font.color.rgb = RGBColor.from_string(C["focus"] if run.font.bold else C["code"])
+
+
 def render_custom(deck, slide, data):
     """Render a custom layout, returning False for a layout owned by Deck."""
     layout = data["layout"]
     items = data.get("items", [])
 
-    if layout == "use_cases":
+    if layout == "opening_bullets_v15":
+        for index, item in enumerate(items[:2]):
+            y = 1.68 + index * 1.44
+            deck.text(slide, "•", .57, y + .02, .31, .42,
+                      24, C["green"], True)
+            deck.text(slide, item["title"], 1.10, y,
+                      8.24, .52, 26, C["ink"], minimum=23)
+            if item.get("body"):
+                deck.text(slide, item["body"], 1.12, y + .70,
+                          8.15, .52, 16, C["gray"], minimum=15)
+
+    elif layout == "full_bindings_v15":
+        _compact_code(deck, slide, data["left"], .53, 1.14, 4.43, 3.75)
+        _compact_code(deck, slide, data["right"], 5.10, 1.14, 4.43, 3.75)
+        if data.get("caption"):
+            deck.text(slide, data["caption"], .59, 4.97, 8.81, .20,
+                      10.3, C["gray"], minimum=9.8)
+
+    elif layout == "tensor_goal_v15":
+        if data.get("caption"):
+            deck.text(slide, data["caption"], .58, 1.04, 8.83, .27,
+                      12.5, C["focus"], minimum=11.8)
+        deck.code(slide, data["left"], .53, 1.40, 4.34, 3.50, size=12)
+        deck.code(slide, data["right"], 5.13, 1.40, 4.34, 3.50,
+                  size=12, green=True)
+
+    elif layout == "questions_v15":
+        for index, item in enumerate(items[:3]):
+            y = 1.54 + index * 1.04
+            deck.text(slide, f"{index + 1:02}", .60, y + .07,
+                      .43, .26, 13, C["focus"], True)
+            deck.text(slide, item["title"], 1.24, y,
+                      8.03, .45, 20, C["ink"], minimum=18)
+            if item.get("body"):
+                deck.text(slide, item["body"], 1.25, y + .60,
+                          8.02, .35, 13.5, C["gray"], minimum=12.7)
+
+    elif layout == "core_simple_v15":
+        for index, item in enumerate(items[:4]):
+            x, y = .53 + (index % 2) * 4.60, 1.57 + (index // 2) * 1.47
+            deck.rect(slide, x, y, 4.34, 1.19, C["lightgreen"])
+            deck.text(slide, item["title"], x + .24, y + .22,
+                      3.86, .40, 22, C["focus"], True, minimum=20)
+            if item.get("body"):
+                deck.text(slide, item["body"], x + .25, y + .77,
+                          3.84, .30, 14, C["gray"], minimum=13)
+        if data.get("caption"):
+            deck.text(slide, data["caption"], .59, 4.66, 8.79, .33,
+                      14.5, C["gray"], minimum=13.5)
+
+    elif layout == "plugin_example_v15":
+        if data.get("definition"):
+            deck.text(slide, data["definition"], .59, 1.29,
+                      8.80, .40, 17, C["ink"], minimum=15.5)
+        deck.text(slide, data.get("expression", "a + b"), .62, 2.73,
+                  1.99, .55, 28, C["code"], mono=True, align="center", minimum=25)
+        if data.get("expression_label"):
+            deck.text(slide, data["expression_label"], .64, 3.39,
+                      1.95, .27, 12.3, C["gray"], align="center", minimum=11.5)
+        deck.arrow(slide, 2.71, 3.00, 3.13, 3.00, head=False)
+        for index, example in enumerate(data.get("examples", [])[:2]):
+            y, center = 2.06 + index * 1.31, 2.40 + index * 1.31
+            deck.arrow(slide, 3.13, 3.00, 3.13, center, head=False)
+            deck.arrow(slide, 3.13, center, 3.56, center)
+            deck.rect(slide, 3.63, y, 2.92, .68, C["lightgreen"])
+            deck.text(slide, example["plugin"], 3.77, y + .20,
+                      2.64, .35, 16.5, C["focus"], True,
+                      align="center", minimum=14.5)
+            deck.arrow(slide, 6.63, center, 7.08, center)
+            deck.text(slide, example["output"], 7.24, y + .15,
+                      2.20, .46, 21, C["focus"], mono=True,
+                      align="center", minimum=18)
+        if data.get("caption"):
+            deck.text(slide, data["caption"], .59, 4.64, 8.82, .34,
+                      14.5, C["gray"], minimum=13.5)
+
+    elif layout == "composition_simple_v15":
+        parts = data.get("parts", ["Core", "Selected plugins", "Your DSL"])
+        for index, (x, width) in enumerate(((.62, 1.72), (3.10, 3.18), (7.35, 2.02))):
+            deck.text(slide, parts[index], x, 2.07, width, .70,
+                      25, C["focus"] if index == 2 else C["ink"],
+                      bold=index == 2, align="center", minimum=21.5)
+        for x, sign in ((2.51, "+"), (6.59, "=")):
+            deck.text(slide, sign, x, 2.10, .49, .61,
+                      28, C["gray"], align="center")
+        for index, value in enumerate(data.get("outputs", ["Generate MLIR", "Add compiler → execute"])[:2]):
+            deck.text(slide, value, .65 + index * 4.57, 3.48,
+                      4.02, .80, 19, C["focus"], align="center", minimum=17.5)
+        if data.get("caption"):
+            deck.text(slide, data["caption"], .59, 4.61, 8.81, .38,
+                      14.5, C["gray"], minimum=13.5)
+
+    elif layout == "frontend_simple_v15":
+        for index, column in enumerate(data.get("columns", [])[:2]):
+            x = .60 + index * 4.62
+            if index == 1:
+                deck.rect(slide, x, 1.66, .045, 2.07, C["green"])
+                x += .22
+            deck.text(slide, column["title"], x, 1.70,
+                      4.00 if index == 0 else 3.78, .50,
+                      24, C["focus"] if index == 1 else C["ink"],
+                      bold=index == 1, minimum=22)
+            deck.text(slide, column.get("body", ""), x + .02, 2.56,
+                      3.98 if index == 0 else 3.76, 1.02,
+                      18, C["gray"], minimum=16.5)
+        if data.get("caption"):
+            deck.text(slide, data["caption"], .60, 4.57, 8.77, .39,
+                      14.5, C["gray"], minimum=13.5)
+
+    elif layout == "use_cases_v14":
+        # Keep all four motivations visible, but make the entry point and the
+        # output explicit in each small picture. Numbers provide the order.
+        for index, item in enumerate(items[:4]):
+            x, y = .53 + (index % 2) * 4.61, 1.42 + (index // 2) * 1.68
+            width, height = 4.33, 1.56
+            deck.rect(slide, x, y, width, height, C["pale"])
+            deck.rect(slide, x + .15, y + .13, .35, .35, C["green"])
+            deck.text(slide, f"{index + 1:02}", x + .16, y + .21,
+                      .33, .22, 11.5, C["ink"], True, align="center")
+            deck.text(slide, item["title"], x + .64, y + .16,
+                      3.51, .35, 17, C["ink"], minimum=15.5)
+            labels = item.get("diagram_labels", [])
+            if index == 0:
+                labels = labels or ["Public", "Internal", "LLVM"]
+                for n, label in enumerate(labels[:3]):
+                    nx = x + .21 + n * 1.41
+                    deck.rect(slide, nx, y + .98, 1.08, .40,
+                              C["lightgreen"] if n == 1 else C["white"],
+                              C["green"] if n == 1 else C["line"])
+                    deck.text(slide, label, nx + .04, y + 1.095, 1.00, .24,
+                              12.5, C["focus"] if n == 1 else C["gray"],
+                              bold=n == 1, align="center", minimum=11.5)
+                    if n < 2:
+                        deck.arrow(slide, nx + 1.13, y + 1.18,
+                                   nx + 1.35, y + 1.18)
+                deck.text(slide, item.get("entry_label", "Python test"),
+                          x + 1.42, y + .59, 1.47, .24,
+                          12.2, C["focus"], True, align="center")
+                deck.arrow(slide, x + 2.16, y + .85, x + 2.16, y + .95)
+            elif index == 2:
+                # Three complete services are embedded into a downstream DSL.
+                labels = labels or ["JIT", "Cache", "Env"]
+                deck.rect(slide, x + .25, y + .67, 3.83, .65,
+                          C["white"], C["green"])
+                deck.text(slide, item.get("entry_label", "Your DSL"),
+                          x + .37, y + .83, 1.02, .30,
+                          15, C["focus"], True, align="center", minimum=14)
+                for n, label in enumerate(labels[:3]):
+                    nx = x + 1.55 + n * .80
+                    deck.rect(slide, nx, y + .81, .68, .32, C["lightgreen"])
+                    deck.text(slide, label, nx + .035, y + .88, .61, .22,
+                              11.3, C["focus"], True, align="center", minimum=10.5)
+                deck.text(slide, item.get("note", "Reuse the services."),
+                          x + .28, y + 1.37, 3.77, .19,
+                          10.2, C["gray"], align="center")
+            else:
+                labels = labels or (["Python", "Recipe IR", "Consumer"]
+                                    if index == 1 else ["Python", "DSL compiler", "GPU"])
+                kinds = ["source", "source", "compiler"] if index == 1 else ["source", "compiler", "binary"]
+                for n, (label, kind) in enumerate(zip(labels[:3], kinds)):
+                    cx = x + .71 + n * 1.45
+                    deck.pipeline_node(slide, dict(kind=kind, label=label),
+                                       cx, y + .58, label_width=1.38, accent=n == 1)
+                    if n < 2:
+                        deck.arrow(slide, cx + .28, y + .77,
+                                   cx + 1.16, y + .77)
+                if index == 3 and item.get("link"):
+                    link = item["link"]
+                    shape = deck.text(slide, link.get("label", "NVIDIA CuTe DSL / CUTLASS Python"),
+                                      x + .20, y + 1.37, 3.93, .19,
+                                      9.8, C["focus"], align="center", minimum=9.3)
+                    for paragraph in shape.text_frame.paragraphs:
+                        for run in paragraph.runs:
+                            run.hyperlink.address = link["url"]
+                            run.font.underline = True
+                elif item.get("note"):
+                    deck.text(slide, item["note"], x + .20, y + 1.37,
+                              3.93, .19, 10.2, C["gray"], align="center")
+
+    elif layout == "plugin_roles":
+        # Roles select one provider; families collect independent extensions.
+        # Show the distinction in the figure, without API hook inventories.
+        if data.get("caption"):
+            deck.text(slide, data["caption"], .59, 1.10, 8.77, .26,
+                      11.8, C["gray"], minimum=11.2)
+        deck.text(slide, data.get("roles_label", "At most one per role"),
+                  .59, 1.45 if data.get("caption") else 1.35,
+                  8.77, .30, 15, C["focus"], True)
+        for index, role in enumerate(data.get("roles", [])[:4]):
+            x, width, y = .53 + index * 2.275, 2.115, 1.84
+            deck.rect(slide, x, y, width, 1.24, C["lightgreen"], C["green"])
+            deck.text(slide, role["title"], x + .12, y + .14,
+                      width - .24, .29, 14.8, C["focus"], True,
+                      minimum=11.7, do_wrap=False)
+            deck.text(slide, role.get("body", ""), x + .12, y + .60,
+                      width - .24, .27, 12.6, C["ink"], minimum=11.3)
+            if role.get("example"):
+                deck.text(slide, role["example"], x + .12, y + .99,
+                          width - .24, .20, 10.5, C["gray"], minimum=9.8)
+        deck.text(slide, data.get("families_label", "Any number"),
+                  .59, 3.32, 8.77, .30, 15, C["focus"], True)
+        for index, family in enumerate(data.get("families", [])[:2]):
+            x, y, width = .53 + index * 4.61, 3.80, 4.33
+            deck.rect(slide, x, y, width, .69, C["pale"], C["line"])
+            deck.text(slide, family["title"], x + .15, y + .15,
+                      1.40, .28, 14.1, C["focus"], True, minimum=12.5)
+            deck.text(slide, family.get("body", ""), x + 1.69, y + .13,
+                      2.47, .28, 12.2, C["ink"], minimum=11.2)
+            if family.get("example"):
+                deck.text(slide, family["example"], x + 1.69, y + .44,
+                          2.47, .21, 10.3, C["gray"], minimum=9.8)
+        deck.rect(slide, .53, 4.74, 8.94, .35, C["pale"])
+        deck.text(slide, data.get("core_label", "Shared core"),
+                  .70, 4.81, 1.42, .24, 11.8, C["ink"], True)
+        features = data.get("core_features", ["Diagnostics", "Staging", "JIT cache", "Type inference"])
+        for index, feature in enumerate(features[:4]):
+            deck.text(slide, feature, 2.29 + index * 1.77, 4.81,
+                      1.63, .23, 10.9, C["gray"], align="center", minimum=10.2)
+
+    elif layout == "dsl_assembly_v14":
+        # Infrastructure is shared; the record chooses the behavior and the
+        # downstream DSL owns its lowering pipeline. Neither is implicit.
+        deck.rect(slide, .53, 1.53, 2.04, 3.18, C["pale"], C["line"])
+        deck.text(slide, data.get("core_label", "Shared core"),
+                  .72, 1.75, 1.66, .35, 18, C["ink"], True, minimum=16.5)
+        for index, feature in enumerate(data.get("core_features", ["Staging", "Type inference", "Diagnostics", "JIT cache"])[:4]):
+            deck.text(slide, feature, .72, 2.34 + index * .38,
+                      1.65, .28, 13, C["gray"], minimum=12)
+        deck.text(slide, data.get("core_note", "No default dialects.\nNo default compiler."),
+                  .72, 4.17, 1.65, .49, 10.7, C["focus"], minimum=10.2)
+        for index, path in enumerate(data.get("paths", [])[:2]):
+            x, y, width = 3.16, 1.53 + index * 1.75, 6.31
+            deck.arrow(slide, 2.61, y + .73, x - .07, y + .73)
+            deck.rect(slide, x, y, width, 1.43,
+                      C["lightgreen"] if index == 0 else C["pale"],
+                      C["green"] if index == 0 else C["line"])
+            deck.text(slide, path["title"], x + .18, y + .16,
+                      2.78, .32, 18, C["focus"], True, minimum=16.5)
+            deck.text(slide, path.get("recipe", ""), x + .18, y + .64,
+                      5.95, .32, 12.8, C["ink"], minimum=11.5)
+            _flow(deck, slide, path.get("pipeline", ["Python", "MLIR", "Execute"]),
+                  x + 3.11, y + .17, 3.03, size=10.8)
+            if path.get("note"):
+                deck.text(slide, path["note"], x + .18, y + 1.09,
+                          5.95, .26, 11.7, C["gray"], minimum=10.8)
+        if data.get("caption"):
+            deck.text(slide, data["caption"], .58, 4.89, 8.84, .25,
+                      12, C["focus"], minimum=11.3)
+
+    elif layout == "bindings_comparison":
+        # Raw builders need more horizontal room than the compact staged
+        # program. Equal-height panels preserve the common input/output story.
+        if data.get("caption"):
+            deck.text(slide, data["caption"], .56, 1.10, 8.91, .28,
+                      12.5, C["focus"], minimum=11.8)
+        deck.code(slide, data["left"], .53, 1.48, 5.70, 3.60, size=10.0)
+        deck.code(slide, data["right"], 6.43, 1.48, 3.12, 3.60, size=11.0)
+
+    elif layout == "frontend_choice":
+        # These are implementation strategies, not a claim that one compiler
+        # family is universally more powerful or scalable than another.
+        for index, column in enumerate(data.get("columns", [])[:2]):
+            x, width = .53 + index * 4.61, 4.33
+            deck.text(slide, column["title"], x + .10, 1.49,
+                      width - .20, .40, 20, C["focus"], True, minimum=17)
+            deck.rect(slide, x, 2.10, width, 1.12,
+                      C["lightgreen"] if index == 1 else C["pale"])
+            _flow(deck, slide, column.get("steps", []),
+                  x + .12, 2.53, width - .24, size=12.4)
+            deck.text(slide, column.get("body", ""), x + .11, 3.53,
+                      width - .22, .73, 16, C["ink"], minimum=14.5)
+            if column.get("examples"):
+                deck.text(slide, column["examples"], x + .11, 4.33,
+                          width - .22, .30, 12.5, C["gray"], minimum=11.7)
+        if data.get("caption"):
+            deck.text(slide, data["caption"], .59, 4.88, 8.81, .28,
+                      13.1, C["focus"], minimum=12.3)
+
+    elif layout == "use_cases":
         # Each use case is a small explanatory picture. The visual shows where
         # Python enters the system, rather than pairing an icon with prose.
         for index, item in enumerate(items[:4]):

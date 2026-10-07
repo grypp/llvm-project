@@ -1,0 +1,65 @@
+Scalar bindings opening slide — v15 verification
+
+Complete program: scalar-bindings.py
+Lines: 35, including imports and blank lines.
+Maximum width: 50 characters.
+No hidden imports, helpers, pipeline constants, parsed IR, or tensor adapters.
+The program builds func.func and arith.addi with Python builders, adds the
+C interface, lowers to LLVM, builds an ExecutionEngine, packs two i32 inputs
+and one result slot, invokes the compiled function, and prints 5.
+
+Run command:
+env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core /usr/bin/python3.12 scalar-bindings.py
+
+Python: 3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]
+mlir.ir: /home/gozen/work/llvm-project/mlir/python/mlir/ir.py
+Exit: 0
+Stdout (asserted exactly "5\n"):
+5
+
+Stderr:
+(empty)
+
+Layout recommendation:
+Left panel: lines 1-18 (18 lines), imports and IR construction.
+Right panel: lines 20-35 (16 lines), lowering and invocation.
+Panel labels: "Build IR" and "Lower + execute". Preserve the right panel's
+four-space indentation to show it continues inside the same context.
+
+FULL SCALAR PROGRAM:
+import ctypes as C
+from mlir import ir, execution_engine as ee
+from mlir import passmanager as pm
+from mlir.dialects import arith, func
+
+with ir.Context(), ir.Location.unknown():
+    i32 = ir.IntegerType.get_signless(32)
+    module = ir.Module.create()
+    with ir.InsertionPoint(module.body):
+        fn = func.FuncOp(
+            "add", ([i32, i32], [i32]))
+        fn.attributes["llvm.emit_c_interface"] = (
+            ir.UnitAttr.get())
+        entry = fn.add_entry_block()
+        with ir.InsertionPoint(entry):
+            a, b = fn.arguments
+            result = arith.AddIOp(a, b).result
+            func.ReturnOp([result])
+
+    pipeline = (
+        "builtin.module("
+        "convert-arith-to-llvm,"
+        "convert-func-to-llvm,"
+        "reconcile-unrealized-casts)"
+    )
+    pm.PassManager.parse(pipeline).run(
+        module.operation)
+    engine = ee.ExecutionEngine(module)
+
+    a, b = C.c_int32(2), C.c_int32(3)
+    out = C.c_int32()
+    engine.invoke(
+        "add", C.byref(a), C.byref(b),
+        C.byref(out))
+    print(out.value)  # 5
+

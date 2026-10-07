@@ -10,21 +10,20 @@
     "showcase": 300
   },
   "source_checkout": "/home/gozen/work/llvm-project",
-  "source_date": "2026-10-06",
+  "source_date": "2026-10-07",
   "slides": [
     {
       "title": "How to build a Python DSL for MLIR",
-      "subtitle": "mlir dsl · shared core + reusable plugins",
+      "subtitle": "mlir dsl · Python generates MLIR",
       "section": "Introduction",
       "seconds": 15,
       "owner": "Guray Ozen",
       "phase": "core",
       "layout": "cover",
-      "notes": "Guray presents the current mlir dsl architecture, based on the October6 working tree under mlir/tools/mlir-dsl. Core30 minutes, Amir10 on mutation, Guray5 on a Tile IR port sketch. Keep Amir’s affiliation unspecified. This is a presentation update, not a new implementation or source publication.",
+      "notes": "How to build a Python DSL for MLIR. Current source snapshot: October 7, 2026. Guray presents the 30-minute core tutorial, Amir supplies ten minutes on advanced mutation, then Guray returns for the five-minute Tile integration sketch. Amir affiliation is unspecified. This deck is a source-checked tutorial, not an upstream acceptance or completed Tile integration claim.",
       "sources": [
         "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
+        "verification/v14/api-audit.txt"
       ],
       "display_title": "How to build a Python DSL\nfor MLIR",
       "event": "2026 US LLVM Developers’ Meeting",
@@ -39,76 +38,314 @@
           "role": ""
         }
       ],
-      "id": "v7-01"
+      "id": "v14-cover",
+      "display_number": null
     },
     {
-      "title": "Why a Python DSL for MLIR?",
-      "subtitle": "",
-      "section": "Introduction",
-      "seconds": 60,
-      "owner": "Guray Ozen",
+      "id": "v14-options",
+      "title": "How do we produce MLIR?",
+      "section": "Motivation",
       "phase": "core",
-      "layout": "use_cases",
-      "notes": "Four use cases, shown as concrete pictures. (1) An ordinary public→internal→LLVM compiler pipeline is shown, with Python tests injecting IR directly at the internal dialect. This isolates an internal pass without having to manufacture a source program that reaches it. (2) Python generates recipe IR consumed by an external application; LLVM lowering is optional. (3) JIT, cache and environment modules compose inside a downstream DSL. (4) A user-facing Python language compiles to a GPU; NVIDIA CuTe DSL/CUTLASS Python is the linked production example. Each picture should be narrated, not read as a sentence. The recipe dialect is intentionally generic. V10: use cases are explicitly numbered 1–4; pause on each diagram for its motivation.",
+      "owner": "Guray Ozen",
+      "seconds": 20,
+      "notes": "Start with the two existing tools: hand-written textual IR and MLIR Python bindings. Text is useful for exact tests but is static; variations require edits or a generator. Bindings let Python generate arbitrary IR, but the author still wires up types, context, insertion points, lowering, the execution engine and argument packing. Do not introduce the DSL solution yet.",
       "sources": [
         "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt",
-        "https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_general/dsl_introduction.html"
+        "verification/v14/api-audit.txt"
+      ],
+      "subtitle": "",
+      "takeaway": "",
+      "layout": "opening_bullets_v15",
+      "items": [
+        {
+          "title": "Write MLIR by hand",
+          "body": "Static text. Every variant is manual."
+        },
+        {
+          "title": "Use the Python bindings",
+          "body": "Generate IR. Wire up compilation and execution."
+        }
+      ],
+      "display_number": 1
+    },
+    {
+      "id": "v15-scalar-bindings",
+      "title": "Just a + b, with Python bindings",
+      "layout": "full_bindings_v15",
+      "seconds": 60,
+      "section": "Motivation",
+      "phase": "core",
+      "owner": "Guray Ozen",
+      "subtitle": "",
+      "takeaway": "",
+      "caption": "Complete program: build IR → lower → JIT → call.",
+      "notes": "The entire runnable scalar addition program appears here, including every import, context, type, operation, lowering pass, C-interface attribute, ExecutionEngine construction and ctypes invocation. Read the panels from left to right: the second continues inside the same Context. Both inputs are i32; 2 + 3 prints 5. This demonstrates infrastructure cost, not a performance comparison. No PyTorch or DSL code appears on this slide.",
+      "sources": [
+        "verification/v15/scalar-bindings.py",
+        "verification/v15/scalar-bindings.txt"
+      ],
+      "left": {
+        "label": "1 · Build the IR",
+        "code": "import ctypes as C\nfrom mlir import ir, execution_engine as ee\nfrom mlir import passmanager as pm\nfrom mlir.dialects import arith, func\n\nwith ir.Context(), ir.Location.unknown():\n    i32 = ir.IntegerType.get_signless(32)\n    module = ir.Module.create()\n    with ir.InsertionPoint(module.body):\n        fn = func.FuncOp(\n            \"add\", ([i32, i32], [i32]))\n        fn.attributes[\"llvm.emit_c_interface\"] = (\n            ir.UnitAttr.get())\n        entry = fn.add_entry_block()\n        with ir.InsertionPoint(entry):\n            a, b = fn.arguments\n            result = arith.AddIOp(a, b).result\n            func.ReturnOp([result])"
+      },
+      "right": {
+        "label": "2 · Compile + execute",
+        "code": "    pipeline = (\n        \"builtin.module(\"\n        \"convert-arith-to-llvm,\"\n        \"convert-func-to-llvm,\"\n        \"reconcile-unrealized-casts)\"\n    )\n    pm.PassManager.parse(pipeline).run(\n        module.operation)\n    engine = ee.ExecutionEngine(module)\n\n    a, b = C.c_int32(2), C.c_int32(3)\n    out = C.c_int32()\n    engine.invoke(\n        \"add\", C.byref(a), C.byref(b),\n        C.byref(out))\n    print(out.value)  # 5"
+      },
+      "display_number": 2
+    },
+    {
+      "id": "v14-bindings",
+      "title": "Now add PyTorch tensors",
+      "section": "Motivation",
+      "phase": "core",
+      "owner": "Guray Ozen",
+      "seconds": 55,
+      "notes": "Left: ordinary PyTorch CPU float32 tensors and the desired elementwise addition. Right: the full mlir dsl program, with imports, Pointer annotation, staged length, native loop and call. Read both panels as one program, left then right. This is the interface we want users to write: the reference mlir dsl selects plugins that generate, lower, cache and invoke the program. Pointers and explicit sizes are the current host boundary, not an Array wrapper. The example runs on the CPU and makes no GPU or tensor-library performance claim.",
+      "sources": [
+        "verification/v15/pytorch-add.py",
+        "verification/v15/pytorch-add.txt"
+      ],
+      "subtitle": "",
+      "takeaway": "",
+      "layout": "tensor_goal_v15",
+      "caption": "Same CPU tensors. Compiled a + b.",
+      "left": {
+        "label": "PyTorch CPU tensors",
+        "code": "import torch\n\na = torch.arange(4, dtype=torch.float32)\nb = torch.full_like(a, 10.0)\nout = torch.empty_like(a)\n# Expected: tensor([10., 11., 12., 13.])"
+      },
+      "right": {
+        "label": "mlir dsl · this is what we want",
+        "code": "import mlir.mlir_dsl as m\nP = m.Pointer[m.Float32]\n\n@m.jit\ndef add(n: m.Int32, a: P, b: P,\n        out: P):\n    for i in range(n):\n        out[i] = a[i] + b[i]\n\nadd(a.numel(), a, b, out)\nprint(out)"
+      },
+      "display_number": 3
+    },
+    {
+      "title": "Four use cases inside NVIDIA",
+      "subtitle": "",
+      "section": "Motivation",
+      "seconds": 65,
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "layout": "use_cases_v14",
+      "notes": "Four use cases supplied by Guray from NVIDIA work: generate internal dialect inputs directly for tests; emit recipe-only IR for a consumer that is not an MLIR compiler; reuse JIT cache, naming and environment infrastructure in another DSL; build a complete user-facing language. The public product example is NVIDIA CuTe DSL / CUTLASS Python; the hyperlink is official documentation. The first three are internal motivations without naming a confidential dialect. Keep this as a visual motivation, not a list of unsupported product claims.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
+        "verification/v14/api-audit.txt",
+        "https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/overview.html"
       ],
       "items": [
         {
-          "title": "Test internal IR",
-          "flow": [
+          "title": "Test internal dialects",
+          "diagram_labels": [
             "Public",
             "Internal",
             "LLVM"
-          ]
+          ],
+          "entry_label": "Python tests"
         },
         {
           "title": "Generate recipe IR",
-          "flow": [
+          "diagram_labels": [
             "Python",
             "Recipe IR",
             "Consumer"
-          ]
+          ],
+          "note": "Consumer outside MLIR"
         },
         {
-          "title": "Reuse building blocks",
-          "flow": [
+          "title": "Reuse DSL building blocks",
+          "diagram_labels": [
             "JIT",
             "Cache",
-            "Environment"
+            "Env"
           ]
         },
         {
           "title": "Build a full language",
-          "flow": [
-            "NVIDIA CuTe DSL",
-            "CUTLASS Python"
+          "diagram_labels": [
+            "Python",
+            "DSL",
+            "GPU"
           ],
           "link": {
-            "label": "NVIDIA documentation",
-            "url": "https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/cute_dsl_general/dsl_introduction.html"
+            "label": "NVIDIA CuTe DSL / CUTLASS Python",
+            "url": "https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/overview.html"
           }
         }
       ],
       "takeaway": "",
-      "id": "v7-02"
+      "id": "v14-usecases",
+      "display_number": 4
+    },
+    {
+      "id": "v14-diversity",
+      "title": "How do we build mlir dsl?",
+      "section": "Motivation",
+      "phase": "core",
+      "owner": "Guray Ozen",
+      "seconds": 25,
+      "notes": "Ask the design questions before introducing the solution. MLIR is compiler infrastructure, not one fixed end-to-end compiler. Compiler A and B may choose unrelated dialects and lowering pipelines. Control-flow models also differ: a direct scf.for has no break operation, while scf.while can express termination and another dialect may model early exits differently. We need to reuse frontend infrastructure without hard-wiring these target decisions.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
+        "verification/v14/api-audit.txt",
+        "verification/v9/control-flow-evidence.txt"
+      ],
+      "subtitle": "",
+      "takeaway": "",
+      "layout": "questions_v15",
+      "items": [
+        {
+          "title": "Which dialects?",
+          "body": "Every compiler has its own IR."
+        },
+        {
+          "title": "Which control flow?",
+          "body": "Different targets need different rules."
+        },
+        {
+          "title": "Generate IR—or execute?",
+          "body": "There is no single end-to-end pipeline."
+        }
+      ],
+      "display_number": 5
+    },
+    {
+      "id": "v14-core",
+      "title": "Share the core services",
+      "section": "Introduction",
+      "phase": "core",
+      "owner": "Guray Ozen",
+      "seconds": 20,
+      "notes": "The core owns reusable orchestration and language policy. The four boxes are services, not plugin kinds. BaseDSL begins with an empty Plugins record: it supplies no default target dialect or compiler and is not by itself an end-to-end language. The AST integration hooks live in the core; actual syntax capture is supplied by an optional plugin. Concrete IR operations and compilation are selected by the DSL author.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
+        "verification/v14/api-audit.txt"
+      ],
+      "subtitle": "",
+      "takeaway": "",
+      "layout": "core_simple_v15",
+      "items": [
+        {
+          "title": "Tracing",
+          "body": "Run Python. Capture operations."
+        },
+        {
+          "title": "Type inference",
+          "body": "Promotion + casts"
+        },
+        {
+          "title": "Diagnostics",
+          "body": "Source locations + clear errors"
+        },
+        {
+          "title": "Cache",
+          "body": "Memory + disk"
+        }
+      ],
+      "caption": "Core services only. No default dialect or compiler.",
+      "display_number": 6
+    },
+    {
+      "id": "v15-plugin-example",
+      "title": "What is a plugin?",
+      "section": "Architecture",
+      "phase": "core",
+      "owner": "Guray Ozen",
+      "seconds": 25,
+      "notes": "Define plugin before listing its kinds. For staged integer wrappers, operator + calls the selected type-operations implementation. An arith-backed plugin emits arith.addi; an author-supplied dialect plugin could instead emit a matching custom operation, shown illustratively as your.add. The DSL author selects a compatible implementation; this is not runtime dispatch or a claim that arbitrary dialects work automatically. Ordinary Python integers still add in Python. Other plugins provide function entries, control-flow capture, compilation, decorators and adapters; introduce the exact record after these features have been taught.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/type_ops/__init__.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/dsl/mlir_dsl.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "subtitle": "",
+      "takeaway": "",
+      "layout": "plugin_example_v15",
+      "definition": "A replaceable implementation of part of your DSL.",
+      "expression": "a + b",
+      "expression_label": "Staged integers",
+      "examples": [
+        {
+          "plugin": "Arith type operations",
+          "output": "arith.addi"
+        },
+        {
+          "plugin": "Your type operations",
+          "output": "your.add"
+        }
+      ],
+      "caption": "Same Python expression. Your DSL chooses the emitted IR.",
+      "display_number": 7
+    },
+    {
+      "id": "v14-assembly",
+      "title": "Compose the DSL you need",
+      "section": "Architecture",
+      "phase": "core",
+      "owner": "Guray Ozen",
+      "seconds": 25,
+      "notes": "Compose a reusable core with the plugins needed for a concrete language. IR generation selects type operations and a function entry, with control-flow capture if required. The compiler is optional: an IR-only DSL can feed an external consumer. Execution additionally needs a compiler implementation and a compatible sub-DSL-owned pipeline. mlir dsl is the runnable showcase using the shipped plugins. Your DSL can reuse those implementations; the core does not itself force an end-to-end target. Exact plugin roles will be introduced beside the later Plugins record.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
+        "verification/v14/api-audit.txt"
+      ],
+      "subtitle": "",
+      "takeaway": "",
+      "layout": "composition_simple_v15",
+      "parts": [
+        "Shared core",
+        "Selected plugins",
+        "Your DSL"
+      ],
+      "outputs": [
+        "Generate MLIR",
+        "Add compiler + your pipeline → execute"
+      ],
+      "caption": "mlir dsl is a working composition. Reuse its plugins.",
+      "display_number": 8
+    },
+    {
+      "id": "v14-frontend",
+      "title": "How much Python should we implement?",
+      "section": "Architecture",
+      "phase": "core",
+      "owner": "Guray Ozen",
+      "seconds": 35,
+      "notes": "Compare ownership, not absolute expressive power. A broad AST-based frontend interprets or lowers supported Python constructs and owns those semantics; it can target many dialects. This design chooses tracing to reuse the interpreter for objects, imports, method dispatch and metaprogramming. Plugins supply the target operations. Tracing alone does not intercept native staged if/for/while; optional limited AST capture handles that syntax. The following design principles and multi-stage slides explain the resulting model.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
+        "verification/v14/api-audit.txt"
+      ],
+      "subtitle": "",
+      "takeaway": "",
+      "layout": "frontend_simple_v15",
+      "columns": [
+        {
+          "title": "AST frontend",
+          "body": "Parse Python\nImplement its semantics"
+        },
+        {
+          "title": "Tracing",
+          "body": "Run Python\nRecord DSL operations"
+        }
+      ],
+      "caption": "Our choice: tracing. Optional AST capture handles staged control flow.",
+      "display_number": 9
     },
     {
       "title": "Design principles",
       "subtitle": "",
       "section": "Introduction",
-      "seconds": 30,
+      "seconds": 20,
       "owner": "Guray Ozen",
       "phase": "core",
       "layout": "design_simple",
-      "notes": "Use normal Python objects, imports and libraries as the metaprogram. DSL values and a small AST capture plugin generate MLIR. The aim is reuse of Python semantics for Meta work; staged control flow has explicit supported restrictions. Reusable core plus target plugins implements dialect-agnostic DSL construction.",
+      "notes": "Use Python as the unchanged host language for metaprogramming. Reuse objects, imports and libraries. Only explicit DSL values/operations generate MLIR. The frontend mechanism is modular and target-dialect agnostic; one reusable core underpins multiple sub-DSL namespaces.",
       "sources": [
         "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
+        "verification/v14/api-audit.txt"
       ],
       "items": [
         {
@@ -122,13 +359,14 @@
       ],
       "takeaway": "This leads to multi-stage programming.",
       "bold_phrase": "multi-stage programming.",
-      "id": "v7-04"
+      "id": "v14-principles",
+      "display_number": 10
     },
     {
       "title": "What is multi-stage programming?",
       "subtitle": "",
       "section": "Introduction",
-      "seconds": 45,
+      "seconds": 40,
       "owner": "Guray Ozen",
       "layout": "compiler_pipelines",
       "pipelines": [
@@ -197,20 +435,20 @@
         }
       ],
       "takeaway": "",
-      "notes": "Traditional compilation maps source to binary. A multi-stage program can execute a compiled stage to generate source for another stage; the repeated row is an illustration, not a claim every staged compiler has an infinite cycle. Here Python execution generates MLIR, then passes and LLVM code generation produce executable code. mlir-opt is a familiar shorthand for lowering, not a binary code generator by itself.",
+      "notes": "Python is the meta-language and MLIR the object language. The repetition row is an illustration of programs generating later-stage programs, not a claim of an infinite compiler loop. Here the Python interpreter runs the generator, producing MLIR. mlir-opt represents transformation passes; LLVM code generation/JIT creates executable code. The traditional and multi-stage source/compiler/binary icons have identical sizes.",
       "sources": [
         "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
+        "verification/v14/api-audit.txt"
       ],
       "phase": "core",
-      "id": "v7-05"
+      "id": "v14-multistage",
+      "display_number": 11
     },
     {
       "title": "Why multi-stage programming?",
       "subtitle": "",
       "section": "Introduction",
-      "seconds": 45,
+      "seconds": 25,
       "owner": "Guray Ozen",
       "layout": "staging_benefits",
       "items": [
@@ -233,529 +471,221 @@
       ],
       "example_context": "import mlir.mlir_dsl as m",
       "takeaway": "",
-      "notes": "The reference DSL exports core types and plugin builders under m. Bare range on known Python bounds executes as Python; m.range requests staging. On a staged bound, the AST plugin captures native range. Capture follows the selected types/builders, while ordinary Python is available during tracing. A downstream language exposes its own namespace rather than importing the reference language internally.",
+      "notes": "Use all of Python for trace-time work; capture explicitly through the selected DSL namespace and its typed values. Ordinary range over known values executes as Python; m.range forces staged range construction in the reference namespace. This binding-time boundary enables objects/dictionaries to specialize a program without runtime Python on the generated code path.",
       "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/mlir_dsl/__init__.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/staging.py",
         "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/ast_preprocessor/helpers.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
+        "verification/v14/api-audit.txt"
       ],
       "phase": "core",
-      "id": "v7-06"
+      "id": "v14-why-staging",
+      "display_number": 12
     },
     {
-      "title": "How to build a Python DSL for MLIR",
-      "subtitle": "",
-      "section": "Introduction",
-      "seconds": 60,
+      "id": "v14-agenda",
+      "title": "Agenda",
+      "layout": "agenda",
+      "seconds": 15,
+      "section": "mlir dsl",
       "owner": "Guray Ozen",
       "phase": "core",
-      "layout": "generator_idea",
-      "notes": "The reference namespace is now mlir.mlir_dsl; mlir.dsl is for authors building DSLs. x has a DSL type annotation and is staged; factor is ordinary Python configuration and is Meta. Multiplication goes through the active OpEmitter. The LLVM plugin emits arith operations inside func.func with the C interface. Core owns staging and call orchestration; the dialect plugin supplies the actual entry helper and compiler. The displayed Python example was executed against the current working tree; see the bundled presentation-examples log.",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "Walk the feature inventory in order: tracing JIT; two kinds of values; numeric and aggregate types; native control flow and explicit builders; arguments; kernels; compilation; caches; trace-only; diagnostics; locations/remarks; observability; sub-DSL authoring. Then hand off to Amir for his material and return for the five-slide Tile design sketch.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
+        "verification/v14/api-audit.txt"
+      ],
+      "items": [
+        {
+          "title": "Trace Python → types → control flow"
+        },
+        {
+          "title": "Host boundary → kernels → compilation"
+        },
+        {
+          "title": "Tools → build your own DSL"
+        },
+        {
+          "title": "Amir: advanced mutation"
+        },
+        {
+          "title": "Amir: OpenAI Triton DSL"
+        }
+      ],
+      "display_number": 13
+    },
+    {
+      "id": "v14-jit",
+      "title": "1 · Tracing JIT",
+      "layout": "code_pair",
+      "seconds": 45,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "The core owns @jit and orchestration. Selected func.Entry builds func.func; type_ops emits scalar operations; compiler lowers and invokes the chosen pipeline. Subsequent identical specializations reuse the compiled callable. The host scalar result is a Numeric wrapper; int/float/.value unwrap it. This reference end-to-end path is not provided by an empty BaseDSL.",
       "sources": [
         "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/dsl.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/mlir_op.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/llvm/entry.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt",
-        "verification/v8/presentation-examples.txt"
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/func_entry/func.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/compiler/execution_engine.py",
+        "verification/v14/api-audit.txt",
+        "verification/v14/metaprogram-examples.txt"
+      ],
+      "left": {
+        "label": "User program",
+        "code": "import mlir.mlir_dsl as m\n\n@m.jit\ndef scale(x: m.Int32, factor):\n    return x * factor\n\nint(scale(4, 3))  # 12"
+      },
+      "right": {
+        "label": "Reference execution path",
+        "code": "Python call\n    ↓\nTrace func.func\n    ↓\nCompile + cache\n    ↓\nInvoke"
+      },
+      "display_number": 14
+    },
+    {
+      "id": "v14-values",
+      "title": "2 · Python value or MLIR value?",
+      "layout": "code_pair",
+      "seconds": 55,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "Two kinds of values: Python payloads compute now; MLIR-backed leaves build staged operations. A DSL annotation makes a runtime argument; ordinary Python configuration is Meta. The implementation additionally stages adapted values containing registered leaves even without annotations, so do not describe annotations as the only rule. is_mlir_op is the predicate. A Numeric wrapper may itself hold a Python literal or an SSA value. There is no Constexpr marker.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/staging.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/types/typing.py",
+        "verification/v14/api-audit.txt"
       ],
       "left": {
         "label": "Python",
-        "code": "import mlir.mlir_dsl as m\n\n@m.jit\ndef scale(x: m.Int32, factor):\n    return x * factor\n\nscale(4, 3)"
+        "code": "@m.jit\ndef scale(x: m.Int32, factor):\n    assert m.is_mlir_op(x)\n    assert not m.is_mlir_op(factor)\n    return x * factor\n\nscale(4, 3)"
       },
       "right": {
-        "label": "Generated MLIR",
-        "code": "// x is a runtime i32\n%c3 = arith.constant 3 : i32\n%r = arith.muli %x, %c3 : i32\nfunc.return %r : i32"
+        "label": "Generated MLIR · excerpt",
+        "code": "# At trace time\nfactor == 3\n\n# In the generated program\n%x : i32\n%c3 = arith.constant 3 : i32\n%r = arith.muli %x, %c3 : i32"
       },
-      "items": [
-        {
-          "title": "Meta",
-          "body": "factor = 3\nRun Python"
-        },
-        {
-          "title": "Staged",
-          "body": "x = SSA\nEmit MLIR"
-        }
-      ],
-      "takeaway": "",
-      "id": "v7-07"
+      "display_number": 15
     },
     {
-      "title": "One program. Two binding times.",
-      "subtitle": "",
-      "section": "Introduction",
-      "seconds": 45,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "stages",
-      "notes": "Binding time follows both annotation and adapted value in the actual implementation. A DSL type annotation stages a runtime argument; registered leaves, or adapted values containing them, also stage even without an annotation. Plain Python configuration remains Meta. None, type arguments and reserved receivers stay Meta. There is no Constexpr marker in this API. Meta objects may be mutable ordinary Python objects; the frozen-record restriction concerns staged state crossing boundaries.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/runtime/jit_arg_adapters.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/util/tree_utils.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
-      ],
-      "items": [
-        {
-          "title": "Python / Meta",
-          "label": "RUNS NOW",
-          "body": "Objects · functions · dictionaries"
-        },
-        {
-          "title": "DSL / Staged",
-          "label": "RUNS LATER",
-          "body": "Typed values · MLIR operations"
-        }
-      ],
-      "takeaway": "",
-      "id": "v7-08"
-    },
-    {
-      "section": "Introduction",
-      "phase": "core",
-      "owner": "Guray Ozen",
-      "seconds": 15,
-      "subtitle": "",
-      "takeaway": "",
-      "id": "v9-diversity",
-      "title": "MLIR compilers make different choices",
-      "layout": "opening_text",
-      "notes": "After the use cases and the choice of Python as a metaprogram, explain why MLIR needs a composable DSL architecture. MLIR serves many dialects, pass pipelines and frontend capture rules; one fixed frontend/lowering choice cannot cover all of them. This is the motivation for a shared core with selected plugins. Keep this slide as three short spoken prompts, not a compiler or region diagram. Compiler A and B may use unrelated dialects and lowering pipelines; their Python frontends can also require different capture rules. The shared DSL infrastructure therefore needs replaceable target-specific behavior. Ask how one core can support those choices, then define the plugin concept before drawing the solution. If a concrete control-flow example helps, use the source-checked comparison below verbally.\n\nOptional presenter example retained from v9: Use a precise IR comparison, not the blanket claim that SCF cannot express early termination. CUDA Tile IR loop has a break terminator that may occur in a nested if and targets its enclosing loop. SCF for is a counted, single-block region ending in scf.yield, without a direct break terminator. SCF while can terminate via scf.condition; a frontend can lower Python break using a different representation or rewrite. Therefore identical Python surface syntax may need a different AST strategy, callback set, region construction and lowering per target. The picture compares IR capabilities, not a claim that the current DKG Tile frontend already captures every early exit. Do not conflate loop break with early function return: Tile rules differ by operation/version. Sources are recorded in the accompanying evidence file. CUDA Tile for also disallows early termination: the left picture deliberately uses loop, not for. A custom ASTPreprocessorPlugin may need to replace preprocessor_class itself because the current shared rewrite can reject staged exits before callbacks run; changing only the loop executor does not guarantee support.",
-      "sources": [
-        "verification/v9/control-flow-evidence.txt",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
-        "https://docs.nvidia.com/cuda/tile-ir/latest/sections/introduction.html",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
-        "https://docs.nvidia.com/cuda/tile-ir/latest/sections/operations.html",
-        "https://docs.nvidia.com/cuda/tile-ir/13.1/sections/operations.html",
-        "https://mlir.llvm.org/docs/Dialects/SCFDialect/",
-        "/home/gozen/work/llvm-project/mlir/include/mlir/Dialect/SCF/IR/SCFOps.td"
-      ],
-      "lead": "",
-      "lines": [
-        "Different dialects.",
-        "Different passes.",
-        "Different capture rules."
-      ],
-      "footer": "How can we reuse one DSL core?"
-    },
-    {
-      "section": "Introduction",
-      "phase": "core",
-      "owner": "Guray Ozen",
-      "seconds": 15,
-      "subtitle": "",
-      "takeaway": "",
-      "id": "v10-plugin-definition",
-      "title": "What is a plugin?",
-      "layout": "opening_text",
-      "notes": "A plugin is a reusable component that implements hooks provided by the core. The DSL author selects it; the core invokes it during tracing, compilation or runtime integration. One concrete existing example is the LLVM dialect plugin: it supplies the default type/operation emitter, host-entry construction and compiler provider. The next two diagrams distinguish shared core features from the three plugin families. Plugins can be reused by the reference mlir dsl and by a new downstream DSL. No single plugin must implement every hook.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
-        "verification/v8/core-architecture.txt"
-      ],
-      "lead": "A reusable component that adds DSL behavior.",
-      "lines": [
-        "Your DSL selects plugins.",
-        "The core calls their hooks."
-      ],
-      "footer": "Example: the LLVM plugin supplies IR and compilation."
-    },
-    {
-      "id": "v7-03",
-      "section": "Introduction",
-      "phase": "core",
-      "owner": "Guray Ozen",
-      "seconds": 45,
-      "subtitle": "",
-      "takeaway": "",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/__init__.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/dsl.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/mlir_dsl/__init__.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt",
-        "verification/v9/control-flow-evidence.txt",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/llvm/emitter.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/ast_preprocessor/scf.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/scf/executors.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/thirdparty/dlpack/plugin.py"
-      ],
-      "title": "The shared core",
-      "layout": "core_feature_boxes",
-      "core_label": "Core DSL",
-      "core_features": [
-        {
-          "title": "Diagnostics",
-          "detail": "Errors · remarks"
-        },
-        {
-          "title": "AST preprocessing",
-          "detail": "Plugin hooks"
-        },
-        {
-          "title": "JIT cache",
-          "detail": "Memory · disk"
-        },
-        {
-          "title": "Type inference",
-          "detail": "Promotion · casts"
-        }
-      ],
-      "core_note": "Add plugins for an end-to-end DSL.",
-      "notes": "Use this slide as a simple inventory of shared services, not a compilation walkthrough. The same Core DSL foundation is reused by every downstream language. Diagnostics include source-located errors and remark plumbing. AST preprocessing here means core orchestration and plugin hooks; the selected ASTPreprocessorPlugin provides the rewrite and executor implementations. JIT caching includes in-memory compiled-callable caching and persistent lowered-module caching. Type policy includes local inference, promotion and casting; concrete MLIR types and operations are emitted by the selected dialect emitter. Detailed APIs, examples and provider contracts are taught later. The authoring core is mlir.dsl, while the runnable reference namespace is mlir.mlir_dsl. Core infrastructure must be composed with suitable plugins for a complete path. BaseDSL may install its SCF/LLVM defaults automatically; do not claim that a constructed BaseDSL subclass categorically cannot execute."
-    },
-    {
-      "id": "v11-e2e-composition",
-      "section": "Introduction",
-      "phase": "core",
-      "owner": "Guray Ozen",
-      "seconds": 45,
-      "subtitle": "",
-      "takeaway": "",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/__init__.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/dsl.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/mlir_dsl/__init__.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt",
-        "verification/v9/control-flow-evidence.txt",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
-        "verification/v8/presentation-examples.py",
-        "verification/v8/presentation-examples.txt",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/llvm/plugin.py"
-      ],
-      "title": "Plugins complete the DSL",
-      "layout": "plugin_boxes",
-      "core_label": "Core DSL",
-      "plugins": [
-        {
-          "title": "Dialect",
-          "examples": [
-            "LLVM",
-            "SCF",
-            "GPU"
-          ]
-        },
-        {
-          "title": "AST preprocessor",
-          "examples": [
-            "SCF capture"
-          ]
-        },
-        {
-          "title": "Third party",
-          "examples": [
-            "DLPack",
-            "TVM-FFI"
-          ]
-        }
-      ],
-      "dsls": [
-        {
-          "title": "mlir dsl",
-          "subtitle": "Working end-to-end",
-          "plugins": [
-            "SCF",
-            "LLVM",
-            "SCF AST"
-          ]
-        },
-        {
-          "title": "Your DSL",
-          "subtitle": "Reuse + extend",
-          "plugins": [
-            "Existing plugins",
-            "Your additions"
-          ]
-        }
-      ],
-      "caption": "Reuse existing plugins in either DSL.",
-      "notes": "Three families extend the shared core: dialect plugins supply types, operations, lowering and target/compiler providers; AST-preprocessor plugins capture Python control flow; third-party plugins adapt external values or export another ABI. Show existing implementations as selectable building blocks. The lower boxes are complete DSL assemblies: each contains selected plugins and the identical Core DSL foundation from slide 10. The reference mlir dsl is a working end-to-end composition. Its CPU path uses SCF, LLVM and the SCF AST plugin; GPU, DLPack and TVM-FFI are optional additions rather than prerequisites for every program. A new DSL reuses compatible existing plugins and adds its own pieces as needed. Your additions are optional when the existing set already meets the use case. Selecting a replacement emitter requires matching entry/compiler/control-flow providers; arbitrary combinations are not promised to work. Existing reference execution evidence is retained under verification/v8. The closing Tile integration remains a port sketch. This introductory diagram intentionally omits hook names, source code, IR and detailed pass pipelines; they appear in later technical slides."
-    },
-    {
-      "title": "Agenda",
-      "subtitle": "",
-      "section": "Introduction",
-      "seconds": 15,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "agenda",
-      "notes": "Focus the core section on plugin ownership and the lifecycle rather than a long inventory. The plugin diagram returns in types, control flow, interop and target composition. Timing remains30+10+5 minutes.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
-      ],
-      "items": [
-        {
-          "title": "Core + plugin architecture"
-        },
-        {
-          "title": "Types + metaprogramming"
-        },
-        {
-          "title": "Compile + control-flow plugins"
-        },
-        {
-          "title": "Amir: mutation tracking"
-        },
-        {
-          "title": "Tile IR: compose a new target"
-        }
-      ],
-      "takeaway": "",
-      "id": "v7-09"
-    },
-    {
-      "title": "Build your language from BaseDSL",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 45,
-      "owner": "Guray Ozen",
-      "phase": "core",
+      "id": "v14-metaprogram",
+      "title": "Python is the metaprogram",
       "layout": "code_notes",
-      "notes": "Setup excerpt: import BaseDSL from mlir.dsl and ScfASTPreprocessorPlugin from mlir.dsl.plugins.ast_preprocessor. The mydsl package must export the DSL helpers referenced by its selected preprocessor, plus its chosen types and jit/kernel names. These package exports are omitted for space. BaseDSL defaults provide SCF and LLVM dialect plugins; the LLVM plugin supplies Compiler, so an explicit compiler_provider is not necessary here. The named prefix controls MY_DSL_PRINT_IR, MY_DSL_CACHE_DIR, etc. A downstream package should depend on mlir.dsl and selected plugins, not on mlir.mlir_dsl.",
+      "seconds": 30,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "Dictionary and values are known configuration; accesses and ordinary functions run in Python. Runtime x is MLIR-backed, so multiply/add emit operations. This is a conceptual variant of the checked affine example; no runtime dictionary is needed.",
       "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/dsl.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/11_custom_dsl.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/staging.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/01_staging.py",
+        "verification/v14/api-audit.txt"
       ],
       "left": {
-        "label": "mydsl/__init__.py · setup excerpt",
-        "code": "class MyDSL(BaseDSL):\n    plugins = [ScfASTPreprocessorPlugin()]\n    _jit_arg_adapter_scope = \"mlir\"\n\n    def __init__(self):\n        super().__init__(\n            name=\"MY_DSL\",\n            dsl_package_name=[\"mydsl\"],\n            pass_sm_arch_name=\"cubin-chip\",\n            preprocess=True)"
+        "label": "Python · implementation excerpt",
+        "code": "@m.jit\ndef affine(x: m.Int32, options):\n    scale = options[\"scale\"]\n    bias = options[\"bias\"]\n    return x * scale + bias\n\noptions = {\"scale\": 3, \"bias\": 4}\naffine(7, options)  # Int32(25)"
       },
       "items": [
         {
-          "title": "Choose",
-          "body": "Plugins + namespace"
+          "title": "Runs in Python",
+          "body": "Dictionary lookups"
         },
         {
-          "title": "Inherit",
-          "body": "Staging · JIT · cache · env"
+          "title": "Captured as MLIR",
+          "body": "Multiply + add"
         }
       ],
-      "takeaway": "",
-      "id": "v7-10"
+      "display_number": 16
     },
     {
-      "title": "Core API ≠ language namespace",
+      "title": "Objects + dictionaries → arithmetic",
       "subtitle": "",
       "section": "mlir dsl core",
-      "seconds": 30,
+      "seconds": 50,
       "owner": "Guray Ozen",
       "phase": "core",
       "layout": "code_pair",
-      "notes": "The architecture now has two installed sibling packages. mlir.dsl exports core types, BaseDSL and extension protocols; it does not export module-level jit/kernel/compile. mlir.mlir_dsl assembles MlirDSL, re-exports types and chosen plugin helpers, and provides the user-facing decorators/compile function. BaseDSL still owns naming, environment settings, specialization/name mangling, staging, argument adaptation, cache and orchestration; plugins provide concrete target policies.",
+      "notes": "An ordinary dictionary of Meta objects selects AddN and MulN by Python dispatch. The recipe loop runs while tracing. Each apply receives an MLIR-backed scalar, and only its arithmetic is captured. The same source was checked on the current October7 implementation: int(pipeline(4,ops)) is18. No runtime virtual dispatch or dictionary lookup is emitted. Mutable Meta configuration is legal; staged records crossing regions have different restrictions.",
       "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/__init__.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/mlir_dsl/__init__.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/staging.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/util/tree_utils.py",
+        "verification/v14/api-audit.txt",
+        "verification/v14/metaprogram-examples.txt"
       ],
-      "takeaway": "",
-      "id": "v7-11",
       "left": {
-        "label": "For DSL authors",
-        "code": "from mlir.dsl import (\n    BaseDSL, Plugin, DialectPlugin,\n    ASTPreprocessorPlugin, OpEmitter,\n    Int32, Pointer, register_leaf,\n)"
+        "label": "Python polymorphism",
+        "code": "class Op:\n    def apply(self, x):\n        raise NotImplementedError\n\nclass AddN(Op):\n    def __init__(self, n): self.n = n\n    def apply(self, x): return x + self.n\n\nclass MulN(Op):\n    def __init__(self, k): self.k = k\n    def apply(self, x): return x * self.k"
       },
       "right": {
-        "label": "For users of the reference DSL",
-        "code": "import mlir.mlir_dsl as m\n\n@m.jit\ndef scale(x: m.Int32, factor):\n    return x * factor\n\nscale(4, 3)  # 12"
-      }
-    },
-    {
-      "title": "Three plugin families",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 30,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "plugin_families",
-      "notes": "All three families share Plugin lifecycle hooks. DialectPlugin adds emitter, host/kernel helpers, compiler_provider, dialect registration and pass contribution. ASTPreprocessorPlugin supplies preprocessor_class, closure_check and executors(dsl). Third-party integrations use Plugin for adapters, libraries and exports. The default reference DSL lists optional GPU/TVM-FFI/PyTorch/DLPack plugins when available; its AST plugin is a separate default_ast_preprocessor. A plugins=[] reference subclass drops optional plugins but retains its default AST and SCF+LLVM dialect defaults.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/__init__.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/mlir_dsl/mlir_dsl.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
-      ],
-      "takeaway": "",
-      "id": "v7-12",
-      "families": [
-        {
-          "title": "Dialect",
-          "protocol": "DialectPlugin",
-          "roles": [
-            "Types + operations",
-            "Entries + lowering"
-          ],
-          "examples": "LLVM · SCF · GPU"
-        },
-        {
-          "title": "Python syntax",
-          "protocol": "ASTPreprocessorPlugin",
-          "roles": [
-            "AST rewrite",
-            "Region callbacks"
-          ],
-          "examples": "SCF AST · custom AST"
-        },
-        {
-          "title": "Integration",
-          "protocol": "Plugin",
-          "roles": [
-            "Argument adapters",
-            "ABI exports"
-          ],
-          "examples": "DLPack · PyTorch · TVM-FFI"
-        }
-      ]
-    },
-    {
-      "title": "Extend a dialect—or replace its IR",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 45,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "code_notes",
-      "notes": "This additive plugin registers a downstream dialect and contributes its lowering pass. It has no emitter, so BaseDSL installs SCF+LLVM defaults as well. If any listed DialectPlugin supplies emitter, all default dialect plugins are suppressed. The custom set must therefore provide suitable control-flow lowering, host/kernel helpers and compiler as needed; a partial emitter is not just an override layered automatically atop the default target. First matching provider wins for each emitter/host/kernel/compiler slot; explicit constructor compiler_provider has priority.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/dsl.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
-      ],
-      "left": {
-        "label": "Downstream plugin · implementation excerpt",
-        "code": "class MyDialectPlugin(m.DialectPlugin):\n    name = \"mydialect\"\n    def register_dialects(self, context):\n        mydialect.register_dialect(context)\n    def pipeline_passes(self):\n        return [\"convert-mydialect-to-llvm\"]\n\nclass MySubDSL(m.MlirDSL):\n    plugins = [MyDialectPlugin()]"
+        "label": "Metaprogram",
+        "code": "@m.jit\ndef pipeline(x: m.Int32, ops):\n    for op in ops.values():\n        x = op.apply(x)\n    return x\n\nops = {\"shift\": AddN(2), \"scale\": MulN(3)}\npipeline(4, ops)  # 18\n\n# Captured: (x + 2) * 3"
       },
-      "items": [
-        {
-          "title": "Add dialect + passes",
-          "body": "Keep the default emitter"
-        },
-        {
-          "title": "Supply an emitter",
-          "body": "Replace SCF + LLVM defaults"
-        }
-      ],
-      "takeaway": "",
-      "id": "v7-13"
+      "takeaway": "No runtime dictionary or virtual dispatch.",
+      "id": "v14-polymorphism",
+      "display_number": 17
     },
     {
-      "id": "v8-lifecycle",
-      "title": "A plugin follows the compilation lifecycle",
-      "section": "mlir dsl core",
-      "seconds": 60,
+      "id": "v14-numeric",
+      "title": "3 · Numeric types are core policy",
+      "layout": "table",
+      "seconds": 30,
+      "section": "mlir dsl",
       "owner": "Guray Ozen",
       "phase": "core",
-      "layout": "plugin_lifecycle",
       "subtitle": "",
       "takeaway": "",
-      "stages": [
-        {
-          "title": "Build DSL",
-          "hooks": [
-            "copy + install",
-            "select providers"
-          ]
-        },
-        {
-          "title": "Context",
-          "hooks": [
-            "register_dialects"
-          ]
-        },
-        {
-          "title": "Trace",
-          "hooks": [
-            "AST → emit",
-            "attach_to_module"
-          ],
-          "note": "Before cache key"
-        },
-        {
-          "title": "Compile",
-          "hooks": [
-            "pipeline_passes",
-            "shared_libs"
-          ]
-        },
-        {
-          "title": "Callable",
-          "hooks": [
-            "wrap_compiled_function"
-          ],
-          "note": "Before memory cache"
-        }
-      ],
-      "notes": "Listed plugins are shallow-copied per DSL instance and installed. Defaults and provider slots are then resolved; executors come from the selected AST plugin. Dialects register on a fresh trace context before operations are emitted. attach_to_module runs after the host entry is built and before module hashing, so ABI wrappers participate in cache identity. Dialect pipeline_passes compose ahead of the core reconcile-unrealized-casts pass; explicit pipeline settings can replace that list. shared_libs are handed to ExecutionEngine. wrap_compiled_function runs after the engine exists and before storing the callable in the memory cache. This is a conceptual lifecycle: hot cache paths skip compilation hooks as applicable. available() guides reference-plugin selection; installing a manually listed plugin is a separate decision.",
+      "notes": "These are the wrapper families in types/typing.py. Promotion and conversion policy live in Python. Representation support does not guarantee every host ABI or arithmetic operation for every narrow/wide type. TypeOps maps each dtype to the chosen physical MLIR type; outside a trace use scalar_mlir_type or ask a plugin explicitly, not Int32.mlir_type.",
       "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/dsl.py",
-        "verification/v8/core-architecture.txt"
-      ]
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/types/typing.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/02_numeric_types.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "headers": [
+        "Family",
+        "Types"
+      ],
+      "rows": [
+        [
+          "Integers",
+          "Int2–Int128 · Uint8–Uint128"
+        ],
+        [
+          "Floating point",
+          "Float16/32/64 · BFloat16 · TFloat32"
+        ],
+        [
+          "Narrow floats",
+          "FP8 · FP6 · FP4 formats"
+        ],
+        [
+          "Boolean",
+          "Boolean"
+        ]
+      ],
+      "display_number": 18
     },
     {
-      "title": "@jit and @kernel",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 60,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "calling",
-      "notes": "The core defines decorator orchestration and the host call boundary. The active dialect plugin supplies host_gen_helper for jit, kernel_gen_helper for kernel, and compiler_provider. In the reference LLVM/GPU assembly the host is func.func and the kernel is gpu.func; its .launch emits synchronous gpu.launch_func. Without a kernel provider, kernel use reports a plugin-required diagnostic. Direct Python-to-kernel launch is a target capability to supply in the Tile port, not an unconditional core path.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/dsl.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/gpu.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/llvm/entry.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
-      ],
-      "items": [
-        {
-          "title": "Host",
-          "body": "Specialize · compile · call"
-        },
-        {
-          "title": "GPU",
-          "body": "Build kernel + launch"
-        },
-        {
-          "title": "Direct launch",
-          "body": "Python → @kernel\nTarget policy"
-        }
-      ],
-      "takeaway": "",
-      "id": "v7-14"
-    },
-    {
-      "title": "Types keep policy; emitters choose IR",
+      "title": "Literal → promotion → cast",
       "subtitle": "",
       "section": "mlir dsl core",
       "seconds": 60,
       "owner": "Guray Ozen",
       "phase": "core",
       "layout": "type_rules",
-      "notes": "Numeric wrappers retain dtype/promotion semantics while the active emitter supplies MLIR types and operations. The conversion rows show the LLVM emitter: a Python payload materializes a constant on staged use; i32+i64 sign-extends; narrowing truncates without runtime range checks; signed int/float conversion uses sitofp/fptosi. Returning a runtime value to Python via x.to(int) is a binding-time error. Current scalar families include signed Int2/4/8/16/32/64/128 and unsigned8/16/32/64/128, plus the listed floating formats. Tiny/large integers are representation capabilities, not a promise of every host ABI/operation combination. The row variable suffixes indicate types. A custom emitter can change the physical IR representation while retaining the core wrapper.",
+      "notes": "Python literal defaults are bool→Boolean, int→Int32 (Int64 when outside i32 range), float→Float32. Wrappers with Python payloads can fold in Python. On staged use, the selected type_ops plugin materializes operations. Signed i32+i64 promotes; explicit narrowing truncates and is not universally an error. Narrow Python integer construction may wrap and warn. Runtime x.to(int) raises PHASE_REQUIRES_CONSTANT. Examples show TypeOps with arith, not a plugin named LLVM.",
       "sources": [
         "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/types/typing.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/mlir_op.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/llvm/emitter.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/type_ops/arith.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/type_ops/__init__.py",
+        "verification/v14/api-audit.txt"
       ],
-      "takeaway": "Shown: the LLVM emitter",
+      "takeaway": "Shown: TypeOps with arith",
       "families": [
-        "Bool · i1",
+        "Boolean · i1",
         "Int2–128 / Uint8–128",
         "FP64/32/16 · BF16",
         "FP8/6/4 · TF32"
@@ -763,7 +693,7 @@
       "pipeline": [
         "Python or SSA value",
         "dtype + promotion",
-        "active OpEmitter"
+        "type_ops plugin"
       ],
       "rules": [
         {
@@ -797,511 +727,155 @@
           "op": "Runtime ≠ Python value"
         }
       ],
-      "id": "v7-15"
+      "id": "v14-casts",
+      "display_number": 19
     },
     {
-      "title": "One emitter, three value families",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 30,
+      "id": "v14-typeops",
+      "title": "The same dtype can target another dialect",
+      "layout": "code_notes",
+      "seconds": 45,
+      "section": "mlir dsl",
       "owner": "Guray Ozen",
       "phase": "core",
-      "layout": "table",
-      "notes": "Scalars, vectors and pointers now all call OpEmitter. Vector uses vector_type/vector_shape plus element, broadcast, extraction and reduction hooks. Pointer delegates address-space/type, scalar/vector/masked loads and stores, arithmetic and conversions. Struct is a frozen field-wise pytree with no aggregate SSA value and no emitter hook; each field crosses calls/regions separately. LLVM host result ABI may pack multiple fields into an LLVM struct, which is distinct from the language value model. Core helpers remain reusable; dialect math emission lives in the LLVM plugin.",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "Short excerpt based on example14. Imports, scalar_type, tensor constant construction and custom pipeline are omitted; all are required in the full example. The checked full example emits i32 under the reference DSL and rank-zero tensor<i32> under the alternate type_ops plugin. It is a stand-in for a target such as cuda_tile, not actual Tile IR execution. The alternate path is trace-only because its custom lowering is not implemented. TypeOps composes scalar/vector/memory op modules; each part is optional.",
       "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/mlir_op.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/14_type_ops_plugin.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/type_ops/__init__.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "left": {
+        "label": "Type-ops plugin · implementation excerpt",
+        "code": "class TileTypes(TypeOps):\n    def mlir_type(self, dtype):\n        return ir.RankedTensorType.get(\n            [], dtype.scalar_mlir_type)\n\nclass TileLike(m.MlirTestDSL):\n    plugins = replace(\n        m.MlirTestDSL.plugins,\n        type_ops=TileTypes(scalars=arith))"
+      },
+      "items": [
+        {
+          "title": "Same source",
+          "body": "m.Int32(6) + x"
+        },
+        {
+          "title": "Different IR type",
+          "body": "i32 → tensor<i32>"
+        }
+      ],
+      "display_number": 20
+    },
+    {
+      "id": "v14-aggregates",
+      "title": "4 · Vectors, pointers, structs",
+      "layout": "table",
+      "seconds": 35,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "Vector and Pointer delegate to type_ops. Host pointers wrap buffers; the default memory module emits LLVM pointer operations. Struct is a frozen pytree record rather than an aggregate SSA type and needs no type-ops hook. Native call/region boundaries flatten and reconstruct leaves. The func entry ABI may separately pack results, which does not change the language value model.",
+      "sources": [
         "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/types/vector.py",
         "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/types/typing.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/05_structs.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/util/tree_utils.py",
+        "verification/v14/api-audit.txt"
       ],
       "headers": [
-        "Core value",
-        "Dialect hooks"
+        "Value",
+        "How it maps"
       ],
       "rows": [
-        [
-          "Scalar",
-          "mlir_type · const · add · cast"
-        ],
         [
           "Vector",
-          "vector_type · broadcast · reduce"
+          "vector hooks: create · extract · reduce"
         ],
         [
-          "Pointer",
-          "pointer_type · load · store · ptr_add"
+          "Pointer[T]",
+          "memory hooks: load · store · offset"
         ],
         [
-          "Struct / frozen record",
-          "Flatten fields → rebuild record"
+          "@struct",
+          "Frozen record → flattened leaves"
         ],
         [
-          "Custom leaf",
-          "register_leaf"
+          "Custom type",
+          "register_leaf → your SSA value"
         ]
       ],
-      "takeaway": "Structs need no dialect-specific aggregate type.",
-      "id": "v7-16"
+      "display_number": 21
     },
     {
-      "title": "Local type inference",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 45,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "code_notes",
-      "notes": "Types are inferred locally from annotations, adapted leaves and operand policy. x:Int32 stages a runtime scalar; factor is plain Meta configuration. Operators promote operands, then ask the active emitter to build constants and operations. There is no whole-program Python type inference. Adapted tensor pointers may stage without annotations because they are leaves. Region joins and loop carries require compatible leaf structure and types.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/runtime/jit_arg_adapters.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/types/typing.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
-      ],
-      "left": {
-        "label": "Annotations + local inference",
-        "code": "@m.jit\ndef affine(x: m.Int32, factor):\n    return x * factor + 1\n\naffine(4, 3)\n\n# x       -> runtime i32\n# factor  -> known Python int\n# result  -> i32"
-      },
-      "items": [
-        {
-          "title": "Boundary",
-          "body": "Annotation → runtime type"
-        },
-        {
-          "title": "Operator",
-          "body": "Promote → emit → wrap"
-        },
-        {
-          "title": "Join",
-          "body": "Same structure + types"
-        }
-      ],
-      "takeaway": "",
-      "id": "v7-17"
-    },
-    {
-      "title": "Same Python types. Different IR.",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 45,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "emitter_dispatch",
-      "notes": "This is now an implemented architecture, not a future operator policy hook. current_emitter() returns the active DSL emitter; without an active DSL it lazily falls back to LlvmEmitter. The checked rank-zero tensor example overrides mlir_type/scalar_type/const and reuses arith operations, which support tensors. Thus even identical operator names may have different physical types. A real target additionally overrides operations as needed. Rank-zero tensors are a stand-in, not execution of NVIDIA Tile IR.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/mlir_op.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/test/plugins_dialect.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/14_dialect_plugin.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
-      ],
-      "takeaway": "",
-      "id": "v7-18",
-      "expression": "x + y",
-      "promotion": "dtype + promotion",
-      "emitter": "active OpEmitter",
-      "branches": [
-        {
-          "title": "LlvmEmitter",
-          "ir_type": "i32",
-          "op": "arith.addi"
-        },
-        {
-          "title": "CustomEmitter",
-          "ir_type": "tensor<i32>",
-          "op": "arith.addi"
-        }
-      ],
-      "caption": "Same Int32 class · different SSA type"
-    },
-    {
-      "id": "v8-emitter-example",
-      "title": "Install the emitter as a dialect plugin",
-      "section": "mlir dsl core",
-      "seconds": 60,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "code_pair",
-      "subtitle": "",
-      "takeaway": "",
-      "left": {
-        "label": "Rank-zero tensor plugin · excerpt",
-        "code": "class TensorDialect(m.DialectPlugin):\n    emitter = RankZeroTensorEmitter()\n    host_gen_helper = m.LlvmHostGenHelper\n\nclass TensorDSL(m.MlirDSL):\n    plugins = [TensorDialect()]\n\n@TensorDSL.jit\ndef add6(x: m.Int32):\n    return m.Int32(6) + x"
-      },
-      "right": {
-        "label": "Same expression · two traced forms",
-        "code": "// Default LLVM world\n%c6 = arith.constant 6 : i32\n%r = arith.addi %c6, %x : i32\n\n// Rank-zero tensor emitter\n%c6 = arith.constant dense<6>\n    : tensor<i32>\n%r = arith.addi %c6, %x\n    : tensor<i32>"
-      },
-      "notes": "Abridged from the checked dialect-plugin example. RankZeroTensorEmitter is defined in the full source: it overrides type mapping, reverse scalar-type lookup and constant emission; inherited arithmetic works on tensors. This slide is trace-only. The rank-zero demonstration lacks a real lowering and compiler provider; the example placeholder pass is not claimed to compile. A production custom dialect must supply those providers when replacing defaults. LlvmHostGenHelper is reused only to construct func.func entries accepting tensor operands. The direct Int32 annotation remains unchanged; no auxiliary runtime annotation wrappers are used.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/test/plugins_dialect.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/14_dialect_plugin.py",
-        "verification/v8/runtime-types.txt"
-      ]
-    },
-    {
-      "title": "Add mydialect.Tensor",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 60,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "code_notes",
-      "notes": "Register a domain-specific wrapper as a leaf so the shared tree protocol can extract types/values and rebuild it from SSA values. Registration is a module-level action, not repeated in plugin.install. A separate JIT argument adapter is needed for external host objects. Core scalar/vector/pointer customization uses OpEmitter; leaf registration adds values outside those built-in families.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/util/tree_utils.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
-      ],
-      "left": {
-        "label": "Register a Tensor leaf",
-        "code": "class Tensor:\n    def __init__(self, value):\n        self.value = value\n\nm.register_leaf(\n    Tensor,\n    ir_types=lambda t: [t.value.type],\n    ir_values=lambda t: [t.value],\n    from_ir_values=lambda old, values:\n        Tensor(values[0]))"
-      },
-      "items": [
-        {
-          "title": "Value protocol",
-          "body": "Flatten / rebuild"
-        },
-        {
-          "title": "Runtime boundary",
-          "body": "Argument adapter"
-        }
-      ],
-      "takeaway": "",
-      "id": "v7-19"
-    },
-    {
-      "title": "Python values specialize the program",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 45,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "code_pair",
-      "notes": "Plain Python scale/bias specialize the generated program. Runtime x uses Int32. The reference LLVM emitter generates constants, multiplication and addition under func.func; return is func.return. This is the same binding-time model after the package split. The displayed Python example was executed against the current working tree; see the bundled presentation-examples log.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/01_staging.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/llvm/entry.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt",
-        "verification/v8/presentation-examples.txt"
-      ],
-      "left": {
-        "label": "Python",
-        "code": "@m.jit\ndef affine(x: m.Int32, scale, bias):\n    return x * scale + bias\n\naffine(7, 3, 4)  # 25"
-      },
-      "right": {
-        "label": "Generated MLIR",
-        "code": "%c3 = arith.constant 3 : i32\n%c4 = arith.constant 4 : i32\n%a = arith.muli %x, %c3 : i32\n%r = arith.addi %a, %c4 : i32\nfunc.return %r : i32"
-      },
-      "takeaway": "scale, bias: Meta · x: Staged",
-      "id": "v7-20"
-    },
-    {
-      "title": "Objects + dictionaries → arithmetic",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 60,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "code_pair",
-      "notes": "ops is an ordinary known dictionary of Meta objects; it needs no marker annotation. Python dispatch and its recipe loop execute while tracing. AddN and MulN receive a staged scalar, so their arithmetic calls the active emitter. No runtime dictionary lookup or virtual dispatch is emitted. Mutable Meta objects are valid; the restrictions on mutable containers apply when they contain staged values crossing boundaries. The displayed Python example was executed against the current working tree; see the bundled presentation-examples log.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/runtime/jit_arg_adapters.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/util/tree_utils.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt",
-        "verification/v8/presentation-examples.txt"
-      ],
-      "left": {
-        "label": "Python polymorphism",
-        "code": "class Op:\n    def apply(self, x):\n        raise NotImplementedError\n\nclass AddN(Op):\n    def __init__(self, n): self.n = n\n    def apply(self, x): return x + self.n\n\nclass MulN(Op):\n    def __init__(self, k): self.k = k\n    def apply(self, x): return x * self.k"
-      },
-      "right": {
-        "label": "Metaprogram",
-        "code": "@m.jit\ndef pipeline(x: m.Int32, ops):\n    for op in ops.values():\n        x = op.apply(x)\n    return x\n\nops = {\"shift\": AddN(2), \"scale\": MulN(3)}\npipeline(4, ops)  # 18\n\n# Captured: (x + 2) * 3"
-      },
-      "takeaway": "No runtime dictionary or virtual dispatch.",
-      "id": "v7-21"
-    },
-    {
-      "title": "A GPU plugin supplies kernel + launch",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 45,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "code_notes",
-      "notes": "The current public argument interface is Pointer, not Array. GPU plugin helpers supply the device entry and launch; NVVM helpers supply thread index. This bounded example launches exactly four threads for a four-element buffer; general lengths need a bounds check, as example12 demonstrates. ops is plain Meta configuration. m.MlirDSL includes GpuPlugin only when available, with an architecture/runtime configured. GPU example12 was trace-checked; no GPU execution is claimed here.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/gpu.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/12_gpu_kernels.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
-      ],
-      "left": {
-        "label": "GPU body · Pointer interface",
-        "code": "@m.kernel\ndef fused(arr: m.Pointer[m.Float32],\n          ops):\n    tx, _, _ = m.thread_idx()\n    x = arr[tx]\n    for op in ops.values():\n        x = op.apply(x)\n    arr[tx] = x\n\n# From @m.jit, for four elements:\n# fused(arr, ops).launch(grid=[1], block=[4])"
-      },
-      "items": [
-        {
-          "title": "Core",
-          "body": "Meta recipe · typed values"
-        },
-        {
-          "title": "GPU plugin",
-          "body": "gpu.func · gpu.launch_func"
-        }
-      ],
-      "takeaway": "",
-      "id": "v7-22"
-    },
-    {
-      "title": "DLPack is a boundary plugin",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 45,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "flow",
-      "notes": "DLPack is now implemented as an optional Plugin under plugins/thirdparty/dlpack. Its nanobind extension reads pointer, shape, strides, dtype and device and holds the producer lease. The protocol adapter requires row-major contiguous storage and produces a Pointer with keepalive ownership. Shape metadata is inspectable on DlpackTensor but is not an automatic runtime descriptor in the pointer ABI; pass dimensions separately. Type-keyed adapters such as NumPy or PyTorch take precedence. JAX is a protocol-compatible example, not a tested framework claim. The focused protocol-only wrapper test passed on CPU including dtype/strided errors.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/thirdparty/dlpack/plugin.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/test/plugins_dlpack.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
-      ],
-      "items": [
-        {
-          "title": "Tensor",
-          "body": "NumPy · PyTorch\nJAX · …"
-        },
-        {
-          "title": "DlpackPlugin",
-          "body": "Protocol adapter"
-        },
-        {
-          "title": "DlpackTensor",
-          "body": "Layout + dtype\nproducer lifetime"
-        },
-        {
-          "title": "Pointer[T]",
-          "body": "Data address\nsize passed separately"
-        }
-      ],
-      "footnote": "Contiguous buffers · supported dtype + device",
-      "takeaway": "",
-      "id": "v7-23"
-    },
-    {
-      "title": "Compile now. Call later.",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 45,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "code_notes",
-      "notes": "Current m.compile is a regular function taking a decorated function and representative arguments. It returns JitCompiledFunction without invoking compiled code. The compiled callable still accepts the Meta argument b and checks its specialization. compile-only bypasses the memory cache; ordinary calls populate it. Do not show the old bracketed options or export_to_c facade: those DkgDSL capabilities are not this current API. Export is discussed via the concrete TVM-FFI plugin next.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/mlir_dsl/mlir_dsl.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/09_compile_and_cache.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
-      ],
-      "left": {
-        "label": "Current compile API",
-        "code": "@m.jit\ndef axpb(x: m.Float32,\n         a: m.Float32, b: int):\n    return a * x + b\n\ncompiled = m.compile(axpb, 2.0, 3.0, 1)\ncompiled(2.0, 3.0, 1)  # 7.0"
-      },
-      "items": [
-        {
-          "title": "Signature",
-          "body": "Runtime types + Meta b"
-        },
-        {
-          "title": "Compiler provider",
-          "body": "Pass manager + engine"
-        }
-      ],
-      "takeaway": "",
-      "id": "v7-24"
-    },
-    {
-      "title": "An export plugin wraps both sides",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 45,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "flow",
-      "notes": "TVM-FFI illustrates the general Plugin lifecycle without inventing a new compiler. attach_to_module adds the ABI function before hashing. shared_libs contributes its runtime dependencies. wrap_compiled_function looks up its generated symbol after engine creation and exposes a TVM-FFI function before memory caching. It preserves the Meta specialization check. PyTorch is a separate argument-adapter plugin. Explicit availability/enabling is required; no unconditional optional dependency in core. Example13 executed in the available environment. External bitcode FFI remains outside this tutorial API.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/thirdparty/tvm_ffi/plugin.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/thirdparty/pytorch/plugin.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/13_tvm_ffi_export.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
-      ],
-      "items": [
-        {
-          "title": "Python",
-          "body": "Adapt arguments"
-        },
-        {
-          "title": "Traced module",
-          "body": "Add ABI wrapper"
-        },
-        {
-          "title": "Compiler",
-          "body": "Lower + link"
-        },
-        {
-          "title": "Callable",
-          "body": "TVM-FFI callable"
-        }
-      ],
-      "footnote": "Optional: TvmFfiPlugin · MLIR_DSL_ENABLE_TVM_FFI=1",
-      "takeaway": "",
-      "id": "v7-25"
-    },
-    {
-      "title": "Errors + MLIR remarks",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 30,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "code_notes",
-      "notes": "Use the current argument-annotation mismatch example, which rendered correctly in the focused checks. Source locations and code frames connect diagnostics to Python. Plugin-specific catalogs can be registered without core importing target catalogs. MLIR remarks cover tracing and passes and can be collected or streamed. An existing type-unstable-loop diagnostic case currently reaches a container error during this refactor; record that in validation, rather than presenting it as a newly passing example. The displayed string argument was checked explicitly: expects_int(\"oops\") reports expected Int32/got str. A Python float may be coerced by this host boundary, so it is not the mismatch example. The displayed Python example was executed against the current working tree; see the bundled presentation-examples log.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/diagnostics.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/compiler/remarks.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/10_diagnostics.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/test/remarks.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt",
-        "verification/v8/presentation-examples.txt"
-      ],
-      "left": {
-        "label": "Source error + fix",
-        "code": "@m.jit\ndef expects_int(x: m.Int32):\n    return x\n\nexpects_int(\"oops\")\n# ARG_ANNOTATION_MISMATCH\n# Expected: Int32\n# Pass an integer, or change the annotation."
-      },
-      "items": [
-        {
-          "title": "Errors",
-          "body": "File · line · fix"
-        },
-        {
-          "title": "Remarks",
-          "body": "Trace + passes → records"
-        }
-      ],
-      "takeaway": "MLIR_DSL_DEBUGINFO=1 · MLIR_DSL_REMARKS=.*",
-      "id": "v7-26"
-    },
-    {
-      "title": "See what the compiler does",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 30,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "table",
-      "notes": "Tools are core services inherited by every sub-DSL: source mapping, trace verification, IR preservation, structured remarks and compile profiling. The selected compiler/provider and emitter still determine what IR is inspected. Old package/test counts are obsolete after moving to tools/mlir-dsl and splitting core/reference lit suites; do not repeat those numbers as current validation.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/env_manager.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/compiler/remarks.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/util/phase_profiler.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
-      ],
-      "headers": [
-        "Tool",
-        "Setting / output"
-      ],
-      "rows": [
-        [
-          "Source locations",
-          "Python line → MLIR location"
-        ],
-        [
-          "Verify trace",
-          "VERIFY_TRACE"
-        ],
-        [
-          "Remarks",
-          "REMARKS · REMARKS_OUTPUT"
-        ],
-        [
-          "Inspect IR",
-          "PRINT_IR · KEEP_IR"
-        ],
-        [
-          "Profile",
-          "PROFILE_COMPILER"
-        ]
-      ],
-      "takeaway": "",
-      "id": "v7-27"
-    },
-    {
-      "title": "Cache compilation work",
-      "subtitle": "",
-      "section": "mlir dsl core",
-      "seconds": 45,
-      "owner": "Guray Ozen",
-      "phase": "core",
-      "layout": "table",
-      "notes": "Normal calls trace to identify a module, then reuse compiled work. In-memory cache stores the wrapped callable and engine; file cache stores lowered bytecode with integrity/atomic persistence. Plugin attach_to_module additions are included before module hashing, and pipeline/settings/toolchain information separate incompatible artifacts. Disk caching defaults to TMPDIR/user/name_cache; CACHE_DIR relocates it, DISABLE_FILE_CACHING and NO_CACHE control it. The current compile/cache example executed with memory and second-process disk hits.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/util/cache_helpers.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/util/cache_key.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/09_compile_and_cache.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
-      ],
-      "headers": [
-        "Cache",
-        "Stores",
-        "Hit"
-      ],
-      "rows": [
-        [
-          "Memory",
-          "Callable + engine",
-          "Reuse callable"
-        ],
-        [
-          "Disk",
-          "Lowered bytecode",
-          "Skip passes"
-        ],
-        [
-          "Identity",
-          "IR + settings + toolchain",
-          "Compatible programs"
-        ]
-      ],
-      "takeaway": "",
-      "id": "v7-28"
-    },
-    {
-      "title": "AST capture is a plugin, too",
+      "title": "Records flatten into their fields",
       "subtitle": "",
       "section": "Control flow",
-      "seconds": 60,
+      "seconds": 45,
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "layout": "code_pair",
+      "notes": "Frozen @struct records flatten at calls and control-flow boundaries. norm2 receives two f32 leaves. The displayed IR is a body/interface sketch; actual host result ABI is owned by func.Entry. The checked current structs example returns norm2=25, with Numeric wrappers for scalar leaves. General frozen dataclasses also work; mutable staged records are rejected. Meta objects need not be frozen.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/types/typing.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/util/tree_utils.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/05_structs.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "left": {
+        "label": "Dialect-neutral record",
+        "code": "@m.struct\nclass Vec2:\n    x: m.Float32\n    y: m.Float32\n\n@m.jit\ndef norm2(v: Vec2):\n    return v.x*v.x + v.y*v.y"
+      },
+      "right": {
+        "label": "Two fields → two SSA arguments",
+        "code": "func.func @norm2(\n    %x: f32, %y: f32) -> f32 {\n  %a = arith.mulf %x, %x : f32\n  %b = arith.mulf %y, %y : f32\n  %r = arith.addf %a, %b : f32\n  func.return %r : f32\n}\n\n// norm2(Vec2(x=3, y=4)) → 25"
+      },
+      "takeaway": "Frozen record · no aggregate SSA type",
+      "id": "v14-records",
+      "display_number": 22
+    },
+    {
+      "id": "v14-custom-leaf",
+      "title": "Extend values with mydialect.Tensor",
+      "layout": "code_notes",
+      "seconds": 35,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "The staged-only Tensor wrapper demonstrates the exact keyword-only register_leaf API: ir_types, ir_values and from_ir_values. Imports are omitted. Without marshal it is a staged-only leaf, not a host tensor adapter. It can cross staged region boundaries through extracted/rebuilt SSA leaves. Host adaptation requires the additional marshal/adapter contract. Registration happens once at module import. A dialect module supplies operations; a custom value class alone is not a plugin.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/util/tree_utils.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/types/typing.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "left": {
+        "label": "Custom leaf · implementation excerpt",
+        "code": "@dataclass(frozen=True)\nclass Tensor:\n    value: ir.Value\n\nregister_leaf(\n    Tensor,\n    ir_types=lambda t: [t.value.type],\n    ir_values=lambda t: [t.value],\n    from_ir_values=lambda t, vs: Tensor(vs[0]),\n)"
+      },
+      "items": [
+        {
+          "title": "Keep a custom value",
+          "body": "Own the Python wrapper"
+        },
+        {
+          "title": "Cross DSL boundaries",
+          "body": "Extract + rebuild SSA leaves"
+        }
+      ],
+      "display_number": 23
+    },
+    {
+      "title": "5 · Native control flow",
+      "subtitle": "",
+      "section": "Control flow",
+      "seconds": 55,
       "owner": "Guray Ozen",
       "phase": "core",
       "layout": "ast_plugin_pipeline",
-      "notes": "ASTPreprocessorPlugin selects preprocessor_class and executors(dsl); those callbacks decide whether to execute Python or build staged regions. ScfASTPreprocessorPlugin pairs the shared DSLPreprocessor with SCF executors. ScfDialectPlugin separately owns the target-side structured-control-flow lowering; explicit SCF builders live in its package. A custom AST plugin can reuse the rewrite but provide callbacks that emit a different control-flow dialect. Python operator overloads alone cannot capture native if/for/while.",
+      "notes": "Tracing handles expressions, not Python keywords by operator overload alone. The optional ASTPreprocessorPlugin owns the rewrite and executor callbacks. The shipped scf.ASTPreprocessor pairs the generic syntax rewrite with SCF executors and builders. Meta conditions/bounds execute Python; MLIR-backed values build regions. A different role implementation can capture syntax for another control-flow dialect. No separate SCF dialect plugin exists now; lowering is listed in the sub-DSL pipeline.",
       "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/ast_preprocessor/scf.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/scf/plugin.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/ast_preprocessor/preprocessor.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/ast_preprocessor/scf/__init__.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/ast_preprocessor/scf/executors.py",
+        "verification/v14/api-audit.txt"
       ],
       "stages": [
         {
@@ -1317,8 +891,8 @@
           "body": "Meta or staged?"
         },
         {
-          "title": "Dialect",
-          "body": "Build regions"
+          "title": "Regions",
+          "body": "scf · your dialect"
         }
       ],
       "targets": [
@@ -1326,19 +900,15 @@
         "your dialect"
       ],
       "takeaway": "Syntax capture and IR emission are separate choices.",
-      "id": "v7-29",
+      "id": "v14-control-flow",
       "ownership": [
         {
           "label": "ASTPreprocessorPlugin",
           "start": 1,
-          "end": 2
-        },
-        {
-          "label": "DialectPlugin",
-          "start": 3,
           "end": 3
         }
-      ]
+      ],
+      "display_number": 24
     },
     {
       "title": "Assigned name → iter_arg",
@@ -1348,160 +918,739 @@
       "owner": "Guray Ozen",
       "phase": "core",
       "layout": "code_pair",
-      "notes": "The AST analyzes assignments to identify acc as a carried name. The selected executors flatten its values, construct a region argument, yield the update, and rebuild the result. The shown IR is the intended SCF shape, independent of backend choice. Current native control-flow examples passed; the separate diagnostic regression concerns a type-unstable loop, not normal loop carries.",
+      "notes": "Assignment analysis identifies acc as a carried name. The selected executor flattens carries, creates region arguments, yields updates and rebuilds loop results. This is symbolic analysis of source names, not arbitrary mutation tracking. Current native-control-flow and TYPE_UNSTABLE_JOIN diagnostics pass. More general aliasing and mutation are the subject of Amir’s separate section.",
       "sources": [
         "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/ast_preprocessor/preprocessor.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/scf/executors.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/ast_preprocessor/scf/executors.py",
+        "verification/v14/api-audit.txt"
       ],
       "left": {
         "label": "Python · find the carry",
-        "code": "acc = m.Int32(0)\nfor i in range(n):\n    acc = acc + i\n\n# Defined outside: acc\n# Written inside:  acc\n# write_args = [\"acc\"]"
+        "code": "acc = m.Int32(0)\nfor i in range(n):\n    acc = acc + i\n\n# Defined outside: acc\n# Written inside:  acc\n# write_args_names = [\"acc\"]"
       },
       "right": {
         "label": "MLIR · thread the SSA value",
         "code": "%sum = scf.for %i = %c0 to %n\n    step %c1 iter_args(%acc = %zero)\n    -> (i32) : i32 {\n  %next = arith.addi %acc, %i : i32\n  scf.yield %next : i32\n}"
       },
       "takeaway": "Flatten → build region → yield → rebuild",
-      "id": "v7-30"
+      "id": "v14-iterargs",
+      "display_number": 25
     },
     {
-      "title": "Records flatten into their fields",
-      "subtitle": "",
-      "section": "Control flow",
-      "seconds": 60,
+      "id": "v14-control-limits",
+      "title": "Capture has an explicit boundary",
+      "layout": "table",
+      "seconds": 30,
+      "section": "mlir dsl",
       "owner": "Guray Ozen",
       "phase": "core",
-      "layout": "code_pair",
-      "notes": "Struct is now a frozen record of DSL fields, flattened at calls/returns/control-flow boundaries and reconstructed afterward. Field reads are the original field values. replace creates a new record. This avoids hard-wiring an LLVM aggregate into the core type system. General frozen dataclasses also use the tree protocol; mutable staged records and containers remain constrained. Host return packing is a separate ABI choice made by the entry helper. Current example05 executed norm2=25 and other record operations. Amir discusses richer mutation later.",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "The current preprocessor leaves an if/while owning return/raise/break/continue as Python, requiring a Meta condition when reached. Data-dependent early exits are not supported by this frontend. This restriction belongs to the selected preprocessor, not to every possible MLIR program. Captured staged records must be frozen; ordinary Meta objects can remain mutable. Comparisons, ternaries, and/or/not/any/all/min/max/range are handled by the selected capture implementation.",
       "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/types/typing.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/util/tree_utils.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/05_structs.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/ast_preprocessor/preprocessor.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/test/ast_preprocessor.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/test/diagnostics.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "headers": [
+        "Python / Meta",
+        "Staged"
+      ],
+      "rows": [
+        [
+          "if / for / while",
+          "scf.if / scf.for / scf.while"
+        ],
+        [
+          "Known early exit",
+          "Python executes it"
+        ],
+        [
+          "Data-dependent early exit",
+          "UNSUP_EARLY_EXIT"
+        ],
+        [
+          "Frozen dataclass",
+          "Flatten + rebuild leaves"
+        ]
+      ],
+      "display_number": 26
+    },
+    {
+      "id": "v14-custom-ast",
+      "title": "Replace capture through one role",
+      "layout": "code_notes",
+      "seconds": 40,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "The checked CountingPreprocessor test uses this executors override shape to wrap staged loop construction. Here my_loop_executor is a downstream function omitted from the excerpt. Replacing callbacks can target another region dialect when its semantics fit; more extensive capture/early-exit changes may require a different preprocessor_class. This is not a promise that changing one callback supports every target control-flow feature.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/test/plugins_ast_preprocessor.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
+        "verification/v14/api-audit.txt"
       ],
       "left": {
-        "label": "Dialect-neutral record",
-        "code": "@m.struct\nclass Vec2:\n    x: m.Float32\n    y: m.Float32\n\n@m.jit\ndef norm2(v: Vec2):\n    return v.x*v.x + v.y*v.y"
+        "label": "AST plugin · implementation excerpt",
+        "code": "class MyAST(scf.ASTPreprocessor):\n    def executors(self, dsl):\n        hooks = super().executors(dsl)\n        hooks[\"loop_execute_range_dynamic\"] = (\n            my_loop_executor)\n        return hooks\n\n# In the Plugins record:\nast_preprocessor=MyAST()"
       },
-      "right": {
-        "label": "Two fields → two SSA arguments",
-        "code": "func.func @norm2(\n    %x: f32, %y: f32) -> f32 {\n  %a = arith.mulf %x, %x : f32\n  %b = arith.mulf %y, %y : f32\n  %r = arith.addf %a, %b : f32\n  func.return %r : f32\n}\n\n// norm2(Vec2(x=3, y=4)) → 25"
-      },
-      "takeaway": "Frozen record · no aggregate SSA type",
-      "id": "v7-31"
+      "items": [
+        {
+          "title": "Reuse the rewrite",
+          "body": "Replace a region builder"
+        },
+        {
+          "title": "Or replace both",
+          "body": "preprocessor_class + executors"
+        }
+      ],
+      "display_number": 27
     },
     {
-      "title": "Swap the region callbacks",
-      "subtitle": "",
-      "section": "Control flow",
-      "seconds": 60,
+      "id": "v14-builders",
+      "title": "6 · Explicit builders",
+      "layout": "code_notes",
+      "seconds": 35,
+      "section": "mlir dsl",
       "owner": "Guray Ozen",
       "phase": "core",
-      "layout": "code_notes",
-      "notes": "Use the dedicated ASTPreprocessorPlugin API, not an install-time executor mutation that BaseDSL can overwrite afterward. preprocessor_class and the complete executors mapping are supplied by the custom AST plugin. The callback map includes is_dynamic_expression, loop_execute_range_dynamic, if_dynamic, while_dynamic, compare_executor, builtin_redirector and ifexp_dynamic; builtin_redirector and ifexp_dynamic have defaults. MyDialect supplies matching types/ops/lowering and provider hooks when replacing defaults. MyDSL constructor and namespace exports are as in the earlier setup slide. First listed AST plugin wins; otherwise default_ast_preprocessor is used. preprocess=False can bypass rewriting.",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "Explicit builders live with the SCF AST plugin implementation and can be used without enabling its source rewrite. Loop carry values are explicit. This is the sum_of_squares shape from example08. The complete source and other builders are linked; no native AST reconstruction is required for this function.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/08_explicit_builders.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/ast_preprocessor/scf/builders.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "left": {
+        "label": "Python · implementation excerpt",
+        "code": "@m.jit(preprocess=False)\ndef sum_squares(n: m.Int32):\n    for i, acc, result in m.for_(\n            0, n, 1, [m.Int32(0)]):\n        m.yield_(acc + i * i)\n    return result"
+      },
+      "items": [
+        {
+          "title": "No syntax rewrite",
+          "body": "Build regions directly"
+        },
+        {
+          "title": "Same building blocks",
+          "body": "for_ · if_ · while_ · yield_"
+        }
+      ],
+      "display_number": 28
+    },
+    {
+      "id": "v14-host-boundary",
+      "title": "7 · Bring host values to the DSL",
+      "layout": "flow",
+      "seconds": 55,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "core/arguments.py owns binding/adaptation and the common registry. NumPy arrays and supported dataclass/tuple/list structures adapt to leaves. PyTorch and DLPack are optional AdapterPlugin implementations. DLPack preserves producer lifetime and validates supported dtype/device/contiguity. Dimensions are explicit arguments rather than an automatic Array descriptor. JAX can enter through the protocol when supported; no framework-specific JAX execution claim. The opening PyTorch comparison is checked in v14.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/arguments.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/adapters/pytorch/plugin.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/adapters/dlpack/plugin.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "items": [
+        {
+          "title": "Host objects",
+          "body": "NumPy · records\nPyTorch · DLPack"
+        },
+        {
+          "title": "Adapters",
+          "body": "Select + flatten"
+        },
+        {
+          "title": "DSL leaves",
+          "body": "Pointer[T]\nTyped scalars"
+        },
+        {
+          "title": "Compiled call",
+          "body": "Packed arguments"
+        }
+      ],
+      "footnote": "Pointer ABI: contiguous buffers · dimensions passed separately",
+      "display_number": 29
+    },
+    {
+      "id": "v14-export",
+      "title": "Adapters work in both directions",
+      "layout": "flow",
+      "seconds": 30,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "Inbound adapters register host-value conversions; outbound adapters may attach ABI wrappers to the traced module, finalize after lowering, and wrap the callable. These hooks belong to AdapterPlugin, not bare Plugin. TVM-FFI is optional and enabled through the DSL environment. Plugin availability is resolved per instance; absent optional dependencies are recorded. No new TVM-FFI execution claim is made here.",
       "sources": [
         "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/dsl.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/test/plugins_ast_preprocessor.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/adapters/tvm_ffi/plugin.py",
+        "verification/v14/api-audit.txt"
       ],
-      "left": {
-        "label": "AST plugin · downstream sketch",
-        "code": "class MyAST(ASTPreprocessorPlugin):\n    preprocessor_class = DSLPreprocessor\n\n    def executors(self, dsl):\n        return mydialect_executors\n\nclass MyDSL(BaseDSL):\n    plugins = [MyAST(), MyDialect()]"
-      },
       "items": [
         {
-          "title": "AST plugin",
-          "body": "Rewrite + callback map"
+          "title": "Inputs",
+          "body": "Tensor → Pointer"
         },
         {
-          "title": "Dialect plugin",
-          "body": "Types · regions · lowering"
+          "title": "Traced module",
+          "body": "Add ABI wrapper"
+        },
+        {
+          "title": "Lowering",
+          "body": "Finalize the ABI"
+        },
+        {
+          "title": "Outputs",
+          "body": "TVM-FFI callable"
         }
       ],
-      "takeaway": "",
-      "id": "v7-32"
+      "footnote": "AdapterPlugin · register / attach / after_lowering / wrap",
+      "display_number": 30
     },
     {
-      "title": "Or build regions explicitly",
-      "subtitle": "",
-      "section": "Control flow",
-      "seconds": 45,
-      "owner": "Guray Ozen",
-      "phase": "core",
+      "id": "v14-kernels",
+      "title": "8 · @kernel comes from a decorator plugin",
       "layout": "code_notes",
-      "notes": "Explicit for_/if_/while_/yield_ and Boolean helpers now belong to the SCF dialect plugin package and are re-exported by the reference language. They are not unconditional mlir.dsl core exports. preprocess=False bypasses AST capture while retaining selected region builders. The sample demonstrates the builder API; current loop-carry test status is recorded separately. The displayed Python example was executed against the current working tree; see the bundled presentation-examples log.",
+      "seconds": 40,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "The core knows @jit. gpu.Kernels is a DecoratorPlugin that adds @kernel and its deferred launcher, per-trace gpu.module management and host-boundary checks. The three-dot role comment is omitted configuration, not a complete Plugins record. This body assumes a launch covering valid device memory; the next slide uses exactly32 threads on a32-element buffer. GPU tracing can be checked without claiming execution.",
       "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/scf/builders.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/08_explicit_builders.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt",
-        "verification/v8/presentation-examples.txt"
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/decorators/kernels/gpu/__init__.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/decorators/kernels/launch.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/12_gpu_kernels.py",
+        "verification/v14/api-audit.txt"
       ],
       "left": {
-        "label": "Explicit control flow",
-        "code": "@m.jit(preprocess=False)\ndef sum_upto(n: m.Int32):\n    acc = m.Int32(0)\n    for i, current, result in m.for_(\n            0, n, 1, [acc]):\n        m.yield_([current + i])\n    return result"
+        "label": "GPU plugin + kernel · excerpt",
+        "code": "plugins = Plugins(\n    # ... selected roles ...\n    decorators=[gpu.Kernels(\n        chip_option=\"cubin-chip\")],\n)\n\n@m.kernel\ndef add_one(p: m.Pointer[m.Float32]):\n    i = m.thread_idx()[0]\n    p[i] = p[i] + 1.0"
       },
       "items": [
         {
-          "title": "Builders",
-          "body": "for_ · if_ · while_ · yield_"
+          "title": "Core decorator",
+          "body": "@jit"
         },
         {
-          "title": "Boolean helpers",
-          "body": "and_ · or_ · not_\nany_ · all_"
+          "title": "Decorator family",
+          "body": "Adds @kernel + launcher"
         }
       ],
-      "takeaway": "",
-      "id": "v7-33"
+      "display_number": 31
     },
     {
-      "title": "Python → MLIR → 45",
-      "subtitle": "",
-      "section": "Worked examples",
-      "seconds": 60,
+      "id": "v14-launch",
+      "title": "Launch is an explicit operation",
+      "layout": "code_notes",
+      "seconds": 40,
+      "section": "mlir dsl",
       "owner": "Guray Ozen",
       "phase": "core",
-      "layout": "code_pair",
-      "notes": "This is the conceptual end-to-end accumulation example: Python AST analysis, SCF region construction, LLVM lowering, expected sum45. The reference host entry now uses func.func/func.return before lowering. Current native loops, records and DLPack examples executed successfully; separate validation covers the displayed accumulator sample. The recorded diagnostic regression concerns a type-unstable loop, not normal loop carries. The displayed Python example was executed against the current working tree; see the bundled presentation-examples log.",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "Calling the decorated kernel prepares a KernelLauncher; launch emits gpu.launch_func. LaunchConfig normalizes grid/block and dynamic grids are guarded against zero extents. The GPU plugin checks target architecture and host/device buffer kinds. The caller owns device allocation. Reference GPU execution requires a configured target, CUDA runtime and device buffer; this deck treats it as a tracing/source example unless separate GPU evidence is recorded.",
       "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/scf/executors.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/llvm/entry.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt",
-        "verification/v8/presentation-examples.txt"
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/decorators/kernels/launch.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/decorators/kernels/gpu/__init__.py",
+        "verification/v14/api-audit.txt"
       ],
       "left": {
-        "label": "Python · executed",
-        "code": "@m.jit\ndef sum_upto(n: m.Int32):\n    acc = m.Int32(0)\n    for i in range(n):\n        acc += i\n    return acc\n\nsum_upto(10)  # 45"
+        "label": "Python · implementation excerpt",
+        "code": "@m.jit\ndef run(p: m.Pointer[m.Float32]):\n    add_one(p).launch(\n        m.LaunchConfig(\n            grid=[1], block=[32]))\n\n# Caller owns a 32-element CUDA buffer.\nrun(device_tensor)"
+      },
+      "items": [
+        {
+          "title": "Prepare → launch",
+          "body": "gpu.func → gpu.launch_func"
+        },
+        {
+          "title": "Guard + validate",
+          "body": "Grid size · buffer kind"
+        }
+      ],
+      "display_number": 32
+    },
+    {
+      "id": "v14-compilation",
+      "title": "9 · The DSL owns the pass pipeline",
+      "layout": "table",
+      "seconds": 55,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "Every sub-DSL lists its own pass pipeline in order. No plugin publishes pipeline_passes or contributes an implicit pass list. The selected compiler consumes that list, builds its runtime/engine and loads the entry. The shipped compiler uses MLIR pass manager and ExecutionEngine; another target can replace the whole compiler role. Func entry packs/unpacks results independently of the compiler.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/compiler/execution_engine.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/compiler/jit_executor.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/dsl/mlir_dsl.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "headers": [
+        "Owner",
+        "Responsibility"
+      ],
+      "rows": [
+        [
+          "Sub-DSL",
+          "pipeline() · register_dialects(ctx)"
+        ],
+        [
+          "CompilerPlugin",
+          "compile · jit · load"
+        ],
+        [
+          "FuncEntryPlugin",
+          "Entry op · results ABI"
+        ],
+        [
+          "ExecutionEngine compiler",
+          "LLVM lowering + packed ctypes call"
+        ]
+      ],
+      "display_number": 33
+    },
+    {
+      "id": "v14-aot",
+      "title": "Compile now. Call later.",
+      "layout": "code_notes",
+      "seconds": 35,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "The current API is plain m.compile(function,*representative_args), not bracket flags. It compiles a decorated function without running it and returns a callable. Runtime leaves fix the signature; Python values fix specialization and are checked at later calls. This is ahead-of-call compilation, not a generic standalone binary export API.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/dsl/mlir_dsl.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/09_compile_and_cache.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "left": {
+        "label": "Python · implementation excerpt",
+        "code": "@m.jit\ndef affine(x: m.Int32, scale, bias):\n    return x * scale + bias\n\ncompiled = m.compile(affine, 7, 3, 4)\nresult = compiled(7, 3, 4)\nint(result)  # 25"
+      },
+      "items": [
+        {
+          "title": "m.compile",
+          "body": "Specialize + compile"
+        },
+        {
+          "title": "Compiled callable",
+          "body": "Invoke later"
+        }
+      ],
+      "display_number": 34
+    },
+    {
+      "id": "v14-caches",
+      "title": "10 · Cache compilation work",
+      "layout": "table",
+      "seconds": 35,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "In-memory cache keys incorporate the traced module identity and relevant compilation configuration. On-disk cache stores lowered bytecode with CRC32 validation; loading it is a file-cache hit rather than a miss. The current cache example passed memory counters (1 hit,3 misses) and a second-process file hit. Do not describe the file cache as a permanent native-binary artifact or claim every arbitrary compiler version/target mismatch is magically handled.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/util/cache.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/dsl.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/09_compile_and_cache.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "headers": [
+        "Cache",
+        "What is reused"
+      ],
+      "rows": [
+        [
+          "In memory",
+          "Traced-module key → compiled callable"
+        ],
+        [
+          "On disk",
+          "Lowered bytecode + CRC32"
+        ],
+        [
+          "Configuration",
+          "CACHE_DIR · DISABLE_FILE_CACHING"
+        ],
+        [
+          "Observation",
+          "cache_hits · file_cache_hits"
+        ]
+      ],
+      "display_number": 35
+    },
+    {
+      "id": "v14-traceonly",
+      "title": "11 · Generate IR and stop",
+      "layout": "code_notes",
+      "seconds": 35,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "An IR-only DSL still chooses the operations/types and entry needed to build its program. This excerpt omits constructor/imports and uses no native staged control flow; preprocessing must be disabled or supplied by an AST plugin. A missing compiler returns the trace result like DRYRUN, while explicit compile is an error. PRINT_IR displays generated IR. This is a first-class fit for two motivating use cases, not a failed JIT.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/dsl.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/test/core_only.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/env_manager.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "left": {
+        "label": "IR-only DSL · setup excerpt",
+        "code": "class RecipeDSL(BaseDSL):\n    plugins = Plugins(\n        type_ops=TypeOps(scalars=arith),\n        func_entry=func.Entry(),\n        compiler=None,\n    )\n\n# Or use an existing DSL:\n# MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR=1"
+      },
+      "items": [
+        {
+          "title": "Compiler is optional",
+          "body": "Trace result only"
+        },
+        {
+          "title": "Useful for",
+          "body": "Tests · recipe consumers"
+        }
+      ],
+      "display_number": 36
+    },
+    {
+      "id": "v14-diagnostics",
+      "title": "12 · Errors should point to Python",
+      "layout": "code_notes",
+      "seconds": 35,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "User program errors use DSLUserCodeError; runtime/configuration failures use DSLRuntimeError. The renderer formats stable DiagId catalog entries, placeholders, source frames and suggestions. The current diagnostics example passed argument mismatch, early exit, unstable join and closure-capture errors; the old v8 diagnostic mismatch is no longer current. int(x) or x.to(int) on a staged scalar requires a Meta value.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/diagnostics.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/common.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/types/typing.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/10_diagnostics.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "left": {
+        "label": "Python · implementation excerpt",
+        "code": "@m.jit\ndef bad(x: m.Int32):\n    return int(x)\n\n# PHASE_REQUIRES_CONSTANT\n# Runtime value used as Python value"
+      },
+      "items": [
+        {
+          "title": "Stable codes",
+          "body": "Catalogue + suggestions"
+        },
+        {
+          "title": "Useful context",
+          "body": "Source frame + DSL message"
+        }
+      ],
+      "display_number": 37
+    },
+    {
+      "id": "v14-locations",
+      "title": "13 · Locations and remarks",
+      "layout": "table",
+      "seconds": 35,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "core/user_op.py creates traceback-derived locations under DEBUGINFO; core/remarks.py connects collection through the selected compiler remark session. Remarks are structured feedback, not exceptions. The current checkout contains MLIR remark APIs, but this tutorial does not claim they are already in an upstream release. Preserve source coordinates through generated operations for useful errors.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/user_op.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/remarks.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/test/remarks.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "headers": [
+        "Mechanism",
+        "What you see"
+      ],
+      "rows": [
+        [
+          "DEBUGINFO",
+          "Python traceback → MLIR locations"
+        ],
+        [
+          "REMARKS",
+          "Structured trace + compiler feedback"
+        ],
+        [
+          "Source frames",
+          "Diagnostics point back to the function"
+        ],
+        [
+          "Compiler role",
+          "Owns the remark session"
+        ]
+      ],
+      "display_number": 38
+    },
+    {
+      "id": "v14-observe",
+      "title": "14 · See what the compiler does",
+      "layout": "table",
+      "seconds": 30,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "The name passed to BaseDSL chooses the environment prefix. These environment names were checked in the current core/env_manager.py. LOG_LEVEL requires LOG_TO_CONSOLE or LOG_TO_FILE to enable a sink. Configuration, logging and compiler timing are inherited infrastructure, while a downstream DSL can add its own variables. Avoid current package-size or environment-count claims from an older snapshot.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/env_manager.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/util/profiler.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/util/logger.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "headers": [
+        "<PREFIX>_*",
+        "Purpose"
+      ],
+      "rows": [
+        [
+          "PRINT_IR · DRYRUN",
+          "Inspect the traced program"
+        ],
+        [
+          "PROFILE_COMPILER",
+          "Time compilation phases"
+        ],
+        [
+          "JIT_TIME_PROFILING",
+          "Measure JIT work"
+        ],
+        [
+          "LOG_LEVEL",
+          "Control logging"
+        ]
+      ],
+      "display_number": 39
+    },
+    {
+      "id": "v15-plugin-record",
+      "title": "Four roles. Two families.",
+      "layout": "plugin_roles",
+      "seconds": 35,
+      "section": "Sub-DSL authoring",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "Now the audience has seen the features: name the plugin contracts just before the authoring example. At most one plugin fills each role: type_ops, func_entry, ast_preprocessor and compiler. decorators and adapters are families containing any number of plugins. Eight shipped plugins: TypeOps, func.Entry, scf.ASTPreprocessor, execution_engine.Compiler, gpu.Kernels, PyTorchPlugin, DlpackPlugin, TvmFfiPlugin. arith, vector and llvm are operation modules composed by TypeOps, not three more plugins. Plugin itself only supplies available/install/shared_libs/register_dialects lifecycle. The sub-DSL owns pipeline(); plugins do not contribute pass lists.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/type_ops/__init__.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/dsl/mlir_dsl.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "roles": [
+        {
+          "title": "Type operations",
+          "body": "Types + operators",
+          "example": "TypeOps"
+        },
+        {
+          "title": "Function entry",
+          "body": "Entry + results",
+          "example": "func.Entry"
+        },
+        {
+          "title": "AST preprocessor",
+          "body": "Syntax capture",
+          "example": "scf.ASTPreprocessor"
+        },
+        {
+          "title": "Compiler",
+          "body": "Lower + invoke",
+          "example": "ExecutionEngine compiler"
+        }
+      ],
+      "families": [
+        {
+          "title": "Decorators",
+          "body": "Add @kernel",
+          "example": "gpu.Kernels"
+        },
+        {
+          "title": "Adapters",
+          "body": "Inputs + exports",
+          "example": "PyTorch · DLPack · TVM-FFI"
+        }
+      ],
+      "core_label": "Shared core",
+      "core_features": [
+        "Tracing",
+        "Types",
+        "Diagnostics",
+        "Cache"
+      ],
+      "caption": "Eight shipped plugins. Op modules are not plugins.",
+      "display_number": 40
+    },
+    {
+      "id": "v14-author",
+      "title": "15 · One subclass. One Plugins record.",
+      "layout": "code_notes",
+      "seconds": 60,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "This is the current assembly shape, not the obsolete list-valued plugins API. Import BaseDSL and Plugins from mlir.dsl; plugins from their role/family packages. Modules arith/vector/llvm are arguments to TypeOps, not independent plugins. Constructor, namespace exports and pipeline are shown/discussed next. A custom DSL should depend on the core and selected plugins rather than importing the reference language.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/dsl/mlir_dsl.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/11_custom_dsl.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "left": {
+        "label": "Downstream DSL · implementation excerpt",
+        "code": "class MyDSL(BaseDSL):\n    plugins = Plugins(\n        type_ops=TypeOps(\n            scalars=arith, vectors=vector, memory=llvm),\n        func_entry=func.Entry(),\n        ast_preprocessor=scf.ASTPreprocessor(),\n        compiler=execution_engine.Compiler(),\n        decorators=[gpu.Kernels()],\n        adapters=[pytorch.PyTorchPlugin()],\n    )"
+      },
+      "items": [
+        {
+          "title": "Select roles",
+          "body": "One implementation per role"
+        },
+        {
+          "title": "Extend families",
+          "body": "Any number of plugins"
+        }
+      ],
+      "display_number": 41
+    },
+    {
+      "id": "v14-pipeline",
+      "title": "Own the namespace and lowering",
+      "layout": "code_pair",
+      "seconds": 35,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "These are methods on MyDSL from the previous slide. mydsl exports the chosen user types, jit/kernel/compile names and syntax helpers its preprocessor imports. name selects MY_DSL_* configuration. The example pass list is schematic: mydialect and its lowering are downstream definitions, not shipped names; include vector/math/GPU passes if those operations are emitted. The concrete reference pass list is in mlir_dsl.py. No plugin publishes passes.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/dsl/mlir_dsl.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/dsl.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "left": {
+        "label": "Downstream DSL · methods",
+        "code": "def __init__(self):\n    super().__init__(\n        name=\"MY_DSL\",\n        dsl_package_name=[\"mydsl\"],\n        preprocess=True)\n\ndef register_dialects(self, ctx):\n    mydialect.register_dialect(ctx)"
       },
       "right": {
-        "label": "MLIR · loop excerpt",
-        "code": "%sum = scf.for %i = %c0 to %n\n    step %c1 iter_args(%a = %zero)\n    -> (i32) : i32 {\n  %next = arith.addi %a, %i : i32\n  scf.yield %next : i32\n}\nfunc.return %sum : i32"
+        "label": "Downstream DSL · pipeline excerpt",
+        "code": "def pipeline(self):\n    return [\n        \"convert-mydialect-to-llvm\",\n        \"convert-scf-to-cf\",\n        \"convert-cf-to-llvm\",\n        \"convert-arith-to-llvm\",\n        \"convert-func-to-llvm\",\n        \"reconcile-unrealized-casts\",\n    ]"
       },
-      "takeaway": "",
-      "id": "v7-34"
+      "display_number": 42
     },
     {
-      "title": "Fuse a Python recipe",
+      "id": "v14-reuse",
+      "title": "Reuse a composition; change one field",
+      "layout": "code_notes",
+      "seconds": 35,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "This exact variant pattern is in example11. replace creates a new frozen Plugins record; role implementations are retained while decorators and adapters are dropped. Each DSL instance shallow-copies and installs its available plugins. Inheriting a decorator attribute from a base class does not make its missing plugin available; invoking it reports CALL_PLUGIN_REQUIRED. A separately authored language can instead construct BaseDSL and its record from scratch.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/11_custom_dsl.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "left": {
+        "label": "Python · implementation excerpt",
+        "code": "from dataclasses import replace\n\nclass CpuOnly(m.MlirTestDSL):\n    plugins = replace(\n        m.MlirTestDSL.plugins,\n        decorators=(),\n        adapters=(),\n    )"
+      },
+      "items": [
+        {
+          "title": "Keep the roles",
+          "body": "Types · entry · AST · compiler"
+        },
+        {
+          "title": "Change the families",
+          "body": "Drop GPU + optional adapters"
+        }
+      ],
+      "display_number": 43
+    },
+    {
+      "id": "v14-lifecycle",
+      "title": "Every plugin has a small shared lifecycle",
+      "layout": "table",
+      "seconds": 35,
+      "section": "mlir dsl",
+      "owner": "Guray Ozen",
+      "phase": "core",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "Only these hooks are on bare Plugin. A role or family adds its own contract. Unavailable plugins are dropped and listed in unavailable_plugins; available ones are copied/installed in record order: roles, decorators, adapters. Each dispatch loop calls its own role/family. Compiler, decorator and adapter hooks must not be described as a single universal plugin interface.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "headers": [
+        "Shared hook",
+        "Meaning"
+      ],
+      "rows": [
+        [
+          "available()",
+          "Probe optional support"
+        ],
+        [
+          "install(dsl)",
+          "Bind this instance"
+        ],
+        [
+          "register_dialects(ctx)",
+          "Register owned dialects"
+        ],
+        [
+          "shared_libs()",
+          "Provide runtime libraries"
+        ]
+      ],
+      "display_number": 44
+    },
+    {
+      "title": "One program: Python recipe + staged loop",
       "subtitle": "",
       "section": "Worked examples",
-      "seconds": 45,
+      "seconds": 65,
       "owner": "Guray Ozen",
       "phase": "core",
       "layout": "code_pair",
-      "notes": "The array loop is staged; the recipe dictionary and method dispatch are Meta. Pointer load/store/arithmetic delegate to the active emitter. ops has no marker annotation. The expected result for [0,1,2,3] with AddN(2), MulN(3) is [6,9,12,15]. The current execution produced [6, 9, 12, 15]. The displayed Python example was executed against the current working tree; see the bundled presentation-examples log.",
+      "notes": "The array loop is staged and the ordinary recipe dictionary dispatches at trace time. Pointer load/store operations use the selected type_ops memory module; arithmetic uses its scalar module. The current v14 metaprogram check produced [6,9,12,15] for [0,1,2,3] with AddN(2), MulN(3). The displayed IR is a loop-body excerpt. This ties together values, metaprogramming, memory, control flow and execution.",
       "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/mlir_op.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/runtime/jit_arg_adapters.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/dialects/llvm/emitter.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt",
-        "verification/v8/presentation-examples.txt"
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/staging.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/type_ops/llvm.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/type_ops/arith.py",
+        "verification/v14/api-audit.txt",
+        "verification/v14/metaprogram-examples.txt"
       ],
       "left": {
         "label": "Python · executed",
@@ -1512,216 +1661,221 @@
         "code": "%p = llvm.getelementptr %arr[%i]\n    : (!llvm.ptr, i32) -> !llvm.ptr, f32\n%x = llvm.load %p : !llvm.ptr -> f32\n%a = arith.addf %x, %two : f32\n%r = arith.mulf %a, %three : f32\nllvm.store %r, %p : f32, !llvm.ptr\nscf.yield"
       },
       "takeaway": "Staged array loop · Meta recipe loop",
-      "id": "v7-35"
+      "id": "v14-worked",
+      "display_number": 45
     },
     {
-      "title": "Richer mutation",
-      "subtitle": "Objects · aliasing · staged control flow",
-      "section": "Mutation handoff",
+      "id": "v14-handoff",
+      "title": "From loop carries to richer mutation",
+      "layout": "handoff",
       "seconds": 15,
+      "section": "Mutation",
       "owner": "Guray Ozen",
       "phase": "core",
-      "layout": "handoff",
-      "notes": "Handoff to Amir: frozen records and explicit carries solve a bounded value model; richer mutation and aliasing motivate his PyIR section. Do not author his implementation. The AST plugin interface provides the architectural place to integrate his capture strategy.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
-      ],
-      "kicker": "NEXT · AMIR TAVAKKOLI",
-      "takeaway": "Amir develops an advanced mutation tracking system.",
-      "id": "v7-36"
-    },
-    {
-      "title": "Advanced mutation tracking",
-      "subtitle": "PyIR · Amir Tavakkoli",
-      "section": "Amir Tavakkoli",
-      "seconds": 600,
-      "owner": "Amir Tavakkoli",
-      "phase": "mutation",
-      "layout": "placeholder",
-      "notes": "Placeholder for Amir’s own10-minute section. No technical PyIR implementation was authored here. Return to Guray for the five-slide target walkthrough.",
+      "subtitle": "Aliasing · mutable state · PyIR",
+      "takeaway": "",
+      "notes": "Hand off to Amir. This deck only reserves his ten-minute slot; it does not author or claim completion of his PyIR mutation-tracking implementation.",
       "sources": [
         "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
+        "verification/v14/api-audit.txt"
       ],
       "kicker": "AMIR TAVAKKOLI",
-      "id": "v7-37"
+      "footer": "Amir’s section",
+      "display_number": 46
     },
     {
-      "section": "Tile IR sub-DSL",
-      "phase": "showcase",
-      "owner": "Guray Ozen",
-      "seconds": 60,
-      "title": "Tile IR: compose a target",
-      "subtitle": "",
+      "id": "v14-amir",
+      "title": "Advanced mutation tracking",
+      "layout": "placeholder",
+      "seconds": 600,
+      "section": "Mutation",
+      "owner": "Amir Tavakkoli",
+      "phase": "mutation",
+      "subtitle": "Amir supplies this section.",
+      "takeaway": "",
+      "notes": "Placeholder for Amir’s independently supplied material. Ten minutes reserved. No PyIR implementation or technical slides authored here.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
+        "verification/v14/api-audit.txt"
+      ],
+      "kicker": "AMIR TAVAKKOLI",
+      "footer": "Return to Guray for a target example.",
+      "display_number": 47
+    },
+    {
+      "id": "v14-tile-record",
+      "title": "Tile IR: choose target implementations",
       "layout": "code_notes",
+      "seconds": 60,
+      "section": "Tile IR",
+      "owner": "Guray Ozen",
+      "phase": "showcase",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "Proposed mapping of a downstream Tile backend to the current role/family architecture. The tile.* classes are illustrative interfaces, not shipped or executed implementations. The existing DkgDSL backend motivates the mapping but has not been ported here. Reuse the core and compatible existing adapters; replace the target-specific roles and decorator plugin. All five closing slides are a five-minute design sketch.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
+        "verification/v14/api-audit.txt"
+      ],
       "left": {
-        "label": "Port to the new core · design sketch",
-        "code": "class TileDSL(BaseDSL):\n    plugins = [\n        TileDialect(),\n        TileAST(),\n    ]\n\n# Package exports:\njit = TileDSL.jit\nkernel = TileDSL.kernel"
+        "label": "Downstream port sketch · proposed API",
+        "code": "class TileDSL(BaseDSL):\n    plugins = Plugins(\n        type_ops=tile.TypeOps(),\n        func_entry=tile.Entry(),\n        ast_preprocessor=tile.ASTPreprocessor(),\n        compiler=tile.Compiler(),\n        decorators=[tile.Kernels()],\n        adapters=[dlpack.DlpackPlugin()],\n    )"
       },
       "items": [
         {
-          "title": "Reuse",
-          "body": "Types · staging · cache · env"
+          "title": "Replace target roles",
+          "body": "Types · entry · capture · compiler"
         },
         {
-          "title": "Supply",
-          "body": "Emitter · AST · compiler"
+          "title": "Reuse infrastructure",
+          "body": "Cache · diagnostics · adapters"
         }
       ],
-      "takeaway": "",
-      "notes": "This is a port design using the current plugin architecture, not an already implemented TileDialect plugin in this checkout. DkgDSL has an existing CUDA Tile backend; factor its dialect-specific emitter, AST callbacks, compiler and launch helpers into these new seams. TileDSL requires the normal BaseDSL constructor and a namespace exporting required helpers, omitted in this sketch. It need not import the reference mlir.mlir_dsl package. Existing DKG backend remains a source design reference.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
-      ],
-      "id": "v7-38"
+      "display_number": 48
     },
     {
-      "section": "Tile IR sub-DSL",
-      "phase": "showcase",
-      "owner": "Guray Ozen",
-      "seconds": 60,
-      "title": "Tile IR: one emitter for its values",
-      "subtitle": "",
+      "id": "v14-tile-types",
+      "title": "Tile IR: one type-ops role",
       "layout": "table",
-      "takeaway": "Direct types stay the same; the emitted IR changes.",
-      "notes": "Design mapping from README and the OpEmitter protocol. A Tile dialect supplies rank-zero scalar and pointer types, rank-one vector types and corresponding operations. Structs flatten independently of dialect. This table names port responsibilities, not implemented/validated Tile hooks. Replacing the emitter suppresses SCF+LLVM defaults, so include all required type operations, entry helpers, lowering and compiler in the target assembly.",
+      "seconds": 60,
+      "section": "Tile IR",
+      "owner": "Guray Ozen",
+      "phase": "showcase",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "The type_ops contract covers scalar, vector and pointer types/operations. A real Tile implementation must provide the relevant hooks and preserve dtype policy. The checked rank-zero tensor example demonstrates replacement of physical representation but is not CUDA Tile IR and has no real Tile lowering. This slide is a proposed downstream mapping, not an executed port.",
       "sources": [
         "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
         "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/mlir_op.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/14_type_ops_plugin.py",
+        "verification/v14/api-audit.txt"
       ],
-      "id": "v7-39",
       "headers": [
-        "Core value",
-        "Tile representation",
-        "Emitter hooks"
+        "Python value",
+        "Proposed Tile representation"
       ],
       "rows": [
         [
-          "Int32",
-          "Rank-0 tile",
-          "mlir_type · add · cast"
+          "Int32 / Float32",
+          "Rank-0 tile"
         ],
         [
           "Vector",
-          "Rank-1 tile",
-          "vector_type · reduce"
+          "Rank-1 tile"
         ],
         [
-          "Pointer",
-          "Tile of pointers",
-          "pointer_type · load · store"
+          "Pointer[T]",
+          "Tile of pointers"
         ],
         [
-          "Struct",
-          "Flattened fields",
-          "No aggregate hook"
+          "+ · load · store",
+          "Target arithmetic + memory ops"
         ]
-      ]
+      ],
+      "display_number": 49
     },
     {
-      "section": "Tile IR sub-DSL",
-      "phase": "showcase",
-      "owner": "Guray Ozen",
+      "id": "v14-tile-capture",
+      "title": "Tile IR: choose its control-flow model",
+      "layout": "code_notes",
       "seconds": 60,
-      "title": "Tile IR: a typed Python kernel",
+      "section": "Tile IR",
+      "owner": "Guray Ozen",
+      "phase": "showcase",
       "subtitle": "",
-      "layout": "code_pair",
+      "takeaway": "",
+      "notes": "The Tile preprocessor and region callbacks are proposed downstream definitions. CUDA Tile loop can use its own early-exit constructs; the current shipped SCF preprocessor rejects data-dependent early exits, and simply swapping one callback is not a promise of complete support. Different target semantics may need a different rewrite. No legacy annotation wrappers are used.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/ast_preprocessor/preprocessor.py",
+        "verification/v14/api-audit.txt",
+        "verification/v9/control-flow-evidence.txt"
+      ],
       "left": {
-        "label": "mlir dsl interface · target sketch",
-        "code": "import mytile as tile\n\n@tile.kernel\ndef sum_upto(n: tile.Int32):\n    acc = tile.constant(0)\n    for i in range(n):\n        acc += i\n    tile.print_tko(\"sum=%i\\n\", [acc])"
+        "label": "Downstream port sketch · proposed API",
+        "code": "class TileAST(ASTPreprocessorPlugin):\n    preprocessor_class = TilePreprocessor\n\n    def executors(self, dsl):\n        return tile_region_builders(dsl)\n\n# In the Plugins record:\nast_preprocessor=TileAST()"
+      },
+      "items": [
+        {
+          "title": "Reuse capture where it fits",
+          "body": "Python syntax → target regions"
+        },
+        {
+          "title": "Own target semantics",
+          "body": "Early exits · carried values"
+        }
+      ],
+      "display_number": 50
+    },
+    {
+      "id": "v14-tile-kernel",
+      "title": "Tile IR: keep a small user surface",
+      "layout": "code_pair",
+      "seconds": 60,
+      "section": "Tile IR",
+      "owner": "Guray Ozen",
+      "phase": "showcase",
+      "subtitle": "",
+      "takeaway": "",
+      "notes": "Illustrative target namespace and directly typed Tensor annotations, not a current executable tile API. A downstream module emits the target operations, the type-ops role routes operators, and the decorator plugin/launcher supplies the target entry and launch model. Direct typed annotations are used. The kernel body is an API sketch; real indices, shapes and memory operations are target-defined.",
+      "sources": [
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/decorators/kernels/launch.py",
+        "verification/v14/api-audit.txt"
+      ],
+      "left": {
+        "label": "Downstream port sketch · user API",
+        "code": "@tile.kernel\ndef add(a: tile.Tensor,\n        b: tile.Tensor,\n        out: tile.Tensor):\n    x = tile.load(a)\n    y = tile.load(b)\n    tile.store(out, x + y)"
       },
       "right": {
-        "label": "Tile IR · loop body",
-        "code": "%sum = for %i in (%zero to %n,\n    step %one) : tile<i32>\n    iter_values(%acc = %zero)\n    -> (tile<i32>) {\n  %next = addi %acc, %i : tile<i32>\n  continue %next : tile<i32>\n}"
+        "label": "Proposed plugin ownership",
+        "code": "tile.TypeOps\n  types + operations\n\ntile.Kernels\n  entry + launch\n\ntile.Compiler\n  binary + runtime"
       },
-      "takeaway": "",
-      "notes": "mytile is the proposed downstream package namespace, not an installed package in this checkout. Direct Int32 annotation stages the runtime scalar. TileAST captures the native loop and emits the target for/continue regions via custom executors. The code and IR are a port sketch; no new runtime/constant marker wrappers are introduced. The Tile custom syntax is the earlier source-reviewed DKG form, not freshly parsed or GPU-executed here. Expected sum45.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt",
-        "/home/gozen/work/dkg4/DkgDSL/cuda_tile_dsl/"
-      ],
-      "id": "v7-40"
+      "display_number": 51
     },
     {
-      "section": "Tile IR sub-DSL",
-      "phase": "showcase",
-      "owner": "Guray Ozen",
+      "id": "v14-tile-launch",
+      "title": "Tile IR: the target owns launch",
+      "layout": "flow",
       "seconds": 60,
-      "title": "Tile IR: entries + compiler are plugins",
+      "section": "Tile IR",
+      "owner": "Guray Ozen",
+      "phase": "showcase",
       "subtitle": "",
-      "layout": "code_notes",
-      "left": {
-        "label": "Dialect plugin · port sketch",
-        "code": "class TileDialect(DialectPlugin):\n    emitter = TileEmitter()\n    host_gen_helper = TileHostEntry\n    kernel_gen_helper = TileKernelEntry\n    compiler_provider = tile_compiler\n\n    def pipeline_passes(self):\n        return tile_lowering_passes"
-      },
-      "items": [
-        {
-          "title": "Entry helpers",
-          "body": "Arguments · return · launch"
-        },
-        {
-          "title": "Compiler",
-          "body": "Tile bytecode → GPU binary"
-        }
-      ],
       "takeaway": "",
-      "notes": "Each named provider is a target implementation to supply. The core chooses the first applicable host/kernel/compiler provider; the emitter selects value representation. No LLVM host entry or LLVM pass list is implicitly carried over after emitter replacement. Existing DKG routes serialize Tile bytecode and invoke tileiras or CUDA driver JIT; those implementations are the port source, not part of the generic core. A backend must implement the Compiler contract expected by core.",
+      "notes": "The desired downstream path can launch a decorated kernel directly from Python using a target launcher. The kernel decorator plugin owns that behavior; the compiler role can return a target artifact rather than ExecutionEngine. CUDA Python is a proposed launch mechanism, not implemented or GPU-tested by this deck. This differs from the shipped GPU plugin whose kernel calls are launched from @jit through gpu.launch_func. Close by returning to the four use cases: same core, selected roles, own pipeline.",
       "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/dsl.py",
         "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt"
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
+        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/decorators/kernels/launch.py",
+        "verification/v14/api-audit.txt"
       ],
-      "id": "v7-41"
-    },
-    {
-      "section": "Tile IR sub-DSL",
-      "phase": "showcase",
-      "owner": "Guray Ozen",
-      "seconds": 60,
-      "title": "Tile IR: target-owned launch",
-      "subtitle": "",
-      "layout": "code_notes",
-      "left": {
-        "label": "CUDA Python launch · backend excerpt",
-        "code": "module = cuda_helpers.load_cubin_module(cubin)\nkernel = cuda_helpers.get_kernel_function(\n    module, name)\ncuda_helpers.launch_kernel(\n    kernel, num_tiles, (1, 1, 1), stream,\n    smem_size=0, kernel_args=packed_args)"
-      },
       "items": [
         {
-          "title": "Desired Python call",
-          "body": "sum_upto(10,\n    num_tiles=[1, 1, 1])"
+          "title": "Python call",
+          "body": "@tile.kernel"
         },
         {
-          "title": "Target provider",
-          "body": "Compile · pack · launch"
+          "title": "Compiler role",
+          "body": "Target pipeline\nTarget binary"
+        },
+        {
+          "title": "Decorator plugin",
+          "body": "CUDA Python\nlaunch wrapper"
+        },
+        {
+          "title": "Device",
+          "body": "Caller-owned memory"
         }
       ],
-      "takeaway": "Choose plugins. Reuse the language core.",
-      "notes": "The launch helper excerpt comes from the existing DKG target; direct Python-to-kernel behavior must be carried over into the new target provider. The desired public call is a port goal, not a claim current generic GPU plugin supports this direct path. Caller owns memory; CUDA driver helpers load the binary and launch. No GPU execution was performed for this revision. Existing target cache bypass and dynamic-if/while gaps are not silently solved by the new core: target integration must handle them.",
-      "sources": [
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/README.md",
-        "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
-        "verification/v8/core-architecture.txt",
-        "verification/v8/runtime-types.txt",
-        "/home/gozen/work/dkg4/DkgDSL/cuda_tile_dsl/"
-      ],
-      "id": "v7-42"
+      "footnote": "Port sketch · reusable core, target-owned execution",
+      "display_number": 52
     }
   ],
   "purpose": "Extract the reusable DkgDSL infrastructure into mlir dsl and explain what, why, and how.",
   "design_source": "/home/gozen/work/dkg4/DkgDSL",
-  "feature_baseline": "Maintainer-provided extraction status, 2026-10-05; source-checked against both trees.",
-  "implementation_root": "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl"
+  "feature_baseline": "Current four-role/two-family Plugins architecture, source-checked October 7, 2026.",
+  "implementation_root": "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl",
+  "numbering": "Unnumbered title; content slides start at 1. PDF page = slide number + 1."
 }

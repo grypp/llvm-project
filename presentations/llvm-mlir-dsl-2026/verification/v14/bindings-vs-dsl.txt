@@ -1,0 +1,182 @@
+Bindings versus mlir dsl — executable slide reference (v14)
+
+Command:
+env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core MLIR_DSL_DISABLE_FILE_CACHING=1 /usr/bin/python3.12 bindings-vs-dsl.py
+
+The installed MLIR package resolves to current mlir/tools/mlir-dsl source.
+No compiler build or package installation was needed. Both paths execute on
+CPU float32 contiguous PyTorch buffers; all tests use independent output
+buffers and compare exactly against PyTorch's a+b. Dynamic lengths 0, 1, 4,
+17 pass. No GPU execution or performance claim is made. Raw inputs remain
+alive until the synchronous engine call returns. The showcase DSL explicitly
+selects the PyTorch adapter and the ExecutionEngine compiler. BaseDSL alone
+is not an end-to-end tensor execution system.
+
+Slide input setup shared by both boxes (omit from box, or show in notes):
+    import torch
+    a = torch.arange(4, dtype=torch.float32)
+    b = torch.full_like(a, 10.0)
+    out = torch.empty_like(a)
+
+Left box label: Raw Python bindings · construction + JIT (excerpt)
+Imports, RAW_PIPELINE, validation, and shared inputs are omitted from display;
+all are present in bindings-vs-dsl.py. This is not the complete setup cost.
+The left display has 24 lines; the right has 11. The 24-line raw excerpt is
+exact construction/compilation/invocation code, dedented, with only IR capture
+and assertions omitted. The right wraps the same signature across two lines.
+
+LEFT EXCERPT:
+with ir.Context(), ir.Location.unknown():
+    module = ir.Module.create()
+    f32, i32 = ir.F32Type.get(), ir.IntegerType.get_signless(32)
+    ptr = llvm.PointerType.get()
+    with ir.InsertionPoint(module.body):
+        fn = func.FuncOp("add", ([i32, ptr, ptr, ptr], []))
+        fn.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
+        with ir.InsertionPoint(fn.add_entry_block()):
+            n, x, y, z = fn.arguments
+            lo, step = arith.ConstantOp(i32, 0), arith.ConstantOp(i32, 1)
+            loop = scf.ForOp(lo, n, step)
+            with ir.InsertionPoint(loop.body):
+                i = loop.induction_variable
+                addr = [llvm.GEPOp(ptr, p, [i], [-2147483648], f32, "None").result
+                        for p in (x, y, z)]
+                lhs, rhs = [llvm.LoadOp(f32, p).result for p in addr[:2]]
+                llvm.StoreOp(arith.AddFOp(lhs, rhs).result, addr[2])
+                scf.YieldOp([])
+            func.ReturnOp([])
+    PassManager.parse(RAW_PIPELINE).run(module.operation)
+    engine = ExecutionEngine(module)
+    args = [ctypes.c_int32(a.numel())]
+    args += [ctypes.c_void_p(t.data_ptr()) for t in (a, b, out)]
+    engine.invoke("add", *[ctypes.byref(arg) for arg in args])
+
+RIGHT EXCERPT:
+import mlir.mlir_dsl as m
+F32Ptr = m.Pointer[m.Float32]
+
+@m.jit
+def add(n: m.Int32, a: F32Ptr,
+        b: F32Ptr, out: F32Ptr):
+    for i in range(n):
+        out[i] = a[i] + b[i]
+
+add(a.numel(), a, b, out)
+# out: tensor([10., 11., 12., 13.])
+
+EXECUTION OUTPUT (exit 0):
+{
+  "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+  "torch": "2.9.0.dev20250714+cu129",
+  "device": "cpu",
+  "source_identity": {
+    "mlir.mlir_dsl.mlir_dsl": {
+      "file": "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/dsl/mlir_dsl.py",
+      "sha256": "94a13306f428725de8be443a7de751fa854a2a9dc19f108937bf9a2fa85dee31"
+    },
+    "mlir.dsl.core.dsl": {
+      "file": "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/dsl.py",
+      "sha256": "71c331016e0e712c2a6caf258ad15f4e0dadaefa70a25f5161a1afa207817279"
+    },
+    "mlir.dsl.core.plugin": {
+      "file": "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py",
+      "sha256": "82abf2e53cb1ced07e7feb5cb36182afb82a635b222426af13c95c111787bdaf"
+    },
+    "mlir.dsl.plugins.adapters.pytorch.plugin": {
+      "file": "/home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/adapters/pytorch/plugin.py",
+      "sha256": "fb9949c7fe0113cbe9f8bd93bb4d7b349512ed56a1d75f75915e1925d6e99a22"
+    }
+  },
+  "results": [
+    {
+      "n": 0,
+      "raw": [],
+      "dsl": []
+    },
+    {
+      "n": 1,
+      "raw": [
+        10.0
+      ],
+      "dsl": [
+        10.0
+      ]
+    },
+    {
+      "n": 4,
+      "raw": [
+        10.0,
+        11.0,
+        12.0,
+        13.0
+      ],
+      "dsl": [
+        10.0,
+        11.0,
+        12.0,
+        13.0
+      ]
+    },
+    {
+      "n": 17,
+      "raw": [
+        10.0,
+        11.0,
+        12.0,
+        13.0,
+        14.0,
+        15.0,
+        16.0,
+        17.0,
+        18.0,
+        19.0,
+        20.0,
+        21.0,
+        22.0,
+        23.0,
+        24.0,
+        25.0,
+        26.0
+      ],
+      "dsl": [
+        10.0,
+        11.0,
+        12.0,
+        13.0,
+        14.0,
+        15.0,
+        16.0,
+        17.0,
+        18.0,
+        19.0,
+        20.0,
+        21.0,
+        22.0,
+        23.0,
+        24.0,
+        25.0,
+        26.0
+      ]
+    }
+  ],
+  "status": "PASS: raw Python bindings and mlir dsl agree with PyTorch"
+}
+
+Raw bindings captured IR:
+module {
+  func.func @add(%arg0: i32, %arg1: !llvm.ptr, %arg2: !llvm.ptr, %arg3: !llvm.ptr) attributes {llvm.emit_c_interface} {
+    %c0_i32 = arith.constant 0 : i32
+    %c1_i32 = arith.constant 1 : i32
+    scf.for %arg4 = %c0_i32 to %arg0 step %c1_i32  : i32 {
+      %0 = llvm.getelementptr %arg1[%arg4] : (!llvm.ptr, i32) -> !llvm.ptr, f32
+      %1 = llvm.getelementptr %arg2[%arg4] : (!llvm.ptr, i32) -> !llvm.ptr, f32
+      %2 = llvm.getelementptr %arg3[%arg4] : (!llvm.ptr, i32) -> !llvm.ptr, f32
+      %3 = llvm.load %0 : !llvm.ptr -> f32
+      %4 = llvm.load %1 : !llvm.ptr -> f32
+      %5 = arith.addf %3, %4 : f32
+      llvm.store %5, %2 : f32, !llvm.ptr
+    }
+    return
+  }
+}
+

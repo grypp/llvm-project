@@ -1,0 +1,27 @@
+Metaprogram examples — current-source verification (v14)
+
+Command:
+env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core MLIR_DSL_DISABLE_FILE_CACHING=1 /usr/bin/python3.12 metaprogram-examples.py
+
+Scope: only scale, the polymorphic dictionary pipeline, and the fused pointer
+loop shown in the presentation. The earlier v8 diagnostic example was not run.
+Python configuration objects are trace-time values; staged numeric operations
+emit IR. The outer m.range loop in fused stages, while ops.values() and Python
+method dispatch run during tracing. The compiled function reads and writes the
+caller-owned contiguous NumPy float32 buffer. Scalar assertions normalize the
+actual result's .value only if a scalar wrapper is returned; integer results
+are accepted directly. No implementation changes, GPU run, or installation.
+
+Exit code: 0
+
+Python: 3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]
+NumPy: 2.1.2
+DSL: MlirTestDSL
+SOURCE: mlir.mlir_dsl.mlir_dsl /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/dsl/mlir_dsl.py 94a13306f428725de8be443a7de751fa854a2a9dc19f108937bf9a2fa85dee31
+SOURCE: mlir.dsl.core.dsl /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/dsl.py 71c331016e0e712c2a6caf258ad15f4e0dadaefa70a25f5161a1afa207817279
+SOURCE: mlir.dsl.core.plugin /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/core/plugin.py 82abf2e53cb1ced07e7feb5cb36182afb82a635b222426af13c95c111787bdaf
+SOURCE: mlir.dsl.plugins.ast_preprocessor.scf /home/gozen/work/llvm-project/mlir/tools/mlir-dsl/dsl/plugins/ast_preprocessor/scf/__init__.py abfcfea14c629c475383ec075da8477a775de87de347167fa6a49b137306394d
+PASS scale(4, 3) = 12; host result type: Int32
+PASS pipeline(4, ops) = 18; host result type: Int32
+PASS fused(data, ops): [6.0, 9.0, 12.0, 15.0]; returns None
+PASS: all three current-source metaprogram examples

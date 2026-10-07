@@ -29,7 +29,7 @@ from tutorial_layouts import render_custom
 
 
 HERE = Path(__file__).resolve().parent
-NAME = "llvm-mlir-dsl-tutorial-v13"
+NAME = "llvm-mlir-dsl-tutorial-v16"
 DEFAULT_TEMPLATE = HERE / "assets" / "template.pptx"
 FONT_DIR = HERE / "assets" / "fonts"
 MONO_DIR = FONT_DIR
@@ -219,12 +219,15 @@ class Deck:
             self.text(s, data["title"], .48, .43, 9.04, .51, 21, minimum=19, do_wrap=False)
             if data.get("subtitle"):
                 self.text(s, data["subtitle"], .50, 1.00, 9.02, .51, 11.8, C["focus"], minimum=11)
-        self.text(s, f"{self.i:02}", 8.8, 5.14, .7, .22, 8.5, C["gray"], align="right")
+        number = data.get("display_number", self.i)
+        if number:
+            self.text(s, str(number).zfill(2), 8.8, 5.14, .7, .22, 8.5, C["gray"], align="right")
         if not special:
             self.text(s, data.get("section", ""), 5.5, 5.16, 3.1, .20, 8, C["gray"], align="right")
         if data.get("takeaway") and not special and data["layout"] not in {"principles", "compiler_pipelines", "design_simple"}:
             self.text(s, data["takeaway"], .50, 4.72, 9.00, .34, 11.5, C["gray"], minimum=10.5)
-        note = (f"SLIDE {self.i:02} — {data['title']}\n"
+        label = str(number).zfill(2) if number else "TITLE"
+        note = (f"SLIDE {label} — {data['title']}\nPDF page: {self.i}\n"
                 f"Owner: {data['owner']}\n"
                 f"Clock: {clock(start)}–{clock(start + data['seconds'])}\n"
                 f"Target duration: {clock(data['seconds'])}\n\n"
@@ -410,11 +413,12 @@ def write_outline(data, notes):
     entries = []
     with (HERE / "slide-skeleton.csv").open("w", newline="") as f:
         writer = csv.writer(f, lineterminator="\n")
-        writer.writerow(["slide", "start", "end", "duration", "speaker", "section", "title", "teaching_point"])
+        writer.writerow(["slide", "pdf_page", "start", "end", "duration", "speaker", "section", "title", "teaching_point"])
         for i, d in enumerate(data["slides"], 1):
             end = start + d["seconds"]
-            writer.writerow([i, clock(start), clock(end), clock(d["seconds"]), d["owner"], d["section"], d["title"], d.get("takeaway", "")])
-            entries.append(f'<tr><td>{i:02}</td><td>{clock(start)}–{clock(end)}</td><td>{html.escape(d["owner"])}</td><td><b>{html.escape(d["title"])}</b><br><span>{html.escape(d.get("takeaway", ""))}</span><details><summary>Speaker notes and sources</summary><pre>{html.escape(notes[i-1])}</pre></details></td></tr>')
+            label = d.get("display_number", i) or "Title"
+            writer.writerow([label, i, clock(start), clock(end), clock(d["seconds"]), d["owner"], d["section"], d["title"], d.get("takeaway", "")])
+            entries.append(f'<tr><td>{label}<br><span>PDF {i}</span></td><td>{clock(start)}–{clock(end)}</td><td>{html.escape(d["owner"])}</td><td><b>{html.escape(d["title"])}</b><br><span>{html.escape(d.get("takeaway", ""))}</span><details><summary>Speaker notes and sources</summary><pre>{html.escape(notes[i-1])}</pre></details></td></tr>')
             start = end
     total_seconds = sum(slide["seconds"] for slide in data["slides"])
     phase_summary = "; ".join(f"{phase}: {clock(seconds)}"
@@ -424,7 +428,7 @@ def write_outline(data, notes):
 <style>body{font:16px/1.5 system-ui,sans-serif;max-width:1120px;margin:48px auto;padding:0 24px;color:#202020}h1{font-weight:400;font-size:36px}a{color:#416600}table{border-collapse:collapse;width:100%;font-size:14px}th{background:#e4f0d0;text-align:left}th,td{padding:14px;border-bottom:1px solid #ddd;vertical-align:top}td:nth-child(2){white-space:nowrap}span{color:#616161}summary{cursor:pointer;color:#416600;margin-top:8px}pre{white-space:pre-wrap;font:14px/1.5 system-ui}p{max-width:950px}</style>
 '''
     page += f'<h1>{title}</h1>\n'
-    page += (f'<p>Draft v13 · Guray Ozen and Amir Tavakkoli · '
+    page += (f'<p>Draft v16 · Guray Ozen and Amir Tavakkoli · '
              f'LLVM/MLIR developers new to Python DSLs · {total_seconds / 60:g} minutes total. '
              f'Preparation timing: {html.escape(phase_summary)}. '
              'The mutation placeholder is reserved for Amir’s slides; Guray returns for the sub-DSL showcase.</p>\n')
@@ -432,7 +436,7 @@ def write_outline(data, notes):
              f'<a href="{NAME}.pdf">PDF preview</a> · '
              '<a href="overview.png">All slides</a> · '
              '<a href="slide-skeleton.csv">Timing CSV</a> · '
-             '<a href="verification/README.txt">Example checks</a></p>\n')
+             '<a href="verification/v15/scalar-bindings.txt">Scalar bindings check</a></p>\n')
     page += ('<p>Examples follow mlir dsl in this checkout. Speaker notes identify '
              'source-checked code, executed examples, and proposed target adapters. '
              'PyIR content is reserved for Amir.</p>\n'
@@ -464,7 +468,7 @@ def main():
     deck.prs.core_properties.subject = f"LLVM conference tutorial · mlir dsl · {phase_summary}"
     deck.prs.core_properties.author = "Guray Ozen; Amir Tavakkoli"
     deck.prs.core_properties.keywords = "MLIR, Python, DSL, tutorial, draft"
-    deck.prs.core_properties.comments = "Draft v13. Uses the supplied cutlass-python-pytorch-v22 template and style."
+    deck.prs.core_properties.comments = "Draft v16. Uses the supplied cutlass-python-pytorch-v22 template and style."
     deck.prs.save(HERE / f"{NAME}.pptx")
     for shape in deck.audit:
         assert shape["x"] >= 0 and shape["y"] >= 0

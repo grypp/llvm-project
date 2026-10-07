@@ -1,26 +1,26 @@
-V13 ARTIFACT CHECKS — 2026-10-06
-47 slides in PowerPoint/PDF. Timing remains core30min + Amir10min + target5min.
-Opening order remains use cases → design/staging → MLIR diversity/plugins.
-Slide10 shows four feature boxes inside the Core DSL: diagnostics,
-AST preprocessing hooks, JIT cache and type inference.
-Slide11 shows three plugin families and existing plugin choices, then two
-DSL assemblies containing selected plugins above identical Core DSL bases.
-The working mlir dsl and a downstream DSL can reuse existing plugins.
-No code, IR fragments or hook-call walkthroughs remain on these two slides;
-both contain at most70 visible words, including title and template footer.
-All47 slides rendered. Updated slides10–11 visually reviewed with no clipping.
-Other visible slides, order and timing remain unchanged from v12.
-All measured text bounds fit; template theme/masters/layouts/fonts unchanged.
-32 code panels retain green headers; 2233 visible words including code.
-54 feature-map rows use valid current slide numbers.
-Speaker notes, source links and verification paths resolve. PowerPoint ZIP
-integrity and official NVIDIA example hyperlink checks pass.
-No legacy annotation wrappers, stale imports, visible times or GenAI section.
-Historical v1–v12 artifacts preserved. No compiler implementation changes.
+V16 AGENDA CHECK — 2026-10-07
+Only agenda slide XML changed from v15. Final item: Amir: OpenAI Triton DSL.
+PowerPoint and PDF text verified; 53 pages preserved.
 
-RETAINED EXECUTION EVIDENCE
-Current API and computation checks are documented under verification/v8/.
-Displayed CPU computations and plugin/interop examples passed there.
-One pre-existing type-unstable-loop diagnostic mismatch remains documented;
-this presentation revision does not modify or retest implementation.
-Tile integration remains a port sketch, not a completed or GPU-tested plugin.
+V15 ARTIFACT CHECKS — 2026-10-07
+53 PDF/PowerPoint pages: unnumbered cover +52 content slides.
+Numbered slides1–9 match the requested opening. The title remains intact.
+Core30min +Amir10min +Tile sketch5min, with no visible timings.
+All15 feature topics retain their order. The detailed four-role/two-family
+record has moved beside the sub-DSL authoring example.
+Every line of the complete scalar bindings program is visible on slide2.
+Every line of the complete PyTorch DSL program is visible on slide3.
+Both programs executed successfully; outputs5 and [10,11,12,13].
+Opening slides reviewed from the PDF; editable boxes and diagrams retained.
+All measured text fits; exact template theme/masters/layouts/fonts preserved.
+34 green code headers; 2412 visible words, including code.
+30 feature mappings use content slide numbers; CSV/notes also track PDF pages.
+PowerPoint ZIP, source links, official NVIDIA hyperlink checks pass.
+No legacy annotation wrappers, stale imports, GenAI section or visible timings.
+Historical v1–v14 decks preserved. No compiler source edits.
+
+VERIFICATION SCOPE
+The two opening programs were executed for v15; evidence in verification/v15/.
+Other feature slides are unchanged from the executed/source-audited v14 deck.
+Evidence for them remains in verification/v14/. Tile is a proposed port sketch;
+there is no new GPU execution or performance claim.

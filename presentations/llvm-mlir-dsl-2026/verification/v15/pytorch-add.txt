@@ -1,0 +1,47 @@
+PyTorch plus mlir dsl slide — v15 verification
+
+Exact slide program: pytorch-add.py
+Both panels together form one complete program.
+Left panel is everything before `import mlir.mlir_dsl as m` (tensor setup).
+Right panel begins at that import and includes the Pointer alias, decorated
+function, call, and result print. CPU tensors are passed directly through the
+shipped PyTorch adapter; no copies, implicit tensor allocation, or hidden code.
+
+Environment:
+PYTHONDONTWRITEBYTECODE=1
+PYTHONPATH=/home/gozen/work/llvm-project/build/tools/mlir/python_packages/mlir_core
+MLIR_DSL_DISABLE_FILE_CACHING=1
+Python: 3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]
+PyTorch: 2.9.0.dev20250714+cu129
+
+Executed through runpy.run_path(script, run_name="__main__") so the exact
+standalone program can also be asserted after execution. Verified out equals
+both tensor([10., 11., 12., 13.]) and a+b, with rtol=0, atol=0; dtype float32,
+device CPU. No implementation changes or GPU claim.
+
+Output:
+tensor([10., 11., 12., 13.])
+
+Result: PASS
+
+LEFT PANEL:
+import torch
+
+a = torch.arange(4, dtype=torch.float32)
+b = torch.full_like(a, 10.0)
+out = torch.empty_like(a)
+# Expected: tensor([10., 11., 12., 13.])
+
+RIGHT PANEL:
+import mlir.mlir_dsl as m
+P = m.Pointer[m.Float32]
+
+@m.jit
+def add(n: m.Int32, a: P, b: P,
+        out: P):
+    for i in range(n):
+        out[i] = a[i] + b[i]
+
+add(a.numel(), a, b, out)
+print(out)
+
