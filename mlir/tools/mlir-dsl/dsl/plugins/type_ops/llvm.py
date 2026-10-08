@@ -7,7 +7,7 @@
 The loads, stores and address arithmetic behind the core ``Pointer`` (with the
 legalisation the ``llvm`` dialect needs for sub-byte float element types) and
 the casts between pointers, integers and address spaces. An op module, not a
-plugin: the ``TypeOps`` composer routes its memory hooks here, and any
+plugin: the ``UpstreamDialectTypeOps`` composer routes its memory hooks here, and any
 DSL may call these functions directly."""
 
 from typing import Any, Optional
@@ -15,7 +15,6 @@ from typing import Any, Optional
 from .... import ir
 from ....dialects import llvm
 from ...core.common import DSLUserCodeError
-from ...types import typing as _t
 from . import arith as _arith
 
 __all__ = [

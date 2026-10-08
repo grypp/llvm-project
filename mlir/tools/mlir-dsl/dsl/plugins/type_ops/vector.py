@@ -7,7 +7,7 @@
 ``from_elements``, ``broadcast``, ``extract`` and ``reduce`` over
 ``vector<N x T>`` values; the element-wise arithmetic of a ``Vector`` goes
 through the scalar ops of ``arith`` on vector operands. An op module, not a
-plugin: the ``TypeOps`` composer routes its vector hooks here."""
+plugin: the ``UpstreamDialectTypeOps`` composer routes its vector hooks here."""
 
 from typing import Any
 

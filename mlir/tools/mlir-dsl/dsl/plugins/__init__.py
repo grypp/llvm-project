@@ -7,11 +7,11 @@
 A plugin fills or extends a core role; a module emits ops. The folders mirror
 the fields of the ``Plugins`` record a DSL names on its class:
 
-* roles, one plugin each: ``type_ops/`` (the ``TypeOps`` composer over dialect
+* roles, one plugin each: ``type_ops/`` (the ``UpstreamDialectTypeOps`` composer over dialect
   modules), ``func_entry/`` (``func.Entry``), ``ast_preprocessor/``
   (``scf.ASTPreprocessor``), ``compiler/`` (``execution_engine.Compiler``);
 * families, any number each: ``decorators/`` (``kernels/gpu.Kernels`` adds
-  ``@kernel`` and its launcher), ``adapters/`` (the host boundary: ``pytorch``
+  ``@kernel`` and its launcher), ``adapters/`` (the host boundary: ``numpy``, ``pytorch``
   and ``dlpack`` turn host objects into arguments, ``tvm_ffi`` exposes the
   compiled entry through another ABI).
 

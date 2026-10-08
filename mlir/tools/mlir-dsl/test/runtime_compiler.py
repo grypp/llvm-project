@@ -408,16 +408,17 @@ print(f"HITS: {hits} MISSES: {misses} ENTRIES: {len(dsl.jit_cache)}")
 
 # --- the pass pipeline as data ------------------------------
 # `_get_pipeline`: the `pipeline=` call keyword as given; else
-# `<PREFIX>_PIPELINE`, with the arch option merged into its option block when
-# `<PREFIX>_ARCH` is set; else the DSL's own `pipeline()`.
+# `<PREFIX>_PIPELINE`, with the plugins' `pipeline_options()` (the gpu plugin's
+# chip option when `<PREFIX>_ARCH` is set) merged into its option block; else
+# the DSL's own `pipeline()`.
 # A pipeline that does not parse is a DSLRuntimeError naming it, one that does
 # not lower to the LLVM dialect fails when the engine is built, a failing pass
 # quotes its diagnostics; the DSL is usable after each.
 print("PIPELINE:", dsl._get_pipeline(None))
 print("EXPLICIT:", dsl._get_pipeline("builtin.module(cse)"), end=" ")
 NVVM = "builtin.module(gpu-lower-to-nvvm-pipeline)"
-print(dsl.preprocess_pipeline(NVVM, "sm_90"), end=" ")
-print(dsl.preprocess_pipeline("builtin.module(canonicalize)", ""))
+print(dsl.preprocess_pipeline(NVVM, {"cubin-chip": "sm_90"}), end=" ")
+print(dsl.preprocess_pipeline("builtin.module(canonicalize)", {}))
 # CHECK:        PIPELINE: builtin.module({{.*}}convert-scf-to-cf,convert-cf-to-llvm,convert-vector-to-llvm,convert-arith-to-llvm,convert-math-to-llvm,convert-func-to-llvm,reconcile-unrealized-casts)
 # CHECK-NEXT:   EXPLICIT: builtin.module(cse) builtin.module(gpu-lower-to-nvvm-pipeline{cubin-chip=sm_90 }) builtin.module(canonicalize)
 # ENVPIPE:      PIPELINE: builtin.module(canonicalize{top-down=true cubin-chip=sm_90 })

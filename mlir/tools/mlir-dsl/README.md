@@ -28,12 +28,12 @@ mlir/tools/mlir-dsl/
 │   │                                OpEmitter, diagnostics, env, remarks
 │   ├── types/                       Int32/Float32/..., Pointer, @struct, Vector, max/min
 │   ├── plugins/                     one folder per role, one per family; the core imports none at import time
-│   │   ├── type_ops/                TypeOps(scalars=, vectors=, memory=) + the op modules arith (also the math ops), vector, llvm
+│   │   ├── type_ops/                UpstreamDialectTypeOps(scalars=, vectors=, memory=) + the op modules arith (also the math ops), vector, llvm
 │   │   ├── func_entry/func.py       Entry: the func.func host entry with the C interface
 │   │   ├── ast_preprocessor/        the rewrite, its helpers; scf/: ASTPreprocessor, the scf builders and executors
 │   │   ├── compiler/                Compiler: pass manager + ExecutionEngine + packed invoke; jit_executor
 │   │   ├── decorators/kernels/      @kernel: launch.py (decorator, launcher, LaunchConfig); gpu/: Kernels + index ops
-│   │   └── adapters/                the host boundary: pytorch, dlpack (arguments in), tvm_ffi (the entry out as another ABI)
+│   │   └── adapters/                the host boundary: numpy, pytorch, dlpack (arguments in), tvm_ffi (the entry out as another ABI)
 │   └── util/                        pytrees, caches, profiler, logger
 ├── test/                            core and plugin tests (lit suite MLIR-DSL)
 └── sub-dsls/
@@ -57,7 +57,7 @@ Everything the core types build goes through the `OpEmitter` protocol of the
 tracing DSL's `type_ops` plugin; the core itself imports no MLIR dialect, not
 even lazily. The plugin answers, for the three kinds of core values:
 
-| Value | Type hooks | Op hooks | `TypeOps(scalars=arith, vectors=vector, memory=llvm)` (the test DSL) | a tile dialect |
+| Value | Type hooks | Op hooks | `UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm)` (the test DSL) | a tile dialect |
 |---|---|---|---|---|
 | scalars (`Int32`, `Float32`, ...) | `mlir_type(dtype)`, `scalar_type(ir_type)` | `const`, `add`, `cmp`, `cast`, `minmax`, ... | `i32`, `arith`/`math` ops | a rank-0 tile, the tile ops |
 | `Vector` | `vector_type(dtype, lanes)`, `vector_shape(ir_type)` | `from_elements`, `broadcast`, `extract`, `reduce` | `vector<N x T>`, `vector` ops | a rank-1 tile |
@@ -75,12 +75,12 @@ core knows one decorator, `@jit`:
 ```python
 class MlirTestDSL(BaseDSL):
     plugins = Plugins(
-        type_ops=TypeOps(scalars=arith, vectors=vector, memory=llvm),  # one dialect module per hook group
+        type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),  # one dialect module per hook group
         func_entry=func.Entry(),                # the host entry of a @jit function and its result slot
         ast_preprocessor=scf.ASTPreprocessor(), # Python keywords -> the scf executors
         compiler=execution_engine.Compiler(),   # the pass manager and execution engine: lowering and invocation
         decorators=[gpu.Kernels(chip_option="cubin-chip")],  # adds @kernel and its launcher
-        adapters=[pytorch.PyTorchPlugin(), dlpack.DlpackPlugin(), tvm_ffi.TvmFfiPlugin()],  # the host boundary, in and out
+        adapters=[numpy.NumpyPlugin(), pytorch.PyTorchPlugin(), dlpack.DlpackPlugin(), tvm_ffi.TvmFfiPlugin()],  # the host boundary, in and out
     )
     def pipeline(self): ...                     # the pass list; no plugin contributes a pass
     def register_dialects(self, ctx): ...       # out-of-tree dialects
@@ -106,7 +106,7 @@ the fields that hold any number, each extending the DSL at one fixed point:
 
 | Role | Base class | Contract | In tree |
 |---|---|---|---|
-| `type_ops` | `TypeOpsPlugin` | the `OpEmitter` hooks above | the `TypeOps` composer over the op modules `arith`/`vector`/`llvm` beside it, every part optional (`plugins/type_ops/`) |
+| `type_ops` | `TypeOpsPlugin` | the `OpEmitter` hooks above | the `UpstreamDialectTypeOps` composer over the op modules `arith`/`vector`/`llvm` beside it, every part optional (`plugins/type_ops/`) |
 | `func_entry` | `FuncEntryPlugin` | `generate_func_op`, `generate_return`, `pack_results`, `unpack_result` | `func.Entry` (`plugins/func_entry/`) |
 | `ast_preprocessor` | `ASTPreprocessorPlugin` | `preprocessor_class`, `closure_check`, `executors(dsl)` | `scf.ASTPreprocessor` (`plugins/ast_preprocessor/`) |
 | `compiler` | `CompilerPlugin` | `compile`, `jit`, `compile_and_jit`, `load`, `remark_session`, `print_ir_after_passes` | `execution_engine.Compiler` (`plugins/compiler/`) |
@@ -114,7 +114,7 @@ the fields that hold any number, each extending the DSL at one fixed point:
 | Family | Base class | Contract | In tree |
 |---|---|---|---|
 | `decorators` | `DecoratorPlugin` | `decorators()`, `before_trace`, `after_trace`, `check_arguments`, `finish_compiled_function` | `gpu.Kernels` (`plugins/decorators/kernels/`) |
-| `adapters` | `AdapterPlugin` | inbound `register(dsl)`; outbound `attach_to_module`, `after_lowering`, `wrap_compiled_function` | `PyTorchPlugin`, `DlpackPlugin`, `TvmFfiPlugin` (`plugins/adapters/`) |
+| `adapters` | `AdapterPlugin` | inbound `register(dsl)`; outbound `attach_to_module`, `after_lowering`, `wrap_compiled_function` | `NumpyPlugin`, `PyTorchPlugin`, `DlpackPlugin`, `TvmFfiPlugin` (`plugins/adapters/`) |
 
 `Plugin` itself keeps only the lifecycle every plugin shares: `available()` (a
 class-level probe: is the optional dependency importable, are the dialect
@@ -159,13 +159,13 @@ class WithMore(BaseDSL):     # @jit, @kernel, @task
     plugins = Plugins(..., decorators=[gpu.Kernels(), tasks.Tasks()])
 ```
 
-How other sub-DSLs map onto this: CuTe keeps the arith/vector/llvm `TypeOps`
-and `func.Entry`, lists `gpu.Kernels` (or its own kernels plugin for
-`nvvm`/`cute` ops) in `decorators`, its PyIR preprocessor as
-`ast_preprocessor`, and `DlpackPlugin` in `adapters`; cuTile names a
-`type_ops` plugin answering rank-0/rank-1 tiles and `cuda_tile` ops for
-scalars, vectors and pointers, with its own `func_entry` and `compiler` for the
-tile backend and its own kernels decorator plugin.
+How another sub-DSL would map onto this (a sketch; only the test DSL ships):
+one over the upstream dialects keeps `UpstreamDialectTypeOps` and
+`func.Entry` and brings its own kernels decorator plugin, preprocessor and
+adapters; one over its own dialect names a `type_ops` plugin answering its
+types and ops, with its own `func_entry`, `compiler` and kernels plugin.
+`examples/14_type_ops_plugin.py` shows the second shape with a rank-0 tensor
+stand-in and a placeholder pipeline.
 
 ## Sub-DSL knobs
 
@@ -175,12 +175,12 @@ record). The class attributes it may set:
 | Attribute | Default | Meaning |
 |---|---|---|
 | `plugins` | `BaseDSL`: `Plugins()`, nothing; `MlirTestDSL`: the record above | The `Plugins` record: one plugin per role and any number per family, resolved and installed once per instance. |
-| `plugins.type_ops` | none (`MlirTestDSL`: `TypeOps(scalars=arith, vectors=vector, memory=llvm)`) | The `TypeOpsPlugin` behind the types: their MLIR types and the ops of their operators, routed to the dialect modules. |
+| `plugins.type_ops` | none (`MlirTestDSL`: `UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm)`) | The `TypeOpsPlugin` behind the types: their MLIR types and the ops of their operators, routed to the dialect modules. |
 | `plugins.func_entry` | none (`MlirTestDSL`: `func.Entry()`) | The `FuncEntryPlugin` building the host entry of a `@jit` function and its result slot. |
 | `plugins.ast_preprocessor` | none (`MlirTestDSL`: `scf.ASTPreprocessor()`) | The AST preprocessor and the executors that stage native control flow. `scf.ASTPreprocessor(closure_check=False)` lets nested functions capture variables inside staged regions; a subclass may replace the `DSLPreprocessor` or any executor. A DSL without one cannot preprocess and uses the explicit builders. |
 | `plugins.compiler` | none (`MlirTestDSL`: `execution_engine.Compiler()`) | The `CompilerPlugin`: it runs `pipeline()`, builds the engine and loads the entry into the callable the DSL caches (`load`), so lowering and invocation are both its. A DSL without one traces only: a call returns the trace result, as under `<name>_DRYRUN`, and `compile()` raises. The execution engine is imported by this plugin at the first DSL construction, never when `mlir.dsl` is imported. |
 | `plugins.decorators` | none (`MlirTestDSL`: `gpu.Kernels(chip_option="cubin-chip")` when the gpu bindings import) | The `DecoratorPlugin`s: each adds a decorator (`@kernel`) and its launcher, keeps its per-trace state and its rules at the host boundary; the gpu one also hands the CUDA runtime library to the engine and checks `<name>_ARCH`. |
-| `plugins.adapters` | none (`MlirTestDSL`: `PyTorchPlugin()`, `DlpackPlugin()`, `TvmFfiPlugin()`) | The `AdapterPlugin`s: inbound, host objects (a `torch.Tensor`, anything speaking DLPack) becoming arguments at the boundary; outbound, another ABI around the compiled entry, added to the traced module and wrapped around the compiled function. |
+| `plugins.adapters` | none (`MlirTestDSL`: `NumpyPlugin()`, `PyTorchPlugin()`, `DlpackPlugin()`, `TvmFfiPlugin()`) | The `AdapterPlugin`s: inbound, host objects (a `numpy.ndarray`, a `torch.Tensor`, anything speaking DLPack) becoming arguments at the boundary; the core adapts no host buffer itself; outbound, another ABI around the compiled entry, added to the traced module and wrapped around the compiled function. |
 | `pipeline()` | `[]` (`MlirTestDSL`: the gpu lowering when an architecture is set, then its own `LOWER_TO_LLVM` list) | The pass list of the DSL, in order; no plugin publishes passes. |
 | `_jit_arg_adapter_scope` | `None` | The adapter registry scope used at the host boundary; `None` is the common registry plus the single scope registering a type. |
 | `name`, `dsl_package_name` (constructor) | `name` required, the other `None` | The environment-variable prefix (`<name>_DRYRUN`, ...) and log label (`MlirTestDSL`: `MLIR_DSL`); the package the rewrite imports for `and_`/`or_`/... (needed with `preprocess=True`). The pipeline option naming the target architecture is the gpu plugin's `chip_option`. |

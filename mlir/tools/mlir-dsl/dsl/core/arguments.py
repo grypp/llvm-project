@@ -7,8 +7,10 @@
 ``BaseDSL`` adapts every argument when it builds the trace and the JIT
 executor does it again on every call, both through ``JitArgAdapterRegistry``:
 tuples and lists element-wise, frozen records through
-``DefaultDataclassAdapter``, ``numpy.ndarray`` buffers into host ``Pointer``
-values (the ``pytorch`` and ``dlpack`` plugins add theirs). Adapters are keyed
+``DefaultDataclassAdapter``; host buffers are the adapter plugins' (``numpy``,
+``pytorch``, ``dlpack`` register ``numpy.ndarray``, ``torch.Tensor`` and the
+DLPack protocol as ``Pointer`` values), the core registers no host buffer type
+of its own. Adapters are keyed
 by type, per scope, lazily by qualified type name, or by protocol;
 ``register_jit_arg_adapter`` is the user-facing extension point.
 ``adapt_pointer_address`` is the annotation-driven step for ``Pointer[T]``
@@ -34,8 +36,6 @@ from typing import (
     Union,
 )
 
-import numpy as np
-
 from .common import DSLRuntimeError, DSLUserCodeError
 from .diagnostics import DiagId
 from ..types.typing import (
@@ -43,7 +43,6 @@ from ..types.typing import (
     Pointer,
     TypedPointer,
     cast,
-    from_numpy_dtype,
 )
 from ..util.tree_utils import contains_leaf, is_frozen_dataclass, is_leaf
 from .staging import _is_dsl_type_annotation
@@ -471,22 +470,6 @@ def _check_contiguous(arg: Any, contiguous: bool) -> None:
             arg_type=f"{type(arg).__module__}.{type(arg).__qualname__}",
             detail=f"it is a `{type(arg).__module__}.{type(arg).__qualname__}` that is not contiguous in memory",
         )
-
-
-@JitArgAdapterRegistry.register_jit_arg_adapter(np.ndarray)
-def _convert_numpy_array(arg: np.ndarray) -> Pointer:
-    """
-    Adapt a C-contiguous numpy array to a host ``Pointer`` over its data: the
-    dtype from the array (else ``TYPE_UNKNOWN_DTYPE_NAME``), the array kept
-    alive for the call; no shape or stride crosses the boundary.
-    """
-    _check_contiguous(arg, arg.flags.c_contiguous)
-    return Pointer(
-        arg.ctypes.data,
-        dtype=from_numpy_dtype(arg.dtype),
-        kind="host",
-        keepalive=arg,
-    )
 
 
 # =============================================================================

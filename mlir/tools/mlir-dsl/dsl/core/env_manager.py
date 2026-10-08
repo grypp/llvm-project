@@ -411,7 +411,7 @@ class EnvironmentVarManager(LogEnvironmentManager):
     - [DSL_NAME]_VERIFY_TRACE: Verify every op as it is built while tracing (default: False)
     - [DSL_NAME]_LOG_LEVEL: Logging level to set, for LOG_TO_CONSOLE or LOG_TO_FILE (default: 1).
     - [DSL_NAME]_DRYRUN: Generates IR only (default: False)
-    - [DSL_NAME]_ARCH: GPU architecture, e.g. "sm_90a" (default: None, no GPU target)
+    - [DSL_NAME]_ARCH: Target architecture for the plugins that need one, e.g. "sm_90a" for the gpu kernels plugin (default: None, no target)
     - [DSL_NAME]_AST_PREPROCESSOR: Run the AST preprocessor on decorated functions (default: True)
     - [DSL_NAME]_WARNINGS_IGNORE: Ignore warnings (default: False)
     - [DSL_NAME]_JIT_TIME_PROFILING: Whether or not to profile the IR generation/compilation/execution time (default: False)
@@ -513,10 +513,11 @@ class EnvironmentVarManager(LogEnvironmentManager):
 
     @property
     def arch(self) -> str | None:
-        """GPU architecture from ``{prefix}_ARCH``, or ``None`` when it is unset.
+        """Target architecture from ``{prefix}_ARCH``, or ``None`` when it is unset.
 
-        There is no detection: ``None`` means no GPU target, and a kernel
-        launch reports it naming the variable.
+        The core only carries it: a plugin that compiles for a target (the gpu
+        kernels plugin) validates and uses it. There is no detection: ``None``
+        means no target, and a kernel launch reports it naming the variable.
         """
         return self._arch
 

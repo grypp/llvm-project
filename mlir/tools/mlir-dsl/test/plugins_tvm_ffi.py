@@ -12,8 +12,8 @@
 # to `Const*`), adds `llvm.func @__tvm_ffi_<name>` with the TVM-FFI ABI that
 # checks the arguments and calls the entry (`DirectCallProvider`), and after
 # the JIT calls the compiled function through `tvm_ffi.Function`; a rejected
-# argument is CALL_TVM_FFI_ARGS. The `spec` kinds, their signature text and the
-# UNSUP_TVM_FFI_PARAM path are the builder's own.
+# argument is `tvm_ffi:CALL_REJECTED`. The `spec` kinds, their signature text and
+# the `tvm_ffi:UNSUP_PARAM` path are the builder's own.
 import os
 import sys
 from dataclasses import replace
@@ -247,7 +247,7 @@ if not DRYRUN and installed.enabled:
         compiled("ten")
     except m.DSLUserCodeError as e:
         print("DSL_ERROR:", e.diag_id.name)
-    # EXEC: DSL_ERROR: CALL_TVM_FFI_ARGS
+    # EXEC: DSL_ERROR: CALL_REJECTED
 
 
 # =============================================================================
@@ -295,11 +295,11 @@ with ir.Context(), ir.Location.unknown():
     )
     vec_result = DirectCallProvider("vec", result_type=ir.Type.parse("vector<2xi32>"))
     expect("VECTOR_RESULT", lambda: attach_ffi_func(vec, "vec", [], vec_result))
-    # CHECK: LANES UNSUP_TVM_FFI_PARAM
-    # CHECK: error[UNSUP_TVM_FFI_PARAM]:{{.*}} The TVM-FFI export does not support this parameter: Unsupported Var dtype: int32x2.
-    # CHECK: ENV_STREAM UNSUP_TVM_FFI_PARAM
+    # CHECK: LANES UNSUP_PARAM
+    # CHECK: error[tvm_ffi:UNSUP_PARAM]:{{.*}} The TVM-FFI export does not support this parameter: Unsupported Var dtype: int32x2.
+    # CHECK: ENV_STREAM UNSUP_PARAM
     # CHECK: {{.*}}EnvStream cannot be detected in `env(n: int32)` we need parameters to contain GPU Tensors.
-    # CHECK: VECTOR_RESULT UNSUP_TVM_FFI_PARAM
+    # CHECK: VECTOR_RESULT UNSUP_PARAM
     # CHECK: {{.*}}unsupported result type vector<2xi32>.
 
 
@@ -349,7 +349,7 @@ print(
 # CHECK: F4X2: Tensor([n, 4], float4_e2m1fnx2) True 16
 odd = spec.Tensor("o", [n, 7], "float4_e2m1fn")
 expect("F4X2_ODD", lambda: spec.create_map_tensor_dtype_f4x2_to_f4_spec(odd))
-# CHECK: F4X2_ODD UNSUP_TVM_FFI_PARAM
+# CHECK: F4X2_ODD UNSUP_PARAM
 # CHECK: {{.*}}Dimension 1 with stride=1 must be even.
 
 
@@ -358,5 +358,5 @@ class Foreign(spec.Param):
 
 
 expect("FOREIGN", lambda: spec.signature("f", [n, Foreign()]))
-# CHECK: FOREIGN UNSUP_TVM_FFI_PARAM
+# CHECK: FOREIGN UNSUP_PARAM
 # CHECK: {{.*}}Unsupported parameter type: <class '__main__.Foreign'>.

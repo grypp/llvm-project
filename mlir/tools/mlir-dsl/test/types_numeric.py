@@ -216,7 +216,7 @@ print("RESULT:", staged_promote(1, 0.5, 2**32 - 1, 1.5, -3))
 
 
 # --- Operator-to-op selection (`plugins/type_ops/arith.py`, through the
-# `TypeOps` plugin): the promoted dtype
+# `UpstreamDialectTypeOps` plugin): the promoted dtype
 # picks the signed, unsigned or float form; `//` on floats is `divf` +
 # `math.floor`; `-x` on an integer is `0 - x`; `~x` is `xor(x, -1)`; `>>` is
 # arithmetic for signed and logical for unsigned dtypes; `**` is `math.powf`

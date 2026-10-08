@@ -28,12 +28,12 @@ its plugins once, as a :class:`Plugins` record on the class::
 
     class MyDSL(BaseDSL):
         plugins = Plugins(
-            type_ops=TypeOps(scalars=arith, vectors=vector, memory=llvm),
+            type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),
             func_entry=func.Entry(),
             ast_preprocessor=scf.ASTPreprocessor(),
             compiler=execution_engine.Compiler(),
             decorators=[gpu.Kernels()],
-            adapters=[pytorch.PyTorchPlugin(), tvm_ffi.TvmFfiPlugin()],
+            adapters=[numpy.NumpyPlugin(), pytorch.PyTorchPlugin(), tvm_ffi.TvmFfiPlugin()],
         )
 
 ``BaseDSL.__init_subclass__`` installs the decorators of the record on the
@@ -97,13 +97,20 @@ class Plugin:
 
     def install(self, dsl: BaseDSL) -> None:
         """Bind to ``dsl``: set ``self.dsl`` and reach its seams (an
-        environment variable, a DSL attribute the plugin owns such as the gpu
-        plugin's ``pass_sm_arch_name``)."""
+        environment variable such as ``<PREFIX>_ARCH``, a check the plugin
+        runs once per DSL instance)."""
         self.dsl = dsl
 
     def shared_libs(self) -> list[str]:
         """Library paths handed to the ``ExecutionEngine``; never bound here."""
         return []
+
+    def pipeline_options(self) -> dict[str, str]:
+        """Pass options merged into a ``<PREFIX>_PIPELINE`` override, option
+        name to value (the gpu kernels plugin: its ``chip_option`` set to the
+        architecture). A DSL's own ``pipeline()`` spells its options itself,
+        so the default has none."""
+        return {}
 
     def register_dialects(self, context: ir.Context) -> None:
         """Register the plugin's dialects on the trace ``context``.

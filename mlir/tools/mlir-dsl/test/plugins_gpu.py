@@ -3,8 +3,8 @@
 # The gpu kernels plugin: `gpu.Kernels` is the decorator
 # plugin in MlirTestDSL's `Plugins` record that adds `@kernel`, installed
 # whenever the gpu bindings are present (kernel function, `gpu.module`
-# container, launch); it validates the arch at install and sets the DSL's
-# `pass_sm_arch_name`;
+# container, launch); it validates the arch at install and merges its chip
+# option into a `<PREFIX>_PIPELINE` override through `pipeline_options()`;
 # `MlirTestDSL.pipeline` puts `gpu-lower-to-nvvm-pipeline{cubin-chip=<arch>}`
 # ahead of the LLVM lowering when an arch is set. Calling a `@kernel` prepares a deferred launch; its
 # `.launch` emits the `gpu.func` (gpu.kernel, `known_block_size` for a static
@@ -90,18 +90,18 @@ print(
     "SEAMS:",
     dsl.plugins.named("gpu") is not GpuDSL.plugins.named("gpu"),
     dsl.plugins.named("gpu").dsl is dsl,
-    dsl.pass_sm_arch_name,
+    dsl.plugins.named("gpu").pipeline_options(),
 )
 print("PASSES:", [p for p in dsl.pipeline() if p.startswith("gpu-")])
 print("PIPELINE:", dsl._get_pipeline(None))
 # Without an arch the DSL's pipeline has no gpu pass (the launch diagnoses
 # the missing arch).
 # CHECK:  INSTALLED: 'sm_90' True
-# CHECK:  SEAMS: True True cubin-chip
+# CHECK:  SEAMS: True True {'cubin-chip': 'sm_90'}
 # CHECK:  PASSES: ['gpu-lower-to-nvvm-pipeline{cubin-chip=sm_90}']
 # CHECK:  PIPELINE: builtin.module(gpu-lower-to-nvvm-pipeline{cubin-chip=sm_90},convert-scf-to-cf,convert-cf-to-llvm,convert-vector-to-llvm,convert-arith-to-llvm,convert-math-to-llvm,convert-func-to-llvm,reconcile-unrealized-casts)
 # NOARCH: INSTALLED: {{None|''}} True
-# NOARCH: SEAMS: True True cubin-chip
+# NOARCH: SEAMS: True True {}
 # NOARCH: PASSES: []
 # NOARCH: PIPELINE: builtin.module(convert-scf-to-cf,convert-cf-to-llvm,
 dsl.envar.arch = "sm_80"  # the arch is a property of the instance

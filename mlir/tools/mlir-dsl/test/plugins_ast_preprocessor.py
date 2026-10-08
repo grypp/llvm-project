@@ -13,14 +13,14 @@ from mlir.dsl.plugins.ast_preprocessor import scf
 from mlir.dsl.plugins.compiler import execution_engine
 from mlir.dsl.plugins.func_entry import func
 from mlir.dsl.plugins.type_ops import arith, llvm, vector
-from mlir.dsl.plugins.type_ops import TypeOps
+from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps
 
 
 def make(name, ast_preprocessor=None, preprocess=True):
     class Custom(m.BaseDSL):
         # The record names the AST preprocessor next to the other roles.
         plugins = m.Plugins(
-            type_ops=TypeOps(scalars=arith, vectors=vector, memory=llvm),
+            type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),
             func_entry=func.Entry(),
             ast_preprocessor=ast_preprocessor,
             compiler=execution_engine.Compiler(),

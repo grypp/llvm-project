@@ -3,9 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 """The ``adapters`` family: the host boundary in both directions
-(``core.plugin.AdapterPlugin``). Inbound, ``pytorch`` adapts ``torch.Tensor``
-arguments and ``dlpack`` anything speaking the DLPack protocol (through the
-``_mlirDslDlpack`` extension built from ``dlpack/csrc``). Outbound, ``tvm_ffi``
+(``core.plugin.AdapterPlugin``). Inbound, ``numpy`` adapts ``numpy.ndarray``
+arguments, ``pytorch`` ``torch.Tensor`` arguments and ``dlpack`` anything
+speaking the DLPack protocol (through the ``_mlirDslDlpack`` extension built
+from ``dlpack/csrc``); the core registers no host buffer type. Outbound, ``tvm_ffi``
 exposes a compiled function as a ``tvm_ffi.Function`` when
 ``<PREFIX>_ENABLE_TVM_FFI`` is set. Each needs its own optional dependency and
 nothing imports one unless a DSL lists it.

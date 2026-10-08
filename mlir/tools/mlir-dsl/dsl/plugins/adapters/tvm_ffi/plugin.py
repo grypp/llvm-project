@@ -39,6 +39,7 @@ from .....dialects import llvm
 from ...compiler.jit_executor import JitCompiledFunction
 from ....core.common import DSLBaseError, DSLUserCodeError
 from ....core.diagnostics import DiagId
+from .diagnostics import TvmFfiDiagId
 from ....core.plugin import AdapterPlugin
 from ....core.arguments import JitArgAdapterRegistry
 from ....core.staging import is_reserved_python_func_arg
@@ -271,7 +272,7 @@ class TvmFfiJitCompiledFunction(JitCompiledFunction):
         return converted, keepalive
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        """Call the wrapper; a rejected argument raises ``CALL_TVM_FFI_ARGS``."""
+        """Call the wrapper; a rejected argument raises ``CALL_REJECTED``."""
         plan = self._export_plan
         if kwargs or self.tvm_ffi_function is None or plan is None:
             return super().__call__(*args, **kwargs)
@@ -282,7 +283,7 @@ class TvmFfiJitCompiledFunction(JitCompiledFunction):
             raise
         except Exception as exc:
             raise DSLUserCodeError(
-                DiagId.CALL_TVM_FFI_ARGS,
+                TvmFfiDiagId.CALL_REJECTED,
                 function_name=self.function_name,
                 detail=str(exc),
                 cause=exc,

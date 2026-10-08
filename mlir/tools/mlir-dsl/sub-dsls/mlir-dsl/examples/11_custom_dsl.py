@@ -29,7 +29,7 @@ from mlir.dsl.plugins.ast_preprocessor import scf
 from mlir.dsl.plugins.compiler import execution_engine
 from mlir.dsl.plugins.func_entry import func
 from mlir.dsl.plugins.type_ops import arith, llvm, vector
-from mlir.dsl.plugins.type_ops import TypeOps
+from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps
 
 
 # (a) A variant of an existing DSL is its record with a change: dropping the
@@ -42,7 +42,7 @@ class CpuDSL(m.MlirTestDSL):
 
 # (b) A DSL that is not `MlirTestDSL`: `name` is its environment prefix, so it
 # reads `MY_DSL_DRYRUN`, `MY_DSL_CACHE_DIR`, ... and ignores `MLIR_DSL_*`. It
-# names every plugin itself: `TypeOps(scalars=arith, vectors=vector, memory=llvm)` makes the types plain MLIR scalars
+# names every plugin itself: `UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm)` makes the types plain MLIR scalars
 # `i32`/`f32` with `arith`/`math`/`vector`/`llvm` ops, `func.Entry` builds the
 # `func.func` host entry, `execution_engine.Compiler` lowers and runs, and
 # `scf.ASTPreprocessor` is its `ast_preprocessor` (the preprocessor and the
@@ -56,7 +56,7 @@ class CpuDSL(m.MlirTestDSL):
 # re-exports them from `scf`.
 class MyDSL(m.BaseDSL):
     plugins = m.Plugins(
-        type_ops=TypeOps(scalars=arith, vectors=vector, memory=llvm),
+        type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),
         func_entry=func.Entry(),
         ast_preprocessor=scf.ASTPreprocessor(closure_check=False),
         compiler=execution_engine.Compiler(),

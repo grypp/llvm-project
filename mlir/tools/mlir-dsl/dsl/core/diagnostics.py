@@ -45,6 +45,11 @@ __all__ = [
     "WarnId",
     "META_VALUE",
     "STAGED_VALUE",
+    "NOT_ZERO_COST",
+    "UNSUPPORTED",
+    "USAGE",
+    "WARNING",
+    "classify",
     "register_dsl_package",
     "find_user_source_location",
     "render_code_frame",
@@ -736,12 +741,12 @@ class DiagCatalog:
     def category(self) -> str:
         """Author-facing category ("not zero-cost", "unsupported", "usage",
         "warning"); see ``_CATEGORIES``."""
-        return _CATEGORIES[self.name][0]
+        return _CATEGORIES[(self.namespace, self.name)][0]
 
     @property
     def subcategory(self) -> str:
         """Author-facing subcategory, a short phrase naming the mistake."""
-        return _CATEGORIES[self.name][1]
+        return _CATEGORIES[(self.namespace, self.name)][1]
 
     @property
     def message(self) -> str:
@@ -987,15 +992,8 @@ class DiagId(DiagCatalog, enum.Enum):
         ),
     )
 
-    # --- UNSUP: constructs the DSL does not compile (mostly found by the
-    # AST preprocessor; TVM_FFI_PARAM by the tvm_ffi plugin's export) ---
-    UNSUP_TVM_FFI_PARAM = (
-        "The TVM-FFI export does not support this parameter: {detail}.",
-        (
-            "Exported parameters are DSL scalars (`Int32`, `Float32`, ...), `Pointer[T]` "
-            "buffers and compile-time int/bool/float/None values.",
-        ),
-    )
+    # --- UNSUP: constructs the DSL does not compile (found by the AST
+    # preprocessor) ---
     UNSUP_SYNTAX = (
         "{what} is not supported in a compiled function{detail}.",
         (
@@ -1050,8 +1048,9 @@ class DiagId(DiagCatalog, enum.Enum):
         "Argument #{num} `{arg_name}` of `{function_name}` has type `{arg_type}`, "
         "which cannot be passed into compiled code{detail}.",
         (
-            "Pass a numpy array, a DSL numeric such as `Int32`, a pointer, or a tuple "
-            "or frozen record of them for `{arg_name}`.",
+            "Pass a DSL numeric such as `Int32`, a pointer, a host buffer one of the "
+            "DSL's adapter plugins accepts (a numpy array with the numpy plugin), or a "
+            "tuple or frozen record of them for `{arg_name}`.",
             "To pass a custom class, register an adapter for it with "
             "`@register_jit_arg_adapter(YourClass)`.",
         ),
@@ -1094,13 +1093,6 @@ class DiagId(DiagCatalog, enum.Enum):
         (
             "Move this call into a function decorated with `{decorator}`, then call "
             "that function.",
-        ),
-    )
-    CALL_TVM_FFI_ARGS = (
-        "The TVM-FFI call of `{function_name}` rejected its arguments: {detail}",
-        (
-            "Check the argument count and types against the function signature; a "
-            "compile-time argument must repeat the value the function was compiled with.",
         ),
     )
     CALL_META_VALUE_MISMATCH = (
@@ -1234,12 +1226,33 @@ UNSUPPORTED = "unsupported"
 USAGE = "usage"
 WARNING = "warning"
 
-_CATEGORIES: dict[str, tuple[str, str]] = {}
+# Keyed by ``(namespace, code)``: the base catalogs use the empty namespace, a
+# plugin's or sub-DSL's catalog classifies its own codes through ``classify``.
+_CATEGORIES: dict[tuple[str, str], tuple[str, str]] = {}
+
+
+def classify(catalog: type, category: str, subcategory: str, *codes: str) -> None:
+    """Classify ``codes`` of ``catalog`` (a ``DiagCatalog`` enum) under
+    ``category``/``subcategory``, so they render like the base ones; every code
+    must be a member of the catalog. Called once per catalog, next to its
+    definition (the gpu plugin's ``GpuDiagId``, the tvm_ffi plugin's
+    ``TvmFfiDiagId``)."""
+    members = getattr(catalog, "__members__", {})
+    for code in codes:
+        if code not in members:
+            # Imported here: ``common`` imports this module.
+            from .common import DSLRuntimeError
+
+            raise DSLRuntimeError(
+                f"{catalog.__name__} has no member {code!r} to classify",
+                context={"catalog": catalog.__name__, "code": code},
+            )
+        _CATEGORIES[(catalog.namespace, code)] = (category, subcategory)
 
 
 def _classify(category: str, subcategory: str, *codes: str) -> None:
     for code in codes:
-        _CATEGORIES[code] = (category, subcategory)
+        _CATEGORIES[("", code)] = (category, subcategory)
 
 
 _classify(
@@ -1274,7 +1287,6 @@ _classify(
     UNSUPPORTED,
     "a Python construct the DSL does not compile yet",
     "UNSUP_SYNTAX",
-    "UNSUP_TVM_FFI_PARAM",
     "UNSUP_EARLY_EXIT",
     "UNSUP_NO_SOURCE",
     "SCOPE_CLOSURE_CAPTURE",
@@ -1289,22 +1301,7 @@ _classify(
     "ARG_BUFFER_INVALID",
     "CALL_ARGUMENTS",
     "CALL_META_VALUE_MISMATCH",
-    "CALL_TVM_FFI_ARGS",
     "TYPE_LOOP_BOUND_NOT_INT",
-)
-_classify(
-    USAGE,
-    "kernel launch",
-    # The LAUNCH_* codes live in the gpu plugin's namespaced catalog
-    # (plugins/decorators/kernels/gpu/__init__.py); they are classified here by name so that
-    # catalog renders like the base one.
-    "LAUNCH_INVALID_DIMENSION",
-    "LAUNCH_INVALID_GRID",
-    "LAUNCH_OUTSIDE_JIT",
-    "LAUNCH_NEVER_ISSUED",
-    "LAUNCH_ALREADY_ISSUED",
-    "LAUNCH_HOST_BUFFER",
-    "LAUNCH_STREAM_UNSUPPORTED",
 )
 _classify(
     USAGE,
@@ -1319,8 +1316,6 @@ _classify(
     USAGE,
     "compile options",
     "CONFIG_INVALID",
-    # In the gpu plugin's catalog, like the LAUNCH_* codes above.
-    "CONFIG_UNSUPPORTED_ARCH",
 )
 _classify(
     USAGE,

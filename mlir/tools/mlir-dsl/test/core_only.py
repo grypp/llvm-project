@@ -1,8 +1,8 @@
 # RUN: env MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR=1 %PYTHON %s 2>&1 | FileCheck %s
 # Import graph: the core (`core/`, `types/`, `util/`) imports without the
 # `mlir.mlir_dsl` sub-DSL, without any plugin or dialect module, hence without
-# the `gpu`/`nvvm` bindings; a dialect is imported only when a DSL names a
-# plugin that emits it. A `BaseDSL` subclass naming the builtin type ops, the
+# the `gpu`/`nvvm` bindings, the execution engine or the pass manager; a
+# dialect is imported only when a DSL names a plugin that emits it. A `BaseDSL` subclass naming the builtin type ops, the
 # `func.func` entry and the execution-engine compiler traces through the core
 # and reports its own pass list.
 import sys
@@ -30,6 +30,8 @@ for name in (
     "mlir.dsl.plugins.compiler",
     "mlir.dialects.gpu",
     "mlir.dialects.nvvm",
+    "mlir.execution_engine",
+    "mlir.passmanager",
 ):
     print(f"loaded {name}: {name in sys.modules}")
 assert "mlir.dialects.gpu" not in sys.modules
@@ -45,19 +47,24 @@ assert "mlir.dialects.gpu" not in sys.modules
 # CHECK: loaded mlir.dsl.plugins.compiler: False
 # CHECK: loaded mlir.dialects.gpu: False
 # CHECK: loaded mlir.dialects.nvvm: False
+# CHECK: loaded mlir.execution_engine: False
+# CHECK: loaded mlir.passmanager: False
 
-# The plugins a CPU-only DSL needs, imported only now.
+# The plugins a CPU-only DSL needs, imported only now (numpy arrays are an
+# adapter plugin's, like torch tensors; the core adapts no host buffer).
+from mlir.dsl.plugins.adapters.numpy import NumpyPlugin
 from mlir.dsl.plugins.compiler import execution_engine
 from mlir.dsl.plugins.func_entry import func
 from mlir.dsl.plugins.type_ops import arith, llvm, vector
-from mlir.dsl.plugins.type_ops import TypeOps
+from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps
 
 
 class CpuOnlyDSL(BaseDSL):
     plugins = Plugins(
-        type_ops=TypeOps(scalars=arith, vectors=vector, memory=llvm),
+        type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),
         func_entry=func.Entry(),
         compiler=execution_engine.Compiler(),
+        adapters=[NumpyPlugin()],
     )
 
     def pipeline(self):
@@ -97,7 +104,7 @@ def scale_store(a: Int32, out: Pointer[Float32]) -> Int32:
 # CHECK-NOT:     gpu.
 # CHECK-NOT:     nvvm.
 # CHECK:         RESULT: ?
-# CHECK:         plugins: ['arith+vector+llvm', 'func', 'execution_engine'] {}
+# CHECK:         plugins: ['arith+vector+llvm', 'func', 'execution_engine', 'numpy'] {}
 # CHECK:         pipeline: builtin.module(convert-scf-to-cf,convert-cf-to-llvm,convert-arith-to-llvm,convert-func-to-llvm,reconcile-unrealized-casts)
 # CHECK:         gpu bindings loaded: False
 print("RESULT:", scale_store(3, np.zeros(4, np.float32)))

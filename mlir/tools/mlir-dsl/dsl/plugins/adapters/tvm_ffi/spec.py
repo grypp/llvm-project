@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 from ....core.common import DSLUserCodeError
-from ....core.diagnostics import DiagId
+from .diagnostics import TvmFfiDiagId
 
 if TYPE_CHECKING:
     from ..... import ir
@@ -374,7 +374,7 @@ def format_param_type(param: Param) -> str:
     :param param: The parameter to format
     :return: ``int32``, ``Tensor([n, 128], float32)``, ``Shape([n, m])``,
         ``Int(4)``, ``Tuple[int32, DataPointer]``, ...
-    :raises DSLUserCodeError: ``UNSUP_TVM_FFI_PARAM`` for an unknown kind
+    :raises DSLUserCodeError: ``UNSUP_PARAM`` for an unknown kind
     """
     if isinstance(param, Var):
         return str(param.dtype)
@@ -396,7 +396,7 @@ def format_param_type(param: Param) -> str:
     if isinstance(param, TupleParam):
         return f"Tuple[{', '.join(format_param_type(p) for p in param.params)}]"
     raise DSLUserCodeError(
-        DiagId.UNSUP_TVM_FFI_PARAM,
+        TvmFfiDiagId.UNSUP_PARAM,
         detail=f"Unsupported parameter type: {type(param)}",
     )
 
@@ -409,7 +409,7 @@ def signature(name: str, params: list[Param]) -> str:
     :param name: The function name
     :param params: The parameter specifications in argument order
     :return: The signature text used in the wrapper's error messages
-    :raises DSLUserCodeError: ``UNSUP_TVM_FFI_PARAM`` for an unknown kind
+    :raises DSLUserCodeError: ``UNSUP_PARAM`` for an unknown kind
     """
     param_strs = [
         f"{param.name}: {format_param_type(param)}"  # type: ignore[attr-defined]
@@ -423,7 +423,7 @@ def stride_one_index_of(shape: Sequence[Any], strides: Optional[Sequence[Any]]) 
     """The dimension a float4 tensor packs two values along: the last one when
     the strides are unknown, else the first with a static stride of 1.
 
-    :raises DSLUserCodeError: ``UNSUP_TVM_FFI_PARAM`` when no dimension has one
+    :raises DSLUserCodeError: ``UNSUP_PARAM`` when no dimension has one
     """
     if strides is None:
         return len(shape) - 1
@@ -431,7 +431,7 @@ def stride_one_index_of(shape: Sequence[Any], strides: Optional[Sequence[Any]]) 
         if isinstance(stride, int) and stride == 1:
             return i
     raise DSLUserCodeError(
-        DiagId.UNSUP_TVM_FFI_PARAM,
+        TvmFfiDiagId.UNSUP_PARAM,
         detail="no dimension with stride 1, which a float4 tensor needs",
     )
 
@@ -445,13 +445,13 @@ def create_map_tensor_dtype_f4x2_to_f4_spec(f4_tensor_spec: Tensor) -> Tensor:
 
     :param f4_tensor_spec: A :class:`Tensor` spec of dtype ``float4_e2m1fn``
     :return: The equivalent ``float4_e2m1fnx2`` spec
-    :raises DSLUserCodeError: ``UNSUP_TVM_FFI_PARAM`` when the spec is not a
+    :raises DSLUserCodeError: ``UNSUP_PARAM`` when the spec is not a
         float4 tensor, has no stride-1 dimension or a static extent, stride or
         divisibility that is not even
     """
     if f4_tensor_spec.dtype != tvm_ffi.dtype("float4_e2m1fn"):
         raise DSLUserCodeError(
-            DiagId.UNSUP_TVM_FFI_PARAM, detail="f4_tensor_spec must be a float4 tensor"
+            TvmFfiDiagId.UNSUP_PARAM, detail="f4_tensor_spec must be a float4 tensor"
         )
 
     stride_one_index = stride_one_index_of(f4_tensor_spec.shape, f4_tensor_spec.strides)
@@ -461,7 +461,7 @@ def create_map_tensor_dtype_f4x2_to_f4_spec(f4_tensor_spec: Tensor) -> Tensor:
             return None
         if value.divisibility % 2 != 0:
             raise DSLUserCodeError(
-                DiagId.UNSUP_TVM_FFI_PARAM,
+                TvmFfiDiagId.UNSUP_PARAM,
                 detail="Dimension with stride=1 must be divisible by 2",
             )
         return value.divisibility // 2
@@ -470,7 +470,7 @@ def create_map_tensor_dtype_f4x2_to_f4_spec(f4_tensor_spec: Tensor) -> Tensor:
         if isinstance(value, int):
             if value % 2 != 0:
                 raise DSLUserCodeError(
-                    DiagId.UNSUP_TVM_FFI_PARAM,
+                    TvmFfiDiagId.UNSUP_PARAM,
                     detail=f"Dimension {index} with {what} must be even",
                 )
             return value // 2

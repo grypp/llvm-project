@@ -27,13 +27,13 @@ from mlir.dsl.plugins.type_ops import (
     llvm as dsl_llvm,
     vector as dsl_vector,
 )
-from mlir.dsl.plugins.type_ops import TypeOps
+from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps
 
 
 # (a) A type-ops plugin is the dialect's answer to the type system (the
-# `type_ops` role of the record). Subclassing the `TypeOps` composer keeps `arith` ops, which also work on tensors; a real tile
+# `type_ops` role of the record). Subclassing the `UpstreamDialectTypeOps` composer keeps `arith` ops, which also work on tensors; a real tile
 # dialect overrides every operator with its own ops.
-class RankZeroTensorTypeOps(TypeOps):
+class RankZeroTensorTypeOps(UpstreamDialectTypeOps):
     name = "rank0-tensor"
 
     def mlir_type(self, dtype):
@@ -89,7 +89,7 @@ if dry:
     on_tiles(1)
 
 base, tile = m.MlirTestDSL(), TileLikeDSL()
-assert type(base.plugins.type_ops) is TypeOps
+assert type(base.plugins.type_ops) is UpstreamDialectTypeOps
 assert type(tile.plugins.type_ops) is RankZeroTensorTypeOps
 assert tile.pipeline() == ["my-tile-lowering", "reconcile-unrealized-casts"]
 
@@ -100,9 +100,9 @@ with ir.Context(), ir.Location.unknown():
     assert str(m.Int32.scalar_mlir_type) == "i32"
     assert (
         str(
-            TypeOps(scalars=dsl_arith, vectors=dsl_vector, memory=dsl_llvm).mlir_type(
-                m.Int32
-            )
+            UpstreamDialectTypeOps(
+                scalars=dsl_arith, vectors=dsl_vector, memory=dsl_llvm
+            ).mlir_type(m.Int32)
         )
         == "i32"
     )

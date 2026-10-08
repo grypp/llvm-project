@@ -27,7 +27,7 @@ from typing import Any, ClassVar, Optional, Union
 
 from ...... import _mlir_libs, ir
 from .....core.common import DSLRuntimeError, DSLUserCodeError
-from .....core.diagnostics import DiagCatalog, DiagId
+from .....core.diagnostics import USAGE, DiagCatalog, DiagId, classify
 from .....core.mlir_op import current_emitter
 from ..launch import KernelsPlugin, LaunchConfig
 from .....types.typing import Boolean, Int32, Int64, Integer, Numeric
@@ -126,6 +126,21 @@ class GpuDiagId(DiagCatalog, enum.Enum):
         "`{var}` must name one such as `sm_80` or `sm_90a`.",
         ("Set the environment variable `{var}=<arch>`, e.g. `{var}=sm_90a`.",),
     )
+
+
+classify(
+    GpuDiagId,
+    USAGE,
+    "kernel launch",
+    "LAUNCH_INVALID_DIMENSION",
+    "LAUNCH_INVALID_GRID",
+    "LAUNCH_OUTSIDE_JIT",
+    "LAUNCH_NEVER_ISSUED",
+    "LAUNCH_ALREADY_ISSUED",
+    "LAUNCH_HOST_BUFFER",
+    "LAUNCH_STREAM_UNSUPPORTED",
+)
+classify(GpuDiagId, USAGE, "compile options", "CONFIG_UNSUPPORTED_ARCH")
 
 
 # =============================================================================
@@ -295,8 +310,8 @@ class Kernels(KernelsPlugin):
 
     :param chip_option: The option of MLIR's ``gpu-lower-to-nvvm-pipeline`` that
         names the target architecture; the sub-DSL spells that pipeline in its
-        own ``pipeline()`` with it, and it is the DSL's ``pass_sm_arch_name``
-        for a ``<PREFIX>_PIPELINE`` override. The plugin lists no pass itself.
+        own ``pipeline()`` with it, and :meth:`pipeline_options` merges it into
+        a ``<PREFIX>_PIPELINE`` override. The plugin lists no pass itself.
     """
 
     name = "gpu"
@@ -313,12 +328,16 @@ class Kernels(KernelsPlugin):
         return gpu is not None and nvvm is not None
 
     def install(self, dsl: Any) -> None:
-        """Bind to ``dsl``: its pipeline arch option is this plugin's, and a set
-        ``<PREFIX>_ARCH`` must name a CUDA architecture."""
+        """Bind to ``dsl``: a set ``<PREFIX>_ARCH`` must name a CUDA architecture."""
         super().install(dsl)
-        dsl.pass_sm_arch_name = self.chip_option
         if dsl.envar.arch:
             check_arch(dsl.envar.arch, var=f"{dsl.envar.prefix}_ARCH")
+
+    def pipeline_options(self) -> dict[str, str]:
+        """``{chip_option: <PREFIX>_ARCH}`` for a ``<PREFIX>_PIPELINE`` override
+        when an architecture is set, else nothing."""
+        arch = self.dsl.envar.arch if self.dsl is not None else None
+        return {self.chip_option: arch} if arch else {}
 
     def shared_libs(self) -> list[str]:
         """The CUDA runtime library for the kernels' host code, when found."""

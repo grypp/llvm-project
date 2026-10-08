@@ -27,7 +27,7 @@ from typing import Any, Callable, Literal, Optional, Union
 from ..... import ir
 from .....dialects import llvm
 from ....core.common import DSLRuntimeError, DSLUserCodeError
-from ....core.diagnostics import DiagId
+from .diagnostics import TvmFfiDiagId
 from . import spec
 from .mlir_builder import MLIRBuilder
 from .spec import tvm_ffi
@@ -461,7 +461,7 @@ class TVMFFIBuilder(MLIRBuilder):
 
         A ``bool`` (and a 1-bit integer) becomes ``i1`` by comparing with zero.
 
-        :raises DSLUserCodeError: ``UNSUP_TVM_FFI_PARAM`` for a width that is
+        :raises DSLUserCodeError: ``UNSUP_PARAM`` for a width that is
             not 1, 8, 16, 32 or 64
         """
         overflow_flags = llvm.IntegerOverflowFlags.none
@@ -484,7 +484,7 @@ class TVMFFIBuilder(MLIRBuilder):
         if target_dtype.bits == 1:
             return llvm.icmp(llvm.ICmpPredicate.ne, v_int64, self.i64(0))
         raise DSLUserCodeError(
-            DiagId.UNSUP_TVM_FFI_PARAM, detail=f"Unsupported Var dtype: {target_dtype}"
+            TvmFfiDiagId.UNSUP_PARAM, detail=f"Unsupported Var dtype: {target_dtype}"
         )
 
     def is_contiguous(
@@ -806,7 +806,7 @@ class TVMFFIFunctionBuilder(TVMFFIBuilder):
             v_int64: ir.Value = self.load_ffi_any_array_item_v_int64(args, arg_index)
             if param.dtype.lanes != 1:
                 raise DSLUserCodeError(
-                    DiagId.UNSUP_TVM_FFI_PARAM,
+                    TvmFfiDiagId.UNSUP_PARAM,
                     detail=f"Unsupported Var dtype: {param.dtype}",
                 )
 
@@ -840,7 +840,7 @@ class TVMFFIFunctionBuilder(TVMFFIBuilder):
 
         if param.dtype.lanes != 1:
             raise DSLUserCodeError(
-                DiagId.UNSUP_TVM_FFI_PARAM,
+                TvmFfiDiagId.UNSUP_PARAM,
                 detail=f"Unsupported Var dtype: {param.dtype}",
             )
 
@@ -855,7 +855,7 @@ class TVMFFIFunctionBuilder(TVMFFIBuilder):
             result_type = self.f16_type
         else:
             raise DSLUserCodeError(
-                DiagId.UNSUP_TVM_FFI_PARAM,
+                TvmFfiDiagId.UNSUP_PARAM,
                 detail=f"Unsupported Var dtype: {param.dtype}",
             )
 
@@ -1846,7 +1846,7 @@ class TVMFFIFunctionBuilder(TVMFFIBuilder):
         :param arg_index: The slot in ``args``
         :param arg_context: Where the value comes from, for error messages
         :return: The block to continue in
-        :raises DSLUserCodeError: ``UNSUP_TVM_FFI_PARAM`` for an unknown kind or
+        :raises DSLUserCodeError: ``UNSUP_PARAM`` for an unknown kind or
             a ``Var`` dtype that is not an integer, a float or a handle
         """
         if isinstance(param, spec.Var):
@@ -1863,7 +1863,7 @@ class TVMFFIFunctionBuilder(TVMFFIBuilder):
                     current_block, param, args, arg_index, arg_context
                 )
             raise DSLUserCodeError(
-                DiagId.UNSUP_TVM_FFI_PARAM,
+                TvmFfiDiagId.UNSUP_PARAM,
                 detail=f"Unsupported Var dtype: {param.dtype}",
             )
         elif isinstance(param, spec.Shape):
@@ -1900,7 +1900,7 @@ class TVMFFIFunctionBuilder(TVMFFIBuilder):
             )
         else:
             raise DSLUserCodeError(
-                DiagId.UNSUP_TVM_FFI_PARAM,
+                TvmFfiDiagId.UNSUP_PARAM,
                 detail=f"Unsupported parameter type: {type(param)}",
             )
 
@@ -1912,14 +1912,14 @@ class TVMFFIFunctionBuilder(TVMFFIBuilder):
     ) -> ir.Block:
         """Bind every ``EnvStream`` parameter to the queried ``env_stream``.
 
-        :raises DSLUserCodeError: ``UNSUP_TVM_FFI_PARAM`` when an ``EnvStream``
+        :raises DSLUserCodeError: ``UNSUP_PARAM`` when an ``EnvStream``
             is declared but no parameter is a non-CPU tensor
         """
         for param in params:
             if isinstance(param, spec.EnvStream):
                 if env_stream is None:
                     raise DSLUserCodeError(
-                        DiagId.UNSUP_TVM_FFI_PARAM,
+                        TvmFfiDiagId.UNSUP_PARAM,
                         detail=f"EnvStream cannot be detected in `{self.current_fn_signature}`"
                         " we need parameters to contain GPU Tensors",
                     )

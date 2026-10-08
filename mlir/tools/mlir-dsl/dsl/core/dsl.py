@@ -156,8 +156,9 @@ class JitFuncArgs:
 @dataclass(frozen=True)
 class _ResultSpec:
     """How the result of a compiled function maps back to Python: the flattened
-    shape of the traced return and the host-side slot descriptor of the
-    ``func_entry`` plugin (the test DSL's ``func.Entry``: a ``ctypes`` type)."""
+    shape of the traced return and the host-side slot descriptor the
+    ``func_entry`` plugin built for it, opaque to the core (the shipped
+    ``func.Entry`` uses a ``ctypes`` type)."""
 
     treedef: Any
     slot: Any
@@ -284,10 +285,6 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             )
 
         self.name: str = name
-        # The pipeline option naming the target architecture, appended to a
-        # ``<PREFIX>_PIPELINE`` override when ``<PREFIX>_ARCH`` is set; the gpu
-        # kernels decorator plugin sets it at install (its ``chip_option``).
-        self.pass_sm_arch_name: str | None = None
         self.decorator_location: DSLLocation | None = None
         # Read environment variables
         self.envar: EnvironmentVarManager = self._create_environment_manager()
@@ -548,34 +545,30 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     def pipeline(self) -> list[str]:
         """The pass list of this DSL, in order: what lowers the ops its plugins
         emit. The base lists nothing (the core emits no dialect); a sub-DSL
-        returns its own, usually a plugin's published lowering (the test DSL:
-        the gpu lowering when an architecture is set, then
-        ``LOWER_TO_LLVM`` of ``mlir.mlir_dsl``). Wrapped as ``builtin.module(...)`` by
-        :meth:`_get_pipeline`; a ``pipeline=`` call keyword or
-        ``<PREFIX>_PIPELINE`` replaces it."""
+        returns its own, spelled against the dialects its plugins emit. Wrapped
+        as ``builtin.module(...)`` by :meth:`_get_pipeline`; a ``pipeline=``
+        call keyword or ``<PREFIX>_PIPELINE`` replaces it."""
         return []
 
     def _get_pipeline(self, pipeline: str | None) -> str:
         """The pipeline string of a compile: an explicit ``pipeline`` (a call
         keyword) as given, else the ``<PREFIX>_PIPELINE`` environment variable
-        with the arch option appended, else :meth:`pipeline` wrapped as
-        ``builtin.module(...)``."""
+        with the plugins' ``pipeline_options()`` appended, else
+        :meth:`pipeline` wrapped as ``builtin.module(...)``."""
         if pipeline is not None:
             return pipeline
         if self.envar.pipeline is not None:
-            if self.envar.arch and self.pass_sm_arch_name:
-                return self.preprocess_pipeline(self.envar.pipeline, self.envar.arch)
-            return self.envar.pipeline
+            options: dict[str, str] = {}
+            for plugin in self.plugins:
+                options.update(plugin.pipeline_options())
+            return self.preprocess_pipeline(self.envar.pipeline, options)
         return "builtin.module(" + ",".join(self.pipeline()) + ")"
 
-    def preprocess_pipeline(self, pipeline: str, arch: str) -> str:
-        """Append the architecture option (``<pass_sm_arch_name>=<arch>``) to
-        the ``<PREFIX>_PIPELINE`` string, merging into an existing ``{...}``
-        option block when the pipeline has one."""
-        options = {
-            self.pass_sm_arch_name: arch,
-        }
-
+    def preprocess_pipeline(self, pipeline: str, options: dict[str, str]) -> str:
+        """Append ``options`` (``name=value`` pairs, the plugins'
+        ``pipeline_options()``) to the ``<PREFIX>_PIPELINE`` string, merging
+        into an existing ``{...}`` option block when the pipeline has one; no
+        options leave it as given."""
         opt_str = ""
         for k, v in options.items():
             if v:
@@ -2029,8 +2022,9 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         """The ``@jit`` launcher (the ``on_call`` of the core decorator): one
         call of the decorated ``func``, with the DSL already active.
 
-        1. Translates the arguments (numpy arrays -> ``Pointer``, ``float`` ->
-           ``f32``, ...) and traces the body into the host entry
+        1. Translates the arguments (host buffers -> ``Pointer`` through the
+           adapter plugins, ``float`` -> ``f32``, ...) and traces the body into
+           the host entry
         2. Compiles and JITs the MLIR module (cached)
         3. Invokes the compiled function and rebuilds its result
         """

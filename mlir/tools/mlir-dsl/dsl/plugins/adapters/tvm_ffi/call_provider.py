@@ -18,7 +18,7 @@ from ..... import ir
 from .....dialects import func as func_dialect
 from .....dialects import llvm
 from ....core.common import DSLRuntimeError, DSLUserCodeError
-from ....core.diagnostics import DiagId
+from .diagnostics import TvmFfiDiagId
 from . import spec
 from .tvm_ffi_builder import CallContext, CallProvider, TVMFFIBuilder, TVMFFITypeIndex
 
@@ -193,7 +193,7 @@ class DynamicParamPackCallProvider(CallProvider, TVMFFIBuilder):
         """Pack every forwarded parameter.
 
         :return: ``(struct type, alloca)`` per parameter, in order
-        :raises DSLUserCodeError: ``UNSUP_TVM_FFI_PARAM`` for an unknown kind
+        :raises DSLUserCodeError: ``UNSUP_PARAM`` for an unknown kind
         """
         if self.flatten_tuple_params:
             flattened_params = _flatten_tuple_params(context.params)
@@ -220,7 +220,7 @@ class DynamicParamPackCallProvider(CallProvider, TVMFFIBuilder):
                 continue
             else:
                 raise DSLUserCodeError(
-                    DiagId.UNSUP_TVM_FFI_PARAM,
+                    TvmFfiDiagId.UNSUP_PARAM,
                     detail=f"Unsupported parameter type: {type(param)}",
                 )
         return packed_params
@@ -338,7 +338,7 @@ class DirectCallProvider(CallProvider, TVMFFIBuilder):
     def call_operands(self, context: CallContext) -> list[ir.Value]:
         """The callee operands, in the order of the (flattened) parameters.
 
-        :raises DSLUserCodeError: ``UNSUP_TVM_FFI_PARAM`` for an unknown kind
+        :raises DSLUserCodeError: ``UNSUP_PARAM`` for an unknown kind
         """
         operands: list[ir.Value] = []
         for param in _flatten_tuple_params(context.params):
@@ -363,7 +363,7 @@ class DirectCallProvider(CallProvider, TVMFFIBuilder):
                         operands.append(context.matched_var_binding[dim])
             else:
                 raise DSLUserCodeError(
-                    DiagId.UNSUP_TVM_FFI_PARAM,
+                    TvmFfiDiagId.UNSUP_PARAM,
                     detail=f"unsupported parameter type {type(param).__name__}",
                 )
         return operands
@@ -375,7 +375,7 @@ class DirectCallProvider(CallProvider, TVMFFIBuilder):
         v_float64}``: integers widen to ``i64`` (``i1`` becomes a ``bool``),
         floats to ``f64``.
 
-        :raises DSLUserCodeError: ``UNSUP_TVM_FFI_PARAM`` for a result that is
+        :raises DSLUserCodeError: ``UNSUP_PARAM`` for a result that is
             neither an integer nor a float type
         """
         type_index_ptr = self.getelementptr(raw_result, [0, 0], self.tvm_ffi_any_type)
@@ -408,7 +408,7 @@ class DirectCallProvider(CallProvider, TVMFFIBuilder):
             payload = llvm.fpext(self.f64_type, value)
         else:
             raise DSLUserCodeError(
-                DiagId.UNSUP_TVM_FFI_PARAM,
+                TvmFfiDiagId.UNSUP_PARAM,
                 detail=f"unsupported result type {value_type}",
             )
         llvm.store(self.i32(type_index), type_index_ptr)

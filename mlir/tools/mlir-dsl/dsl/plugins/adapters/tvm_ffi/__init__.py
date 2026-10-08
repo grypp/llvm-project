@@ -14,6 +14,7 @@ plain MLIR emission. The DSL-side use is :class:`TvmFfiPlugin` (``plugin.py``).
 """
 
 from . import spec
+from .diagnostics import TvmFfiDiagId
 from .call_provider import (
     DirectCallProvider,
     DynamicParamPackCallProvider,

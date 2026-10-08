@@ -31,7 +31,7 @@ print(
 # The index helpers are in the namespace exactly when the gpu bindings are built.
 print("GPU HELPERS:", hasattr(m, "thread_idx") == g.Kernels.available())
 # CHECK: CORE: Int32 <class 'mlir.dsl.types.typing.Pointer'> <function struct{{.*}}> <class 'mlir.dsl.types.vector.Vector'> BaseDSL
-# CHECK: PLUGINS: for_ range ASTPreprocessor TypeOps Entry Compiler
+# CHECK: PLUGINS: for_ range ASTPreprocessor UpstreamDialectTypeOps Entry Compiler
 # CHECK: DSL: MlirTestDSL jit kernel compile
 # CHECK: GPU HELPERS: True
 
@@ -52,12 +52,12 @@ print("ROLES:", [p.name for p in dsl.plugins], dsl.plugins.named("gpu"))
 print("PIPELINE:", dsl._get_pipeline(None))
 print("PREFIX:", dsl.name, dsl.envar.dryrun)
 # CHECK: AST: ASTPreprocessor True
-# CHECK: DIALECTS: TypeOps Entry
+# CHECK: DIALECTS: UpstreamDialectTypeOps Entry
 # CHECK: ROLES: ['arith+vector+llvm', 'func', 'scf', 'execution_engine'] None
 # CHECK: PIPELINE: builtin.module(convert-scf-to-cf,convert-cf-to-llvm,convert-vector-to-llvm,convert-arith-to-llvm,convert-math-to-llvm,convert-func-to-llvm,reconcile-unrealized-casts)
 # CHECK: PREFIX: MLIR_DSL True
 
-# The record lists four family members (one decorator plugin, three adapters);
+# The record lists five family members (one decorator plugin, four adapters);
 # an instance installs the available ones and remembers the others.
 FAMILIES = m.Plugins.FAMILIES
 listed = [type(p).__name__ for f in FAMILIES for p in getattr(m.MlirTestDSL.plugins, f)]
@@ -68,10 +68,10 @@ dropped = {
 print("DEFAULTS:", listed)
 print(
     "INSTALLED:",
-    installed <= {"gpu", "tvm_ffi", "pytorch", "dlpack"},
-    len(installed) + len(dropped) == 4,
+    installed <= {"gpu", "numpy", "tvm_ffi", "pytorch", "dlpack"},
+    len(installed) + len(dropped) == 5,
 )
-# CHECK: DEFAULTS: ['Kernels', 'PyTorchPlugin', 'DlpackPlugin', 'TvmFfiPlugin']
+# CHECK: DEFAULTS: ['Kernels', 'NumpyPlugin', 'PyTorchPlugin', 'DlpackPlugin', 'TvmFfiPlugin']
 # CHECK: INSTALLED: True True
 
 

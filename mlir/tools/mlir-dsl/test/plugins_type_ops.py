@@ -18,10 +18,11 @@ from mlir.dsl.plugins.type_ops import (
     llvm as dsl_llvm,
     vector as dsl_vector,
 )
-from mlir.dsl.plugins.type_ops import TypeOps
+from mlir.dsl.plugins.adapters.numpy import NumpyPlugin
+from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps
 
 
-class RankZeroTensorTypeOps(TypeOps):
+class RankZeroTensorTypeOps(UpstreamDialectTypeOps):
     """Scalars as rank-0 tensors: `Int32` is `tensor<i32>`."""
 
     name = "rank0_tensor"
@@ -94,7 +95,7 @@ print(
     type(tile.plugins.func_entry).__name__,
 )
 print("PIPELINE:", tile._get_pipeline(None))
-# CHECK: TYPE_OPS: TypeOps RankZeroTensorTypeOps Entry
+# CHECK: TYPE_OPS: UpstreamDialectTypeOps RankZeroTensorTypeOps Entry
 # CHECK: PIPELINE: builtin.module(my-tile-lowering,reconcile-unrealized-casts)
 
 # The types answer through the active DSL's `type_ops` plugin: `mlir_type` and
@@ -143,9 +144,9 @@ with ir.Context(), ir.Location.unknown():
 class ScalarOnlyDSL(m.MlirTestDSL):
     plugins = replace(
         m.MlirTestDSL.plugins,
-        type_ops=TypeOps(scalars=dsl_arith),
+        type_ops=UpstreamDialectTypeOps(scalars=dsl_arith),
         decorators=(),
-        adapters=(),
+        adapters=[NumpyPlugin()],  # the array of `wants_pointer` still arrives
     )
 
 

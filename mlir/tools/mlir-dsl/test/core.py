@@ -22,7 +22,7 @@ from mlir import ir
 from mlir.dsl.plugins.compiler import execution_engine
 from mlir.dsl.plugins.func_entry import func
 from mlir.dsl.plugins.type_ops import arith, llvm, vector
-from mlir.dsl.plugins.type_ops import TypeOps
+from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps
 
 dsl = m.MlirTestDSL()
 
@@ -228,7 +228,7 @@ print(str(report("CAST", scaled, "two", 3)))
 # annotation and no per-DSL knob), so a bare `BaseDSL` behaves like `MlirTestDSL`.
 class StrictDSL(m.BaseDSL):
     plugins = m.Plugins(
-        type_ops=TypeOps(scalars=arith, vectors=vector, memory=llvm),
+        type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),
         func_entry=func.Entry(),
         compiler=execution_engine.Compiler(),
     )

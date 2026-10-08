@@ -204,7 +204,7 @@ def current_emitter() -> OpEmitter:
     if emitter is None:
         raise DSLRuntimeError(
             "the core types need a `type_ops` plugin, and the tracing DSL names "
-            "none (`plugins = Plugins(type_ops=TypeOps(scalars=arith, ...))`)",
+            "none (`plugins = Plugins(type_ops=UpstreamDialectTypeOps(scalars=arith, ...))`)",
             context={"dsl": dsl.name, **dsl._unavailable_context()},
         )
     return emitter

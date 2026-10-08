@@ -21,7 +21,7 @@ os.environ.setdefault("MLIR_DSL_ENABLE_TVM_FFI", "1")
 import numpy as np
 
 import mlir.mlir_dsl as m
-from mlir.dsl.plugins.adapters.tvm_ffi import available
+from mlir.dsl.plugins.adapters.tvm_ffi import TvmFfiDiagId, available
 
 
 @m.jit
@@ -77,7 +77,7 @@ def main():
     try:
         compiled(8, 3.0, x, y)
     except m.DSLUserCodeError as e:
-        assert e.diag_id is m.DiagId.CALL_TVM_FFI_ARGS
+        assert e.diag_id is TvmFfiDiagId.CALL_REJECTED
         print("compiled(8, 3.0, x, y):", e.diag_id.name)
     print("TVM-FFI export: passed")
 
