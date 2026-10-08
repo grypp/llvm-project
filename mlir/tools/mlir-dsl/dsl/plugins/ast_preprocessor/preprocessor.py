@@ -637,7 +637,7 @@ class DSLPreprocessor(ast.NodeTransformer):
 
     # Decorator keywords that do not prevent decorator recognition.
     # "preprocess" controls whether AST preprocessing is enabled.
-    KNOWN_DSL_DECORATOR_KWARGS: ClassVar[frozenset[str]] = frozenset({"preprocess"})
+    KNOWN_DSL_DECORATOR_KWARGS: ClassVar[frozenset[str]] = frozenset()
 
     def generic_visit(self, node: ast.AST) -> ast.AST:
         """
@@ -1810,7 +1810,31 @@ class DSLPreprocessor(ast.NodeTransformer):
             node,
         )
         self._visit_runtime_dispatch(dispatch)
-        return [iter_assign, dispatch]
+        # Leaving the loop statement closes a generator iterable at once (the
+        # builders hold an insertion point across their ``yield``), so an
+        # exception raised in the body unwinds in order.
+        close_iter = ast.copy_location(
+            ast.Try(
+                body=[dispatch],
+                handlers=[],
+                orelse=[],
+                finalbody=[
+                    ast.Expr(
+                        ast.Call(
+                            func=_create_module_attribute(
+                                "close_for_iter",
+                                lineno=node.iter.lineno,
+                                col_offset=node.iter.col_offset,
+                            ),
+                            args=[ast.Name(id=iter_name, ctx=ast.Load())],
+                            keywords=[],
+                        )
+                    )
+                ],
+            ),
+            node,
+        )
+        return [iter_assign, close_iter]
 
     @staticmethod
     def _literal_for_iter_kind(iter_node: ast.expr) -> str | None:
@@ -2281,10 +2305,10 @@ class DSLPreprocessor(ast.NodeTransformer):
     def get_dsl_decorator_index(self, decorator_list: list[ast.expr]) -> int | None:
         """The index of the DSL decorator in ``decorator_list``, or ``None``.
 
-        ``@jit``, ``@jit()`` and ``@jit(preprocess=...)`` qualify; a call with
-        a keyword outside ``KNOWN_DSL_DECORATOR_KWARGS`` is not recognised (a
-        sub-DSL extends the set). The value of ``preprocess=`` is not read
-        here: ``BaseDSL`` honours it before the preprocessor runs.
+        ``@jit`` and ``@jit()`` qualify; the core decorators take no options,
+        so a call with a keyword outside ``KNOWN_DSL_DECORATOR_KWARGS`` (empty
+        here; a sub-DSL whose decorators accept options extends the set) is
+        not recognised as the DSL decorator.
         """
         for i, d in enumerate(decorator_list):
             if self._dsl_decorator_name(d) is None:

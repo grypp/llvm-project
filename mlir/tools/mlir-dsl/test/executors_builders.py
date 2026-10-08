@@ -1,8 +1,9 @@
 # RUN: env MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR=1 %PYTHON %s 2>&1 | FileCheck %s
 # RUN: %PYTHON %s 2>&1 | FileCheck %s --check-prefix=EXEC
 # REQUIRES: host-supports-jit
-# The explicit builders `for_`/`if_`/`while_`/`yield_` under
-# `preprocess=False`, and the executors behind the rewrite:
+# The explicit builders `for_`/`if_`/`while_`/`yield_` (used under the
+# default DSL, whose rewrite leaves a `for` over a builder generator to
+# Python), and the executors behind the rewrite:
 # the bound promotion table, the rejection of loop options, the join checks
 # every region applies to its write_args (`PHASE_MUTATE_PYTHON`,
 # `TYPE_UNSTABLE_JOIN`, `CONTAINER_STRUCTURE_CHANGED`) with the diagnostics
@@ -35,7 +36,7 @@ class Pair:
 # --- `for_` and `yield_` ----------------------------------------------------
 
 
-@m.jit(preprocess=False)
+@m.jit
 def for_no_carry(n: m.Int32, out: m.Pointer[m.Int32]):
     for i in m.for_(n):  # `for_(stop)`: `iv` alone, the body terminated for the user
         out[i] = i * 2
@@ -53,7 +54,7 @@ for_no_carry(4, buf)
 print("RESULT: for_no_carry", buf.tolist())
 
 
-@m.jit(preprocess=False)
+@m.jit
 def for_bounds(a: m.Int32, b: m.Int64) -> m.Int64:
     # `for_(start, stop, step, iter_args)`: the bounds and `iv` take the
     # promoted dtype, a Python step is materialised in it; one carry is the
@@ -73,7 +74,7 @@ def for_bounds(a: m.Int32, b: m.Int64) -> m.Int64:
 report(for_bounds, 1, 9)  # 1 + 3 + 5 + 7
 
 
-@m.jit(preprocess=False)
+@m.jit
 def for_carries(n: m.Int32, f: m.Float32) -> m.Float32:
     for i in m.for_(n):
         m.yield_()  # nothing: an empty terminator, no second one added
@@ -102,7 +103,7 @@ def for_carries(n: m.Int32, f: m.Float32) -> m.Float32:
 report(for_carries, 4, 1.0)  # 16.0 + 6 + 20
 
 
-@m.jit(preprocess=False)
+@m.jit
 def for_missing_yield(n: m.Int32) -> m.Int32:
     for i, acc_in, acc_out in m.for_(n, iter_args=[m.Int32(0)]):
         unused = acc_in + i
@@ -113,7 +114,7 @@ def for_missing_yield(n: m.Int32) -> m.Int32:
 report(for_missing_yield, 3)
 
 
-@m.jit(preprocess=False)
+@m.jit
 def for_wrong_yield(n: m.Int32) -> m.Int32:
     # `yield_` checks what it yields against the carries of the enclosing
     # builder: another type (an f32 for an i32 carry) or another shape is a
@@ -130,7 +131,7 @@ report(for_wrong_yield, 3)
 # --- `if_` ------------------------------------------------------------------
 
 
-@m.jit(preprocess=False)
+@m.jit
 def if_store(n: m.Int32, out: m.Pointer[m.Int32]):
     def then():
         out[0] = n
@@ -152,7 +153,7 @@ if_store(1, buf)
 print("RESULT: if_store", buf.tolist())
 
 
-@m.jit(preprocess=False)
+@m.jit
 def if_results(n: m.Int32, f: m.Float32) -> m.Float32:
     # `return_types` without an else: the else yields `input_args` unchanged;
     # the arms' values are cast to `return_types` (a Python literal becomes
@@ -180,7 +181,7 @@ def if_results(n: m.Int32, f: m.Float32) -> m.Float32:
 print("RESULT: if_results", if_results(5, 1.5), if_results(1, 1.5))
 
 
-@m.jit(preprocess=False)
+@m.jit
 def if_too_few(n: m.Int32) -> m.Int32:
     a, b = m.if_(n > 2, lambda: (n,), lambda: (n, n), return_types=[m.Int32, m.Int32])
     return a
@@ -193,7 +194,7 @@ report(if_too_few, 4)
 # --- `while_` and `WhileLoopContext` -----------------------------------------
 
 
-@m.jit(preprocess=False)
+@m.jit
 def while_context(n: m.Int32, f: m.Float32) -> m.Float32:
     # `while_(inputs, cond)`: the context exposes the inputs' IR types, `with`
     # binds the after-block carries as DSL values, `.results` the results.
@@ -222,7 +223,7 @@ def while_context(n: m.Int32, f: m.Float32) -> m.Float32:
 report(while_context, 3, 1.0)
 
 
-@m.jit(preprocess=False)
+@m.jit
 def while_python_cond(n: m.Int32) -> m.Int32:
     loop = m.while_([n], lambda i: False)  # a Python condition is a constant:
     with loop as (i,):  # the builders never fold (the rewrite does)
@@ -237,7 +238,7 @@ def while_python_cond(n: m.Int32) -> m.Int32:
 report(while_python_cond, 7)
 
 
-@m.jit(preprocess=False)
+@m.jit
 def while_wrong_yield(n: m.Int32) -> m.Int32:
     loop = m.while_([n, n], lambda i, j: i > 0)
     with loop as (i, j):
@@ -492,7 +493,7 @@ report(record_ternary, 1)
 report(turns_staged, 3)
 
 
-@m.jit(preprocess=False)
+@m.jit
 def direct_executors(n: m.Int32) -> m.Int32:
     # The executors called directly (a sub-DSL's view): a Python predicate
     # returns the write-back shape; a `None`-seeded slot takes the arms' type;
@@ -566,7 +567,7 @@ print("REDUCE:", type(every).__name__, bool(every), bool(some), bool(m.all_([]))
 # CHECK: REDUCE: Boolean True False True
 
 
-@m.jit(preprocess=False)
+@m.jit
 def helpers_staged(a: m.Int32, b: m.Int32) -> m.Int32:
     # On staged values every helper answers a `Boolean`; `and_`/`or_` fold the
     # leading Meta operands and reduce left to right; `in_` is `any_` of the
@@ -666,7 +667,7 @@ def max_keyword(a: m.Int32, b: m.Int32) -> m.Int32:
 report(max_keyword, 3, 4)
 
 
-@m.jit(preprocess=False)
+@m.jit
 def other_builtin(a: m.Int32) -> m.Int32:
     return _builtin_redirector(len)([a])  # any other builtin with a staged argument
 

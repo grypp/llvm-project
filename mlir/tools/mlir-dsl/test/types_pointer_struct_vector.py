@@ -14,7 +14,6 @@ import sys
 import numpy as np
 
 import mlir.mlir_dsl as m
-from mlir.dsl.plugins.adapters.pytorch import from_torch_dtype
 
 I8, I32, I64, U8, U32 = m.Int8, m.Int32, m.Int64, m.Uint8, m.Uint32
 F16, F32, B, V, P, S = m.Float16, m.Float32, m.Boolean, m.Vector, m.Pointer, m.Struct
@@ -41,9 +40,9 @@ buf = np.zeros(4, np.float32)
 
 
 def staged_ptr(label, body):
-    """Run `body(p, i)` in a preprocessor-less trace over (Pointer[Float32], Int32)."""
+    """Run `body(p, i)` in a trace over (Pointer[Float32], Int32)."""
 
-    @m.jit(preprocess=False)
+    @m.jit
     def f(p: P[F32], i: I32):
         return body(p, i)
 
@@ -460,7 +459,7 @@ err("jit int arg", lambda: vec2_ops(3))
 # CHECK: jit int arg: ARG_ANNOTATION_MISMATCH
 
 
-@m.jit(preprocess=False)
+@m.jit
 def staged_struct_errors(v: Vec2, i: I32):
     err("staged arity", lambda: v.replace(x=(i, i)))
     err("staged assign", lambda: setattr(v, "x", i))
@@ -566,7 +565,7 @@ err("return vector", lambda: return_vector(1.0))
 
 
 def staged_vec(label, body):
-    @m.jit(preprocess=False)
+    @m.jit
     def f(a: I32, g: F32):
         return body(a, g, V([a, a]))
 
@@ -593,17 +592,6 @@ staged_vec("bool", lambda a, g, v: bool(v))
 # CHECK: splat staged lanes: PHASE_REQUIRES_CONSTANT
 # CHECK: wrap scalar: TYPE_UNSUPPORTED_MLIR_TYPE
 # CHECK: bool: PHASE_DYNAMIC_TO_STATIC_BOOL
-
-# ===== The torch dtype bridge needs no torch ==============================
-# `from_torch_dtype` matches a `torch.dtype` by its printed name, so the
-# `torch.Tensor` adapter can type a tensor without importing torch.
-ft = lambda s: name(from_torch_dtype(s))
-show("TORCH", ft("torch.float32"), ft("bool"), ft("bfloat16"), ft("float8_e4m3fn"))
-show("TORCH narrow", ft("torch.float4_e2m1fn_x2"), ft("int4"), "torch" in sys.modules)
-err("from_torch_dtype(complex64)", lambda: from_torch_dtype("torch.complex64"))
-# CHECK: TORCH: Float32 Boolean BFloat16 Float8E4M3FN
-# CHECK: TORCH narrow: Float4E2M1FN Int4 False
-# CHECK: from_torch_dtype(complex64): TYPE_UNKNOWN_DTYPE_NAME
 
 # Known defects, reported separately and not asserted here: `inttoptr(p, ...)`
 # with a Pointer operand builds invalid IR instead of `ARG_NOT_NUMERIC`; `p - q`

@@ -5,11 +5,11 @@
 """Building a sub-DSL: subclass the base, name its plugins, name it, extend its boundary.
 
 `mlir.dsl` is a base layer and a sub-DSL is a class that assembles itself
-through one `Plugins` record: a plugin per core role (`type_ops`, `func_entry`,
-`ast_preprocessor`, `compiler`) and any number per family (`decorators`, which
-add decorators such as `@kernel` and their launchers; `adapters`, the host
-boundary: objects becoming arguments, the entry exposed as another ABI). The
-core knows one decorator, `@jit`; `@kernel` is the gpu kernels plugin's.
+through one `Plugins` record: a plugin per core role (`type_ops`,
+`ast_preprocessor`, `compiler`) and any number per family (`decorators`, one
+per kind of decorated function: `@jit` is the `func.Jit` plugin's, `@kernel`
+the gpu kernels plugin's; `adapters`, the host boundary: objects becoming
+arguments, the entry exposed as another ABI). The core knows no decorator.
 `MlirTestDSL` with a changed record keeps everything else (a CPU-only DSL drops
 its families); a `BaseDSL` subclass picks its own `name`,
 which is the prefix of its environment variables, and names its plugins from
@@ -27,7 +27,7 @@ import numpy as np
 import mlir.mlir_dsl as m
 from mlir.dsl.plugins.ast_preprocessor import scf
 from mlir.dsl.plugins.compiler import execution_engine
-from mlir.dsl.plugins.func_entry import func
+from mlir.dsl.plugins.decorators.jit import func
 from mlir.dsl.plugins.type_ops import arith, llvm, vector
 from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps
 
@@ -37,38 +37,37 @@ from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps
 # a diagnostic; no tensor adapters, no TVM-FFI export); the types, the entry,
 # the compiler and the syntax are inherited.
 class CpuDSL(m.MlirTestDSL):
-    plugins = replace(m.MlirTestDSL.plugins, decorators=(), adapters=())
+    plugins = replace(m.MlirTestDSL.plugins, decorators=[func.Jit()], adapters=())
 
 
 # (b) A DSL that is not `MlirTestDSL`: `name` is its environment prefix, so it
 # reads `MY_DSL_DRYRUN`, `MY_DSL_CACHE_DIR`, ... and ignores `MLIR_DSL_*`. It
 # names every plugin itself: `UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm)` makes the types plain MLIR scalars
-# `i32`/`f32` with `arith`/`math`/`vector`/`llvm` ops, `func.Entry` builds the
+# `i32`/`f32` with `arith`/`math`/`vector`/`llvm` ops, `func.Jit` adds `@jit` over the
 # `func.func` host entry, `execution_engine.Compiler` lowers and runs, and
 # `scf.ASTPreprocessor` is its `ast_preprocessor` (the preprocessor and the
 # executors that stage native `for`/`if`/`while`), here with
 # `closure_check=False` so nested functions may capture variables inside staged
-# regions. Without an `ast_preprocessor` a DSL cannot preprocess and its bodies
-# use the explicit `m.for_`/`m.if_` builders. The pass list is the DSL's own:
-# here the test DSL's `LOWER_TO_LLVM`; no plugin publishes passes.
-# `dsl_package_name` is the package the rewrite imports for `and_`/`or_`/
-# `not_`/`as_ir_value`, so a sub-DSL of its own names its own namespace, which
-# re-exports them from `scf`.
+# regions. Naming the plugin is what turns the rewrite on: without an
+# `ast_preprocessor` a DSL never rewrites and its bodies use the explicit
+# `m.for_`/`m.if_` builders. The pass list is the DSL's own: here the test
+# DSL's `LOWER_TO_LLVM`; no plugin publishes passes. The rewrite imports
+# `and_`/`or_`/`not_`/`as_ir_value` from the plugin's own package; a sub-DSL
+# that re-exports them under its own namespace may name it with
+# `dsl_package_name`.
 class MyDSL(m.BaseDSL):
     plugins = m.Plugins(
         type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),
-        func_entry=func.Entry(),
         ast_preprocessor=scf.ASTPreprocessor(closure_check=False),
         compiler=execution_engine.Compiler(),
+        decorators=[func.Jit()],
     )
 
     def pipeline(self):
         return list(m.LOWER_TO_LLVM)
 
     def __init__(self):
-        super().__init__(
-            name="MY_DSL", dsl_package_name=["mlir", "mlir_dsl"], preprocess=True
-        )
+        super().__init__(name="MY_DSL")
 
 
 # (c) An extension point: a host class the base knows nothing about ...

@@ -8,12 +8,13 @@ A plugin fills or extends a core role; a module emits ops. The folders mirror
 the fields of the ``Plugins`` record a DSL names on its class:
 
 * roles, one plugin each: ``type_ops/`` (the ``UpstreamDialectTypeOps`` composer over dialect
-  modules), ``func_entry/`` (``func.Entry``), ``ast_preprocessor/``
-  (``scf.ASTPreprocessor``), ``compiler/`` (``execution_engine.Compiler``);
-* families, any number each: ``decorators/`` (``kernels/gpu.Kernels`` adds
-  ``@kernel`` and its launcher), ``adapters/`` (the host boundary: ``numpy``, ``pytorch``
-  and ``dlpack`` turn host objects into arguments, ``tvm_ffi`` exposes the
-  compiled entry through another ABI).
+  modules), ``ast_preprocessor/`` (``scf.ASTPreprocessor``), ``compiler/``
+  (``execution_engine.Compiler``);
+* families, any number each: ``decorators/`` (``jit/func.Jit`` adds ``@jit``
+  over a ``func.func`` entry, ``kernels/gpu.Kernels`` adds ``@kernel`` and its
+  launcher), ``adapters/`` (the host boundary: ``dlpack`` turns anything
+  speaking DLPack, numpy arrays and torch tensors included, into arguments,
+  ``tvm_ffi`` exposes the compiled entry through another ABI).
 
 Each folder also ships the op modules its plugin emits through (``type_ops/``:
 ``arith``, ``vector``, ``llvm``; ``ast_preprocessor/scf/``: the
@@ -29,7 +30,6 @@ from ..core.plugin import (
     AdapterPlugin,
     CompilerPlugin,
     DecoratorPlugin,
-    FuncEntryPlugin,
     Plugin,
     Plugins,
     TypeOpsPlugin,
@@ -40,7 +40,6 @@ __all__ = [
     "AdapterPlugin",
     "CompilerPlugin",
     "DecoratorPlugin",
-    "FuncEntryPlugin",
     "Plugin",
     "Plugins",
     "TypeOpsPlugin",

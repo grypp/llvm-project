@@ -46,11 +46,13 @@ for root in roots:
             with open(path, encoding="utf-8") as f:
                 tree = ast.parse(f.read(), filename=path)
             scanned += 1
-            # A module-level `__getattr__` must raise AttributeError for an unknown
-            # name (PEP 562); that is the protocol, not an internal invariant.
+            # A `__getattr__` must raise AttributeError for an unknown name, at
+            # module level (PEP 562) or on a class or metaclass (the data model,
+            # so `getattr(x, name, default)` keeps its default); that is the
+            # protocol, not an internal invariant.
             protocol = [
                 (n.lineno, n.end_lineno)
-                for n in tree.body
+                for n in ast.walk(tree)
                 if isinstance(n, ast.FunctionDef) and n.name == "__getattr__"
             ]
             for node in ast.walk(tree):

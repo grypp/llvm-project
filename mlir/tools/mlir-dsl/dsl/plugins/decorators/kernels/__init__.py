@@ -4,8 +4,9 @@
 
 """Kernels: decorator plugins adding ``@kernel`` and its launcher to a DSL.
 
-The core knows one decorator, ``@jit``. A DSL with kernels lists a kernels
-plugin in ``Plugins(decorators=[...])``: ``launch.py`` is the generic part (the
+The core knows no decorator; ``@jit`` is the ``jit`` plugin beside this
+package. A DSL with kernels lists a kernels plugin in
+``Plugins(decorators=[...])``: ``launch.py`` is the generic part (the
 ``kernel`` decorator, the deferred :class:`KernelLauncher`, :class:`LaunchConfig`,
 the per-trace bookkeeping and the entry protocol a target implements), ``gpu/``
 the CUDA target over the ``gpu`` dialect (``gpu.Kernels`` in ``gpu/__init__.py``,

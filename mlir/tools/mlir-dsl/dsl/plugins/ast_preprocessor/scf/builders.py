@@ -4,9 +4,10 @@
 
 """The ``scf`` dialect: the explicit builders ``for_``, ``if_``, ``while_`` and ``yield_``.
 
-The layer the ``scf`` AST preprocessor plugin targets, usable directly under
-``@jit(preprocess=False)`` or from any DSL that wants to build an ``scf``
-region by hand. Carries are pytrees of DSL values (``tree_utils``). An op
+The layer the ``scf`` AST preprocessor plugin targets, usable directly from
+any ``@jit`` function (the rewrite leaves a ``for`` over a builder generator
+to Python) or from a DSL without the preprocessor that builds ``scf`` regions
+by hand. Carries are pytrees of DSL values (``tree_utils``). An op
 module, not a plugin; ``_promote_loop_bounds`` (the bound promotion of a
 staged loop) lives here so the preprocessor's executors share it.
 """

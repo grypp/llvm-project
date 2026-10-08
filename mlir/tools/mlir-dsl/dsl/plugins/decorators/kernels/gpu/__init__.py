@@ -421,7 +421,7 @@ class Kernels(KernelsPlugin):
         log().debug("gpu.func @%s(%s)", name, ", ".join(map(str, arg_types)))
         return fop, fop.add_entry_block()
 
-    def generate_return(self, op: Any, loc: Any = None) -> None:
+    def generate_return(self, op: Any, values: list[Any], loc: Any = None) -> None:
         """Terminate the kernel body with a ``gpu.return``."""
         gpu.ReturnOp([], loc=loc)
 

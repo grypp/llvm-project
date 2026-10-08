@@ -29,10 +29,10 @@ __all__ = [
     "DSLUserCodeTypeError",
     "DSLWarning",
     "report_warning",
-    "active_env_manager",
     "get_current_env_manager",
     "active_dsl",
     "get_current_dsl",
+    "in_trace",
 ]
 
 
@@ -40,59 +40,51 @@ __all__ = [
 # Active DSL / environment manager
 # =============================================================================
 
-_active_env_manager: contextvars.ContextVar[Any] = contextvars.ContextVar(
-    "active_env_manager", default=None
-)
-
+# The DSL whose decorated function is running on this thread, or None. One
+# variable answers every question the core asks about "now": whose types emit
+# (``get_current_dsl``), whose settings the helpers read
+# (``get_current_env_manager``) and whether a call of another decorated
+# function lands inside an open trace (``in_trace``). ``BaseDSL.run`` sets it
+# for a call from Python; nothing is set outside one.
 _active_dsl: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "active_dsl", default=None
 )
 
 
-def get_current_env_manager() -> Any:
-    """Return the env manager for the active DSL context, if any.
-
-    Some shared helpers do not have direct access to a ``BaseDSL`` instance.
-    Use the active context so those helpers observe the DSL that is currently
-    preprocessing/tracing.
-    """
-    return _active_env_manager.get()
-
-
-@contextlib.contextmanager
-def active_env_manager(env_manager: Any) -> Generator[None, None, None]:
-    """Temporarily make ``env_manager`` the current DSL env manager."""
-    token = _active_env_manager.set(env_manager)
-    try:
-        yield
-    except Exception as e:
-        try:
-            if not hasattr(e, "_dsl_env_manager"):
-                setattr(e, "_dsl_env_manager", env_manager)
-        except (AttributeError, TypeError):
-            pass
-        raise
-    finally:
-        _active_env_manager.reset(token)
-
-
 def get_current_dsl() -> Any:
-    """Return the ``BaseDSL`` instance that is currently tracing, or ``None``.
-
-    Outside a trace every consumer falls back to its plain-Python default
-    (``builtins.range``, the literal promotion rules, ...).
-    """
+    """The DSL currently running a decorated function, or ``None`` outside
+    one; outside, every consumer falls back to its plain-Python default
+    (``builtins.range``, the literal promotion rules, ...)."""
     return _active_dsl.get()
+
+
+def get_current_env_manager() -> Any:
+    """The settings (``envar``) of the current DSL, or ``None`` outside one."""
+    return getattr(_active_dsl.get(), "envar", None)
+
+
+def in_trace() -> bool:
+    """Whether a decorated function is being traced on this thread, so that a
+    call of another one is a ``launch`` into that trace, not a ``call`` from
+    Python (``DecoratorPlugin``)."""
+    return _active_dsl.get() is not None
 
 
 @contextlib.contextmanager
 def active_dsl(dsl: Any) -> Generator[None, None, None]:
-    """Temporarily make ``dsl`` the current DSL and its ``envar`` the current
-    env manager."""
+    """Make ``dsl`` the current DSL for the block. An error leaving the block
+    carries the DSL's settings, so its rendering names the right environment
+    prefix (``<PREFIX>_SHOW_STACKTRACE=1``)."""
     token = _active_dsl.set(dsl)
     try:
-        with active_env_manager(getattr(dsl, "envar", None)):
-            yield
+        yield
+    except Exception as e:
+        if not hasattr(e, "_dsl_env_manager"):
+            try:
+                setattr(e, "_dsl_env_manager", getattr(dsl, "envar", None))
+            except (AttributeError, TypeError):
+                pass
+        raise
     finally:
         _active_dsl.reset(token)
 

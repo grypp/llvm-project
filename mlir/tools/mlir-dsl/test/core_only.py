@@ -50,11 +50,13 @@ assert "mlir.dialects.gpu" not in sys.modules
 # CHECK: loaded mlir.execution_engine: False
 # CHECK: loaded mlir.passmanager: False
 
-# The plugins a CPU-only DSL needs, imported only now (numpy arrays are an
-# adapter plugin's, like torch tensors; the core adapts no host buffer).
-from mlir.dsl.plugins.adapters.numpy import NumpyPlugin
+# The plugins a CPU-only DSL needs, imported only now (`@jit` itself is the
+# `func.Jit` decorator plugin; numpy arrays arrive through the dlpack adapter
+# plugin like any DLPack tensor; the core adapts no host buffer and knows no
+# decorator).
+from mlir.dsl.plugins.adapters.dlpack import DlpackPlugin
 from mlir.dsl.plugins.compiler import execution_engine
-from mlir.dsl.plugins.func_entry import func
+from mlir.dsl.plugins.decorators.jit import func
 from mlir.dsl.plugins.type_ops import arith, llvm, vector
 from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps
 
@@ -62,9 +64,9 @@ from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps
 class CpuOnlyDSL(BaseDSL):
     plugins = Plugins(
         type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),
-        func_entry=func.Entry(),
         compiler=execution_engine.Compiler(),
-        adapters=[NumpyPlugin()],
+        decorators=[func.Jit()],
+        adapters=[DlpackPlugin()],
     )
 
     def pipeline(self):
@@ -79,11 +81,7 @@ class CpuOnlyDSL(BaseDSL):
         ]
 
     def __init__(self):
-        super().__init__(
-            name="MLIR_DSL",
-            dsl_package_name=["mlir", "dsl"],
-            preprocess=False,
-        )
+        super().__init__(name="MLIR_DSL")
 
 
 @CpuOnlyDSL.jit
@@ -104,7 +102,7 @@ def scale_store(a: Int32, out: Pointer[Float32]) -> Int32:
 # CHECK-NOT:     gpu.
 # CHECK-NOT:     nvvm.
 # CHECK:         RESULT: ?
-# CHECK:         plugins: ['arith+vector+llvm', 'func', 'execution_engine', 'numpy'] {}
+# CHECK:         plugins: ['arith+vector+llvm', 'execution_engine', 'func', 'dlpack'] {}
 # CHECK:         pipeline: builtin.module(convert-scf-to-cf,convert-cf-to-llvm,convert-arith-to-llvm,convert-func-to-llvm,reconcile-unrealized-casts)
 # CHECK:         gpu bindings loaded: False
 print("RESULT:", scale_store(3, np.zeros(4, np.float32)))

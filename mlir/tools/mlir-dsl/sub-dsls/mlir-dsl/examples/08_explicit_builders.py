@@ -4,18 +4,19 @@
 
 """Explicit scf builders: the loops and branches of 03, written by hand.
 
-With `@m.jit(preprocess=False)` nothing rewrites the Python source: `for_`,
-`yield_`, `if_` and `while_` build `scf.for`, `scf.if` and `scf.while`
-directly, and loop carries are threaded by hand. These builders are the
-modular layer the preprocessor targets when it rewrites native `for`/`if`/
-`while`, and a sub-DSL may use them directly. Each function carries its
-native equivalent in a comment.
+`for_`, `yield_`, `if_` and `while_` build `scf.for`, `scf.if` and `scf.while`
+directly, and loop carries are threaded by hand. They need no AST rewrite and
+do not mind one: a `for` over a builder generator is left to Python. These
+builders are the modular layer the preprocessor targets when it rewrites
+native `for`/`if`/`while`, and a DSL without an `ast_preprocessor` plugin uses
+them as its control flow. Each function carries its native equivalent in a
+comment.
 """
 
 import mlir.mlir_dsl as m
 
 
-@m.jit(preprocess=False)
+@m.jit
 def sum_of_squares(n: m.Int32) -> m.Int32:
     # Native form:  acc = m.Int32(0)
     #               for i in range(n): acc = acc + i * i
@@ -28,7 +29,7 @@ def sum_of_squares(n: m.Int32) -> m.Int32:
     return acc_out
 
 
-@m.jit(preprocess=False)
+@m.jit
 def clamp(x: m.Int32, lo: m.Int32, hi: m.Int32) -> m.Int32:
     # Native form:  y = lo if x < lo else x
     #               return hi if y > hi else y
@@ -39,7 +40,7 @@ def clamp(x: m.Int32, lo: m.Int32, hi: m.Int32) -> m.Int32:
     return m.if_(y > hi, lambda: hi, lambda: y, return_types=[m.Int32])
 
 
-@m.jit(preprocess=False)
+@m.jit
 def ceil_log2(n: m.Int32) -> m.Int32:
     # Native form:  p, k = m.Int32(1), m.Int32(0)
     #               while p < n: p, k = p * 2, k + 1

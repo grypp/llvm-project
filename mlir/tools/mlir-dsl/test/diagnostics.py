@@ -22,7 +22,7 @@ from mlir.dsl.core.common import (
     DSLUserCodeRuntimeError,
     DSLUserCodeTypeError,
     DSLWarning,
-    active_env_manager,
+    active_dsl,
     report_warning,
 )
 from mlir.dsl.core.diagnostics import (
@@ -388,14 +388,21 @@ report(lambda: check_arch("foo", var="MY_DSL_ARCH"))
 
 # --- DSLRuntimeError: the internal-error envelope ---------------------------
 print(str(DSLRuntimeError("Leaf registry has no entry for i7")))
+
+
 # CHECK:      error[INTERNAL]:{{.*}} The compiler hit an internal DSL problem while compiling your code.
 # CHECK-NEXT: note:{{.*}}This is a bug in the DSL, not a mistake in your kernel.
 # CHECK-NEXT: error:{{.*}}Leaf registry has no entry for i7
 # CHECK-NEXT: suggestion:{{.*}}Please report this with the snippet above and your kernel.
 # CHECK-NEXT: suggestion:{{.*}}Re-run with MLIR_DSL_SHOW_STACKTRACE=1 to include the full technical detail.
-# Raised while a DSL's env manager is active: the hint names that prefix.
+# Raised while a DSL is active: the hint names that DSL's prefix.
+class MyPrefixDSL(m.BaseDSL):
+    def __init__(self):
+        super().__init__(name="MY_DSL")
+
+
 try:
-    with active_env_manager(EnvironmentVarManager("MY_DSL")):
+    with active_dsl(MyPrefixDSL()):
         raise DSLRuntimeError("boom")
 except DSLRuntimeError as err:
     print(str(err))

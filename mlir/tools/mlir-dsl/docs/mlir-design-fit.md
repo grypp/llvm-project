@@ -117,8 +117,9 @@ Decided or already done (2026-10-07):
   pass list, `MlirTestDSL.pipeline()` prepends the gpu pipeline when an
   architecture is set; the `scf` dialect plugin is gone.
 - [x] Replace role discovery through the plugin list by typed plugins in one
-  `Plugins` record on the DSL class: the roles (`type_ops`, `func_entry`,
-  `ast_preprocessor`, `compiler`), one plugin each, and the families
+  `Plugins` record on the DSL class: the roles (`type_ops`,
+  `ast_preprocessor`, `compiler`; `func_entry` was a role until `@jit` became
+  the `func.Jit` decorator plugin), one plugin each, and the families
   (`decorators`, `adapters`), any number each; `Plugin` keeps the
   shared lifecycle only, each role or family adds its contract, and each hook
   of the core lives on exactly one of them. A dialect the DSL only emits ops
@@ -129,7 +130,7 @@ Decided or already done (2026-10-07):
   `__init_subclass__`; the shared services `bind_arguments` and `trace_body`
   and the hooks `before_trace`, `after_trace`, `check_arguments`,
   `finish_compiled_function` are what a decorator needs from the core.
-- [x] Typed plugin families replace the untyped extras: `pytorch`, `dlpack` and
+- [x] Typed plugin families replace the untyped extras: `dlpack` and
   `tvm_ffi` are adapters (the host boundary, inbound `register` and outbound
   `attach_to_module`/`wrap_compiled_function`), `gpu.Kernels` is a decorator
   plugin.
@@ -170,8 +171,9 @@ Product layer:
   plugin catalogs classify their own codes (`diagnostics.classify`), the core
   names none of them.
 - [ ] Gate colour on `isatty` and `NO_COLOR`.
-- [x] numpy is an adapter plugin (`plugins/adapters/numpy`, the shape of the
-  pytorch one); the core registers no host buffer type. `ARCH` is documented
+- [x] The core registers no host buffer type; the one inbound adapter is
+  `dlpack` (numpy arrays and torch tensors speak DLPack), the separate numpy
+  and pytorch adapters are gone. `ARCH` is documented
   as a target setting the plugins interpret.
 - [x] An IR-only DSL (no compiler plugin) has its own test, `test/core_ir_only.py`.
 - [ ] Allow explicit DSL instances next to the per-class default.

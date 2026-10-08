@@ -7,10 +7,9 @@
 ``BaseDSL`` adapts every argument when it builds the trace and the JIT
 executor does it again on every call, both through ``JitArgAdapterRegistry``:
 tuples and lists element-wise, frozen records through
-``DefaultDataclassAdapter``; host buffers are the adapter plugins' (``numpy``,
-``pytorch``, ``dlpack`` register ``numpy.ndarray``, ``torch.Tensor`` and the
-DLPack protocol as ``Pointer`` values), the core registers no host buffer type
-of its own. Adapters are keyed
+``DefaultDataclassAdapter``; host buffers are the adapter plugins' (``dlpack``
+registers the DLPack protocol, which numpy arrays and torch tensors speak, as
+``Pointer`` values), the core registers no host buffer type of its own. Adapters are keyed
 by type, per scope, lazily by qualified type name, or by protocol;
 ``register_jit_arg_adapter`` is the user-facing extension point.
 ``adapt_pointer_address`` is the annotation-driven step for ``Pointer[T]``

@@ -10,7 +10,7 @@ record on the class. The base owns what is the same for every DSL: the
 ``@jit`` decorator and the decorator machinery plugins build on
 (:meth:`BaseDSL.make_decorator`, :meth:`BaseDSL.jit_runner`), the AST
 preprocessor run, the host argument boundary, tracing the body into the entry
-the ``func_entry`` plugin builds, the pass pipeline, the in-memory and on-disk
+the decorator plugin builds, the pass pipeline, the in-memory and on-disk
 compile caches and the invocation through the ``compiler`` plugin, and the
 services a decorator plugin traces with (:meth:`BaseDSL.bind_arguments`,
 :meth:`BaseDSL.trace_body`).
@@ -34,7 +34,7 @@ from ... import ir
 from ..core.common import DSLBaseError, DSLRuntimeError, DSLUserCodeError, active_dsl
 from ..core.diagnostics import DiagId
 from ..core.env_manager import EnvironmentVarManager
-from .plugin import FuncEntryPlugin, Plugins, _NoRemarkSession
+from .plugin import DecoratorPlugin, Plugins, _NoRemarkSession
 from ..types import typing as t
 from ..util import profiler
 from ..util.profiler import timer
@@ -125,6 +125,29 @@ class DSLSingletonMeta(type):
         if cls in cls._instances:
             del cls._instances[cls]
 
+    def __getattr__(cls, name: str) -> Any:
+        """A missing public class attribute is usually a decorator the record
+        does not provide (``@MyDSL.jit`` on a record without ``func.Jit()``):
+        say so, as an ``AttributeError`` so ``getattr`` defaults still work."""
+        if name.startswith("_"):
+            raise AttributeError(name)
+        record = cls.__dict__.get("plugins")
+        for klass in cls.__mro__[1:]:
+            if record is not None:
+                break
+            record = klass.__dict__.get("plugins")
+        names = sorted(p.decorator_name for p in getattr(record, "decorators", ()))
+        have = (
+            f"its decorators are {names}"
+            if names
+            else "its record names no decorator plugin"
+        )
+        raise AttributeError(
+            f"`{cls.__name__}` has no attribute `{name}`; {have}. A decorator "
+            "comes from a `DecoratorPlugin` in the record, e.g. "
+            "`plugins = Plugins(..., decorators=[func.Jit()])` for `@jit`."
+        )
+
 
 @dataclass(frozen=True)
 class DSLLocation:
@@ -156,12 +179,13 @@ class JitFuncArgs:
 @dataclass(frozen=True)
 class _ResultSpec:
     """How the result of a compiled function maps back to Python: the flattened
-    shape of the traced return and the host-side slot descriptor the
-    ``func_entry`` plugin built for it, opaque to the core (the shipped
-    ``func.Entry`` uses a ``ctypes`` type)."""
+    shape of the traced return, the host-side slot descriptor the decorator
+    plugin built for it (opaque to the core; the shipped ``func.Jit`` uses a
+    ``ctypes`` type) and that plugin, which reads the slot back."""
 
     treedef: Any
     slot: Any
+    entry: Any
 
 
 class _PluginDecorator:
@@ -209,10 +233,10 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
     The class attributes below are the sub-DSL knobs; the instance attributes
     set in ``__init__`` are the per-DSL state (environment manager, caches,
-    executors, installed plugins). ``@MyDSL.jit`` is the core's decorator;
-    the decorators a DSL's plugins add (``@MyDSL.kernel``) are installed on
-    the class by ``__init_subclass__``. All dispatch through :meth:`jit_runner`
-    to their launcher (``_func`` for ``@jit``).
+    executors, installed plugins). Every decorator, ``@MyDSL.jit`` included,
+    comes from a decorator plugin of the record and is installed on the class
+    by ``__init_subclass__``; all dispatch through :meth:`jit_runner` to the
+    plugin's ``call`` (from Python) or ``launch`` (inside a trace).
     """
 
     _env_class: type[EnvironmentVarManager] = EnvironmentVarManager
@@ -220,7 +244,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     # Optional compiler-recognized component inserted by a DSL's name mangler.
     _name_mangling_prefix: ClassVar[str] = ""
     #: What the DSL is made of: one plugin per role (``type_ops``,
-    #: ``func_entry``, ``ast_preprocessor``, ``compiler``) and
+    #: ``ast_preprocessor``, ``compiler``) and
     #: the families (``decorators``, ``adapters``). ``__init__``
     #: resolves the record once per
     #: instance: a plugin whose ``available()`` is False is dropped (and listed
@@ -237,8 +261,25 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         if isinstance(record, Plugins):
             for plugin in record.decorators:
                 for name, decorator in plugin.decorators(cls).items():
-                    if name not in cls.__dict__:
-                        setattr(cls, name, decorator)
+                    if name in cls.__dict__:
+                        continue  # the class defines its own on purpose
+                    inherited = next(
+                        (
+                            k.__dict__[name]
+                            for k in cls.__mro__[1:]
+                            if name in k.__dict__
+                        ),
+                        None,
+                    )
+                    if inherited is not None and not isinstance(
+                        inherited, _PluginDecorator
+                    ):
+                        raise DSLRuntimeError(
+                            f"`{type(plugin).__name__}` adds a decorator `@{name}`, but "
+                            f"`{name}` is already a `BaseDSL` attribute; pick another "
+                            "`decorator_name`"
+                        )
+                    setattr(cls, name, decorator)
 
     def _remark_session(self, context: ir.Context) -> Any:
         """The compiler plugin's remark session for ``context`` under the
@@ -259,38 +300,37 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         *,
         name: str,
         dsl_package_name: list[str] | None = None,
-        preprocess: bool = False,
     ) -> None:
         """
         Initialize the DSL with its providers and environment settings.
 
         :param name: Name of the DSL; the environment variable prefix
             (``<name>_DRYRUN``, ...) and the logging label
-        :param dsl_package_name: The DSL's package path, used by the
-            preprocessor to recognise its own symbols; required only with
-            ``preprocess=True``
-        :param preprocess: Enable the AST preprocessor
+        :param dsl_package_name: The package the AST rewrite imports
+            ``and_``/``or_``/``not_``/``as_ir_value`` from, as path parts; None
+            means the ``ast_preprocessor`` plugin's own package. Only a DSL
+            that re-exports those helpers under its own namespace names it.
 
         Reads the environment through ``EnvironmentVarManager``, configures
         warnings and logging, and installs the class's ``plugins`` record last,
-        so the subclass's own ``__init__`` still runs after them and wins.
+        so the subclass's own ``__init__`` still runs after them and wins. The
+        DSL rewrites native control flow exactly when its record names an
+        ``ast_preprocessor`` plugin with a preprocessor (and
+        ``<PREFIX>_AST_PREPROCESSOR`` is not 0); there is no other switch.
         """
         # Enforcing initialization of instance variables
         if not name:
             raise DSLRuntimeError("a DSL needs a name: its environment prefix")
-        if preprocess and not dsl_package_name:
-            raise DSLRuntimeError(
-                "a DSL that preprocesses (preprocess=True) needs `dsl_package_name`, "
-                "the package the rewrite imports its helpers from"
-            )
 
         self.name: str = name
         self.decorator_location: DSLLocation | None = None
         # Read environment variables
         self.envar: EnvironmentVarManager = self._create_environment_manager()
-        self.enable_preprocessor: bool = preprocess and bool(
-            self.envar.ast_preprocessor
-        )
+        # Set once the plugins are installed: True exactly when the record
+        # names an ``ast_preprocessor`` plugin with a preprocessor and the
+        # environment does not turn the rewrite off.
+        self.enable_preprocessor: bool = False
+        self.preprocessor: Any = None
         # This cache uses hash of original ir and env as key. Enabled by default
         self.jit_cache: JitCacheDict = JitCacheDict(
             max_elems=0 if self.envar.no_cache else self.envar.jit_cache_max_elems
@@ -326,22 +366,17 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             plugin.install(self)
         for adapter in self.plugins.adapters:
             adapter.register(self)
-        # The AST preprocessor supplies the executors and the preprocessor.
+        # The AST preprocessor supplies the executors and the preprocessor;
+        # naming it is what turns the rewrite on.
         ast_preprocessor = self.plugins.ast_preprocessor
         if ast_preprocessor is not None:
             self.executor.set_functions(**ast_preprocessor.executors(self))
-        if preprocess:
-            if ast_preprocessor is None or ast_preprocessor.preprocessor_class is None:
-                raise DSLRuntimeError(
-                    "the DSL preprocesses (preprocess=True) but names no "
-                    "`ast_preprocessor` plugin with a preprocessor; name one such as "
-                    "`plugins = Plugins(ast_preprocessor=scf.ASTPreprocessor())`",
-                    context={"dsl": name, **self._unavailable_context()},
+            if ast_preprocessor.preprocessor_class is not None:
+                self.preprocessor = ast_preprocessor.preprocessor_class(
+                    dsl_package_name or ast_preprocessor.helpers_package(),
+                    closure_check=ast_preprocessor.closure_check,
                 )
-            self.preprocessor: Any = ast_preprocessor.preprocessor_class(
-                dsl_package_name,
-                closure_check=ast_preprocessor.closure_check,
-            )
+                self.enable_preprocessor = bool(self.envar.ast_preprocessor)
 
     @property
     def _compiler(self) -> Any:
@@ -354,17 +389,6 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 context={"dsl": self.name, **self._unavailable_context()},
             )
         return compiler
-
-    def _func_entry(self) -> FuncEntryPlugin:
-        """The DSL's ``func_entry`` plugin, building the host entry of ``@jit``."""
-        entry = self.plugins.func_entry
-        if entry is None:
-            raise DSLRuntimeError(
-                "this DSL builds no host entry for `@jit`: name a `func_entry` "
-                "plugin, e.g. `plugins = Plugins(func_entry=func.Entry())`",
-                context={"dsl": self.name, **self._unavailable_context()},
-            )
-        return entry
 
     def _unavailable_context(self) -> dict[str, Any]:
         """The plugins the class named but ``available()`` rejected, for a
@@ -399,12 +423,6 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     # =========================================================================
 
     @staticmethod
-    def _can_preprocess(**decorator_kwargs: Any) -> bool:
-        """Whether the decorator keywords ask for the AST rewrite (``preprocess=``,
-        True by default)."""
-        return decorator_kwargs.pop("preprocess", True)
-
-    @staticmethod
     def _lazy_initialize_dsl(func: Any) -> None:
         """
         Lazy initialization of DSL object if has not been initialized
@@ -423,11 +441,6 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         # Update the decorator location to the new function
         func._dsl_object.decorator_location = func._decorator_location
 
-        # Keep "already preprocessed" separate from "preprocessing is disabled".
-        # The latter is a hard opt-out.
-        if getattr(func, "_preprocess_enabled", True) is False:
-            func._preprocessed = True
-            return
         if getattr(func, "_preprocessed", False) is True:
             return
         if not func._dsl_object.enable_preprocessor:
@@ -452,11 +465,12 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         **decorator_kwargs: Any,
     ) -> Any:
         """
-        The decorator machinery shared by ``@jit`` and the decorators plugins
-        add: validate the target, record the preprocessing choice, and wrap the
-        function so that a call materialises the DSL instance, preprocesses
-        the function once and hands the call to ``on_call(dsl, func, *args,
-        **kwargs)`` with the DSL active.
+        The decorator machinery shared by every decorator a plugin adds
+        (``@jit`` included): validate the target and wrap the function so that
+        a call materialises the DSL instance, rewrites the function once (when
+        the DSL preprocesses) and hands the call to ``on_call(dsl, func,
+        *args, **kwargs)``, the plugin's dispatch, with the DSL active. The
+        decorators take no options.
 
         ``location`` is the user's call site, already resolved to a value by
         the caller via :meth:`get_location_from_frame`: the returned decorator
@@ -472,29 +486,25 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                     decorator=f"@{decorator_kind}",
                     got=f"a `{type(func).__name__}`",
                 )
-            unknown = sorted(set(decorator_kwargs) - {"preprocess"})
-            if unknown:
+            if decorator_kwargs:
+                unknown = sorted(decorator_kwargs)
                 raise DSLUserCodeError(
                     DiagId.CALL_ARGUMENTS,
                     function_name=f"@{decorator_kind}",
                     detail=f"no option is named `{unknown[0]}`",
                 )
-            # Run preprocessor that alters AST
-            preprocess_enabled = BaseDSL._can_preprocess(**decorator_kwargs)
             func._dsl_cls = cls
             # The decorator the function carries ("jit", "kernel", ...).
             func._decorator_kind = decorator_kind
             func._decorator_location = location
-            func._preprocess_enabled = preprocess_enabled
-            if not hasattr(func, "_preprocessed") and not preprocess_enabled:
-                func._preprocessed = True
 
             @wraps(func)
             def jit_wrapper(*args: Any, **kwargs: Any) -> Any:
                 BaseDSL._preprocess_and_replace_code(func)
-
-                with active_dsl(func._dsl_object):
-                    return on_call(func._dsl_object, func, *args, **kwargs)
+                # No DSL is made active here: the plugin's dispatch reads the
+                # current one to tell a call from Python (none active; ``run``
+                # then activates this DSL) from a call inside a trace.
+                return on_call(func._dsl_object, func, *args, **kwargs)
 
             return jit_wrapper
 
@@ -504,37 +514,15 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             return jit_runner_decorator
 
     @classmethod
-    def jit(cls, *decorator_args: Any, **decorator_kwargs: Any) -> Any:
-        """
-        Decorator to mark a function for JIT compilation for Host code.
-
-        Used bare (``@jit``) or with keywords (``@jit(preprocess=False)``);
-        every call of the decorated function traces, compiles (cached) and
-        runs it.
-        """
-        return BaseDSL.jit_runner(
-            cls,
-            "jit",
-            BaseDSL._func,
-            BaseDSL.get_location_from_frame(
-                inspect.currentframe().f_back  # type: ignore[union-attr]
-            ),
-            *decorator_args,
-            **decorator_kwargs,
-        )
-
-    @classmethod
     def make_decorator(cls, kind: str, on_call: Callable[..., Any]) -> Any:
         """The decorator ``@<DSL>.<kind>`` a plugin adds through ``decorators``.
 
-        It behaves like ``@jit`` (bare or with keywords, preprocessing, the
-        lazy DSL instance); a call of the decorated function runs
-        ``on_call(dsl, func, *args, **kwargs)``, the plugin's launcher, with the
-        DSL active. Like ``jit`` (a classmethod) it binds the class it is
-        accessed on, so ``@Variant.kernel`` on a subclass traces into the
-        variant's instance, not the defining class's. ``@jit`` itself is the
-        core's; everything else a DSL decorates with comes from a plugin this
-        way.
+        Bare or as ``@kind()``, with the AST rewrite and the lazy DSL
+        instance; a call of the decorated function runs ``on_call(dsl, func,
+        *args, **kwargs)``, the plugin's dispatch, with the DSL active. It
+        binds the class it is accessed on, so ``@Variant.kernel`` on a subclass
+        traces into the variant's instance, not the defining class's. Every
+        decorator a DSL has, ``@jit`` included, comes from a plugin this way.
         """
         return _PluginDecorator(kind, on_call)
 
@@ -1317,13 +1305,12 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     # =========================================================================
 
     def _return_values(
-        self, entry: FuncEntryPlugin, result: Any, sig: inspect.Signature, loc: Any
+        self, entry: DecoratorPlugin, result: Any, sig: inspect.Signature, loc: Any
     ) -> tuple[list[ir.Value], _ResultSpec | None]:
         """Turn the traced return value into what the entry returns.
         Numeric leaves and frozen records/tuples/``@struct``s of them are
-        accepted; the ``func_entry`` plugin's ``pack_results`` decides how the
-        leaves travel (the test DSL's ``func.Entry`` packs several into one
-        struct).
+        accepted; the decorator plugin's ``pack_results`` decides how the
+        leaves travel (the shipped ``func.Jit`` packs several into one struct).
         """
         if result is None:
             if sig.return_annotation not in (inspect.Signature.empty, None):
@@ -1362,7 +1349,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         ret_values, slot = entry.pack_results(
             values, [leaf.prototype for leaf in leaves], loc=loc
         )
-        return ret_values, _ResultSpec(treedef, slot)
+        return ret_values, _ResultSpec(treedef, slot, entry)
 
     def _result_from_ctypes(self, spec: _ResultSpec, raw: Any) -> Any:
         """Rebuild the Python return value from the filled result slot."""
@@ -1372,7 +1359,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             if not leaf.is_none and not leaf.is_meta
         ]
         values = iter(
-            self._func_entry().unpack_result(
+            spec.entry.unpack_result(
                 spec.slot, raw, [leaf.prototype for leaf in leaves]
             )
         )
@@ -1384,6 +1371,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
     def generate_original_ir(
         self,
+        entry: DecoratorPlugin,
         func: Callable[..., Any],
         function_name: str,
         func_types: list[Any],
@@ -1398,8 +1386,10 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         pipeline: str = "",
         extra_link_libs: tuple[str, ...] = (),
     ) -> tuple[ir.Module, str | None, Any, _ResultSpec | None]:
-        """Trace ``func`` into the host entry the ``func_entry`` plugin builds,
-        in a fresh module.
+        """Trace ``func`` into the op the decorator plugin ``entry`` builds, in
+        a fresh module. This runs with the DSL active (``run``), so a decorated
+        function called inside the body is launched into this trace, not
+        called.
 
         :return: The verified module, its hash (None under ``no_cache``), the
             trace's Python result and the result slot description
@@ -1415,10 +1405,9 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 for plugin in self.plugins.decorators:
                     plugin.before_trace(self, module, loc=loc, attrs=container_attrs)
 
-                # The host entry is the ``func_entry`` plugin's (``func.Entry``: a
+                # The entry is the decorator plugin's (``func.Jit``: a
                 # ``func.func`` with the C interface); its result types are set
                 # after the trace.
-                entry = self._func_entry()
                 func_op, entry_block, result = self.trace_body(
                     entry,
                     function_name,
@@ -1583,6 +1572,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
     def generate_mlir(
         self,
+        entry: DecoratorPlugin,
         func: Callable[..., Any],
         function_name: str,
         container_attrs: dict[str, Any],
@@ -1595,11 +1585,13 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         location: DSLLocation | None = None,
         extra_link_libs: tuple[str, ...] = (),
     ) -> Any:
-        """Trace ``func`` into an MLIR module, compile it through the
-        compiler plugin (or take the cached function) and run it.
+        """Trace ``func`` into the op the decorator plugin ``entry`` builds in
+        an MLIR module, compile it through the compiler plugin (or take the
+        cached function) and run it.
 
-        :return: The trace's Python result under ``<PREFIX>_DRYRUN``, the
-            compiled function under ``compile_only``, else the call's result
+        :return: The trace's Python result under ``<PREFIX>_DRYRUN`` or on a
+            DSL without a compiler, the compiled function under
+            ``compile_only``, else the call's result
         """
         # The remark session owns the context's remark engine for the whole
         # call, so trace-time remarks and the passes' remarks share one stream.
@@ -1640,6 +1632,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
                 # Generate original ir module and its hash value.
                 module, module_hash, result, result_spec = self.generate_original_ir(
+                    entry,
                     func,
                     function_name,
                     mlir_func_args.types,
@@ -1938,7 +1931,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         return signature.replace(parameters=new_params)
 
     # =========================================================================
-    # Host entry: @jit
+    # The call pipeline (DecoratorPlugin.call)
     # =========================================================================
 
     @dataclass
@@ -2018,36 +2011,44 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             location=self.decorator_location,
         )
 
-    def _func(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        """The ``@jit`` launcher (the ``on_call`` of the core decorator): one
+    def run(
+        self,
+        entry: DecoratorPlugin,
+        func: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """The pipeline of a call from Python (``DecoratorPlugin.call``): one
         call of the decorated ``func``, with the DSL already active.
 
         1. Translates the arguments (host buffers -> ``Pointer`` through the
            adapter plugins, ``float`` -> ``f32``, ...) and traces the body into
-           the host entry
-        2. Compiles and JITs the MLIR module (cached)
+           the op ``entry`` builds
+        2. Compiles and JITs the MLIR module through the compiler role (cached);
+           a DSL without one, or a dry run, returns the trace result here
         3. Invokes the compiled function and rebuilds its result
         """
-        if ir.Context.current is not None and ir.InsertionPoint.current is not None:
-            # A nested call inside a trace runs its (preprocessed) body inline.
-            return func(*args, **kwargs)
+        # The DSL is active for the whole call: its types emit, its settings
+        # are read, and a decorated function called inside the trace sees an
+        # open trace (``in_trace``) and is launched into it.
+        with active_dsl(self):
+            setup = self._prepare_compilation(func, *args, **kwargs)
 
-        setup = self._prepare_compilation(func, *args, **kwargs)
-
-        log().debug("Generating MLIR for function '%s'", setup.function_name)
-        return self.generate_mlir(
-            func,
-            setup.function_name,
-            setup.container_attrs,
-            setup.canonicalized_args,
-            setup.canonicalized_kwargs,
-            setup.sig,
-            setup.pipeline,
-            setup.no_cache,
-            setup.compile_only,
-            location=setup.location,
-            extra_link_libs=setup.extra_link_libs,
-        )
+            log().debug("Generating MLIR for function '%s'", setup.function_name)
+            return self.generate_mlir(
+                entry,
+                func,
+                setup.function_name,
+                setup.container_attrs,
+                setup.canonicalized_args,
+                setup.canonicalized_kwargs,
+                setup.sig,
+                setup.pipeline,
+                setup.no_cache,
+                setup.compile_only,
+                location=setup.location,
+                extra_link_libs=setup.extra_link_libs,
+            )
 
     # =========================================================================
     # Services for the decorators plugins add
@@ -2104,9 +2105,10 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     ) -> tuple[Any, ir.Block, Any]:
         """Build the function op ``entry`` describes and trace ``func`` into it.
 
-        ``entry`` is anything with the entry protocol's ``generate_func_op(name,
-        arg_types, arg_attrs, loc) -> (op, entry_block)``: the ``func_entry``
-        plugin for ``@jit``, a kernels plugin for ``@kernel``. The body runs
+        ``entry`` is the decorator plugin whose function is traced, through
+        its ``generate_func_op(name, arg_types, arg_attrs, loc) -> (op,
+        entry_block)``: ``func.Jit`` for ``@jit``, a kernels plugin for
+        ``@kernel``. The body runs
         with the insertion point in the entry block and the block arguments
         bound to the Python parameters; the caller appends the terminator.
 

@@ -20,7 +20,7 @@ import numpy as np
 import mlir.mlir_dsl as m
 from mlir import ir
 from mlir.dsl.plugins.compiler import execution_engine
-from mlir.dsl.plugins.func_entry import func
+from mlir.dsl.plugins.decorators.jit import func
 from mlir.dsl.plugins.type_ops import arith, llvm, vector
 from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps
 
@@ -40,9 +40,10 @@ def report(label, fn, *args, **kwargs):
 
 # --- the decorators and the singleton ---------------------------------------
 # The bare and the parenthesised forms; a `@jit` function called inside a
-# trace is inlined (one entry, no `llvm.call`); `preprocess=False` is a hard
-# opt-out that leaves the code object alone. One DSL instance per concrete
-# subclass, `BaseDSL()` is the first one made.
+# trace is inlined (one entry, no `llvm.call`); a DSL that names no
+# `ast_preprocessor` plugin leaves the code object alone (the rewrite has no
+# per-function switch). One DSL instance per concrete subclass, `BaseDSL()`
+# is the first one made.
 @m.jit
 def helper(a: m.Int32) -> m.Int32:
     return a * 3
@@ -53,7 +54,11 @@ def outer(n: m.Int32) -> m.Int32:
     return helper(n) + 1
 
 
-@m.jit(preprocess=False)
+class NoRewriteDSL(m.MlirTestDSL):
+    plugins = dataclasses.replace(m.MlirTestDSL.plugins, ast_preprocessor=None)
+
+
+@NoRewriteDSL.jit
 def plus_two(n: m.Int32) -> m.Int32:
     return n + 2
 
@@ -84,7 +89,7 @@ print(
 # Only a plain Python function can be decorated; `@kernel` is inherited from
 # MlirTestDSL, but using it needs the kernels decorator plugin in the record.
 class CpuOnlyDSL(m.MlirTestDSL):
-    plugins = dataclasses.replace(m.MlirTestDSL.plugins, decorators=())
+    plugins = dataclasses.replace(m.MlirTestDSL.plugins, decorators=[func.Jit()])
 
 
 @CpuOnlyDSL.kernel
@@ -98,6 +103,27 @@ print(str(report("CPU_KERNEL", cpu_kernel, 1)))
 # CHECK-NEXT: CPU_KERNEL ERROR: CALL_PLUGIN_REQUIRED
 # CHECK:      error[CALL_PLUGIN_REQUIRED]:{{.*}}`@kernel` needs the `Kernels` plugin, which this DSL does not name.
 # CHECK:      suggestion:{{.*}}Name it: `plugins = Plugins(..., decorators=[Kernels()])`.
+
+
+# The record owns the decorators: a record without a decorator plugin has no
+# such attribute at all (an AttributeError that names the fix), two plugins
+# cannot add the same decorator, and `without` drops a family member by name.
+class NoDecorators(m.BaseDSL):
+    plugins = m.Plugins(type_ops=UpstreamDialectTypeOps(scalars=arith))
+
+
+try:
+    NoDecorators.jit
+except AttributeError as e:
+    print("NO_JIT:", str(e)[:78])
+try:
+    m.Plugins(decorators=[func.Jit(), func.Jit()])
+except m.DSLRuntimeError as e:
+    print("TWICE:", e.message)
+print("WITHOUT:", [p.name for p in m.MlirTestDSL.plugins.without("gpu").decorators])
+# CHECK: NO_JIT: `NoDecorators` has no attribute `jit`; its record names no decorator plugin
+# CHECK: TWICE: `Jit` and `Jit` both add the decorator `@jit`; a record has one plugin per decorator
+# CHECK: WITHOUT: ['func']
 
 
 # --- Meta specialisation and `mangle_name` -----------------------
@@ -229,19 +255,15 @@ print(str(report("CAST", scaled, "two", 3)))
 class StrictDSL(m.BaseDSL):
     plugins = m.Plugins(
         type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),
-        func_entry=func.Entry(),
         compiler=execution_engine.Compiler(),
+        decorators=[func.Jit()],
     )
 
     def pipeline(self):
         return list(m.LOWER_TO_LLVM)
 
     def __init__(self):
-        super().__init__(
-            name="MLIR_DSL",
-            dsl_package_name=["mlir", "dsl"],
-            preprocess=False,
-        )
+        super().__init__(name="MLIR_DSL")
 
 
 @StrictDSL.jit
@@ -372,7 +394,7 @@ if not dsl.envar.dryrun:
 
 
 # --- the host entry ------------------------------------------
-# The host entry is `func.Entry`'s `func.func` with `llvm.emit_c_interface`;
+# The host entry is `func.Jit`'s `func.func` with `llvm.emit_c_interface`;
 # `convert-func-to-llvm` lowers it right after the `cf` lowering (`core_only.py`
 # prints the pass list) and the packed `_mlir_<name>` wrapper calls it.
 @m.jit

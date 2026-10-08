@@ -9,6 +9,7 @@
 # and which are rejected; and the switch that turns the rewrite off. What the `scf` ops then
 # mean is the dialect's business and is not checked here.
 import contextlib
+from dataclasses import replace
 
 import numpy as np
 
@@ -32,10 +33,11 @@ class Pair:
 
 
 # --- The switch ------------------------------------------------
-# `MLIR_DSL_AST_PREPROCESSOR=0` turns the rewrite off for the whole process,
-# `@m.jit(preprocess=False)` for one function. Without it, native control flow
-# on a staged value fails in plain Python; Meta control flow and the explicit
-# builders work either way. The rest of this file needs the rewrite.
+# `MLIR_DSL_AST_PREPROCESSOR=0` turns the rewrite off for the whole process; a
+# DSL that names no `ast_preprocessor` plugin never rewrites. Without the
+# rewrite, native control flow on a staged value fails in plain Python; Meta
+# control flow and the explicit builders work either way. The rest of this
+# file needs the rewrite.
 PREPROCESSOR_ON = EnvironmentVarManager("MLIR_DSL").ast_preprocessor
 print("PREPROCESSOR:", PREPROCESSOR_ON, m.MlirTestDSL().enable_preprocessor)
 # CHECK: PREPROCESSOR: True True
@@ -55,7 +57,11 @@ def staged_loop(n: m.Int32) -> m.Int32:
 report(staged_loop, 10)
 
 
-@m.jit(preprocess=False)
+class NoRewriteDSL(m.MlirTestDSL):
+    plugins = replace(m.MlirTestDSL.plugins, ast_preprocessor=None)
+
+
+@NoRewriteDSL.jit
 def opted_out(n: m.Int32) -> m.Int32:
     r = m.Int32(0)
     if n > 3:

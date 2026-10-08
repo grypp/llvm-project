@@ -307,7 +307,7 @@ lib_twice = lib_namespace["lib_twice"]
 ir._globals.register_traceback_file_exclusion("<dsl-lib>")
 
 
-@m.jit(preprocess=False)
+@m.jit
 def located(a: m.Int32, x: m.Float32) -> m.Float32:
     b = a + 1
     print("LOC addi:", b.value.owner.location)
@@ -376,30 +376,30 @@ def no_loc_keyword(a):
     return a
 
 
-@m.jit(preprocess=False)
+@m.jit
 def malformed(a: m.Int32, x: m.Float32) -> m.Int32:
     return m.Int32(bad_addi(a.ir_value(), x.ir_value()))
 
 
-@m.jit(preprocess=False)
+@m.jit
 def malformed_opview(a: m.Int32, x: m.Float32) -> m.Int32:
     return m.Int32(bad_addi_op(a.ir_value(), x.ir_value()).result)
 
 
-@m.jit(preprocess=False)
+@m.jit
 def malformed_at_start(a: m.Int32, x: m.Float32) -> m.Int32:
     b = a + 1  # the block's tail op before the builder runs
     return m.Int32(bad_addi_at_start(a.ir_value(), x.ir_value())) + b
 
 
-@m.jit(preprocess=False)
+@m.jit
 def region_builder(a: m.Int32) -> m.Int32:
     with then_region((a > 0).ir_value()):  # the empty region is filled in here
         scf.YieldOp([])
     return a
 
 
-@m.jit(preprocess=False)
+@m.jit
 def missing_loc(a: m.Int32) -> m.Int32:
     return m.Int32(no_loc_keyword(a.ir_value()))
 

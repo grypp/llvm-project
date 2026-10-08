@@ -18,7 +18,8 @@ from mlir.dsl.plugins.type_ops import (
     llvm as dsl_llvm,
     vector as dsl_vector,
 )
-from mlir.dsl.plugins.adapters.numpy import NumpyPlugin
+from mlir.dsl.plugins.adapters.dlpack import DlpackPlugin
+from mlir.dsl.plugins.decorators.jit import func
 from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps
 
 
@@ -92,10 +93,10 @@ print(
     "TYPE_OPS:",
     type(base.plugins.type_ops).__name__,
     type(tile.plugins.type_ops).__name__,
-    type(tile.plugins.func_entry).__name__,
+    type(tile.plugins.named("func")).__name__,
 )
 print("PIPELINE:", tile._get_pipeline(None))
-# CHECK: TYPE_OPS: UpstreamDialectTypeOps RankZeroTensorTypeOps Entry
+# CHECK: TYPE_OPS: UpstreamDialectTypeOps RankZeroTensorTypeOps Jit
 # CHECK: PIPELINE: builtin.module(my-tile-lowering,reconcile-unrealized-casts)
 
 # The types answer through the active DSL's `type_ops` plugin: `mlir_type` and
@@ -145,8 +146,8 @@ class ScalarOnlyDSL(m.MlirTestDSL):
     plugins = replace(
         m.MlirTestDSL.plugins,
         type_ops=UpstreamDialectTypeOps(scalars=dsl_arith),
-        decorators=(),
-        adapters=[NumpyPlugin()],  # the array of `wants_pointer` still arrives
+        decorators=[func.Jit()],
+        adapters=[DlpackPlugin()],  # the array of `wants_pointer` still arrives
     )
 
 

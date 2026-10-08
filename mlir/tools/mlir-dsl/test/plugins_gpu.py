@@ -22,6 +22,7 @@ import numpy as np
 
 import mlir.mlir_dsl as m
 from mlir import ir
+from mlir.dsl.plugins.decorators.jit import func
 from mlir.dsl.plugins.decorators.kernels import gpu as g
 
 
@@ -76,7 +77,8 @@ class GpuDSL(m.MlirTestDSL):
     # The plugin named explicitly with its chip option; the record installs a
     # copy bound to the instance (NOARCH still builds it).
     plugins = replace(
-        m.MlirTestDSL.plugins, decorators=[g.Kernels(chip_option="cubin-chip")]
+        m.MlirTestDSL.plugins,
+        decorators=[func.Jit(), g.Kernels(chip_option="cubin-chip")],
     )
 
 
@@ -116,7 +118,7 @@ os.environ["MLIR_DSL_ARCH"] = "gfx90a"
 
 
 class BadArchDSL(m.MlirTestDSL):
-    plugins = replace(m.MlirTestDSL.plugins, decorators=[g.Kernels()])
+    plugins = replace(m.MlirTestDSL.plugins, decorators=[func.Jit(), g.Kernels()])
 
 
 report(BadArchDSL)
@@ -446,7 +448,9 @@ report(m.grid_dim)
 # A DSL without the plugin, one with it but no arch, and a sub-DSL's kernel entry
 # =============================================================================
 class CpuDSL(m.MlirTestDSL):
-    plugins = replace(m.MlirTestDSL.plugins, decorators=())  # no kernels plugin
+    plugins = replace(
+        m.MlirTestDSL.plugins, decorators=[func.Jit()]
+    )  # no kernels plugin
 
 
 @CpuDSL.kernel
@@ -491,7 +495,7 @@ class TaggedKernels(g.Kernels):
 
 
 class TaggedDSL(m.MlirTestDSL):
-    plugins = replace(m.MlirTestDSL.plugins, decorators=[TaggedKernels()])
+    plugins = replace(m.MlirTestDSL.plugins, decorators=[func.Jit(), TaggedKernels()])
 
 
 @TaggedDSL.kernel

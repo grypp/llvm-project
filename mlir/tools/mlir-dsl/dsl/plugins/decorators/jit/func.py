@@ -2,22 +2,26 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""The ``func`` entry plugin: a ``func.func`` with the C interface whose results
-travel back to the host in one ``!llvm.struct`` read through ``ctypes``."""
+"""The ``func`` jit plugin: ``@jit`` over a ``func.func`` with the C interface
+whose results travel back to the host in one ``!llvm.struct`` read through
+``ctypes``.
+
+The decorator, the call pipeline and the inline launch are
+``DecoratorPlugin``'s defaults; this plugin adds the entry protocol only."""
 
 from __future__ import annotations
 
 import ctypes
 from typing import Any
 
-from .... import ir
-from ....dialects import func, llvm
-from ...core.common import DSLUserCodeError
-from ...core.diagnostics import DiagId
-from ...core.plugin import FuncEntryPlugin
-from ...types import typing as _t
+from ..... import ir
+from .....dialects import func, llvm
+from ....core.common import DSLUserCodeError
+from ....core.diagnostics import DiagId
+from ....core.plugin import DecoratorPlugin
+from ....types import typing as _t
 
-__all__ = ["Entry"]
+__all__ = ["Jit"]
 
 
 def _float_from_bits(bits: int, exponent_width: int, mantissa_width: int) -> float:
@@ -67,12 +71,12 @@ def _scalar_from_ctypes(dtype: Any, raw: Any) -> Any:
     return dtype(value)
 
 
-class Entry(FuncEntryPlugin):
-    """``func.func`` with ``llvm.emit_c_interface``; several
+class Jit(DecoratorPlugin):
+    """``@jit`` over ``func.func`` with ``llvm.emit_c_interface``; several
     results are packed into one ``!llvm.struct`` and read back through a
     ``ctypes.Structure``. Stateless: ``generate_func_op`` returns the op and
     ``generate_return`` takes it back. A DSL over another dialect may reuse it
-    as its ``func_entry`` when its types are legal ``func`` operands."""
+    as its ``@jit`` when its types are legal ``func`` operands."""
 
     name = "func"
 
@@ -86,10 +90,10 @@ class Entry(FuncEntryPlugin):
         # Per-argument source locations.
         return fop, fop.add_entry_block(arg_locs=[loc for _ in arg_types])
 
-    def generate_return(self, func_op: Any, values: list[Any], loc: Any = None) -> None:
+    def generate_return(self, op: Any, values: list[Any], loc: Any = None) -> None:
         if values:
-            func_op.attributes["function_type"] = ir.TypeAttr.get(
-                ir.FunctionType.get(list(func_op.type.inputs), [v.type for v in values])
+            op.attributes["function_type"] = ir.TypeAttr.get(
+                ir.FunctionType.get(list(op.type.inputs), [v.type for v in values])
             )
         func.ReturnOp(list(values), loc=loc)
 

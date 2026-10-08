@@ -32,13 +32,8 @@ declare_mlir_python_sources(MLIRPythonSources.DSL
     dsl/plugins/compiler/execution_engine.py
     dsl/plugins/compiler/jit_executor.py
     dsl/plugins/adapters/__init__.py
-    dsl/plugins/adapters/numpy/__init__.py
-    dsl/plugins/adapters/numpy/plugin.py
     dsl/plugins/adapters/dlpack/__init__.py
     dsl/plugins/adapters/dlpack/plugin.py
-    dsl/plugins/adapters/pytorch/__init__.py
-    dsl/plugins/adapters/pytorch/dtypes.py
-    dsl/plugins/adapters/pytorch/plugin.py
     dsl/plugins/adapters/tvm_ffi/__init__.py
     dsl/plugins/adapters/tvm_ffi/call_provider.py
     dsl/plugins/adapters/tvm_ffi/diagnostics.py
@@ -46,9 +41,9 @@ declare_mlir_python_sources(MLIRPythonSources.DSL
     dsl/plugins/adapters/tvm_ffi/plugin.py
     dsl/plugins/adapters/tvm_ffi/spec.py
     dsl/plugins/adapters/tvm_ffi/tvm_ffi_builder.py
-    dsl/plugins/func_entry/__init__.py
-    dsl/plugins/func_entry/func.py
     dsl/plugins/decorators/__init__.py
+    dsl/plugins/decorators/jit/__init__.py
+    dsl/plugins/decorators/jit/func.py
     dsl/plugins/decorators/kernels/__init__.py
     dsl/plugins/decorators/kernels/gpu/__init__.py
     dsl/plugins/decorators/kernels/gpu/indices.py

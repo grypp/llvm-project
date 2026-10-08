@@ -4,7 +4,8 @@
 # The dlpack plugin: `DlpackTensor` reads a DLPack tensor's metadata through
 # the `_mlirDslDlpack` extension and the plugin's protocol adapter turns any
 # argument with `__dlpack__` into a contiguous `Pointer` of the matching dtype.
-# The objects below speak DLPack only, so the NumPy type adapter never sees them.
+# The objects below speak DLPack only; numpy arrays and torch tensors take the
+# same path, it is the one inbound adapter of the test DSL.
 import numpy as np
 
 import mlir.mlir_dsl as m

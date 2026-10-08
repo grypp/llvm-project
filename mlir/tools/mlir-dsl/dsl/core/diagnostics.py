@@ -86,7 +86,7 @@ _COMPILER_DIAG_TEXT_WIDTH = 100
 _COMPILER_CONTEXT_LINES = 2
 
 # The name of the environment prefix quoted in the internal-error envelope when
-# the error carries no env manager (``active_env_manager`` attaches one).
+# the error carries no env manager (``active_dsl`` attaches the DSL's).
 _DEFAULT_ENV_PREFIX = "MLIR_DSL"
 
 
@@ -1049,7 +1049,8 @@ class DiagId(DiagCatalog, enum.Enum):
         "which cannot be passed into compiled code{detail}.",
         (
             "Pass a DSL numeric such as `Int32`, a pointer, a host buffer one of the "
-            "DSL's adapter plugins accepts (a numpy array with the numpy plugin), or a "
+            "DSL's adapter plugins accepts (a numpy array or a torch tensor with the "
+            "dlpack plugin), or a "
             "tuple or frozen record of them for `{arg_name}`.",
             "To pass a custom class, register an adapter for it with "
             "`@register_jit_arg_adapter(YourClass)`.",

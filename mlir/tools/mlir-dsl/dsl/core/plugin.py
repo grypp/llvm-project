@@ -10,14 +10,15 @@ what it calls, and every plugin says where it connects by its base class:
 
 * the **roles**, one plugin each, which the core calls on its own behalf:
   ``type_ops`` (:class:`TypeOpsPlugin`, the MLIR types of the core dtypes and
-  the ops behind their operators), ``func_entry`` (:class:`FuncEntryPlugin`,
-  the host entry of a ``@jit`` function and its result slot),
-  ``ast_preprocessor`` (:class:`ASTPreprocessorPlugin`, the rewrite of native
-  control flow and the executors it calls) and ``compiler``
-  (:class:`CompilerPlugin`, the pipeline run, the engine, the invocation);
+  the ops behind their operators), ``ast_preprocessor``
+  (:class:`ASTPreprocessorPlugin`, the rewrite of native control flow and the
+  executors it calls) and ``compiler`` (:class:`CompilerPlugin`, the pipeline
+  run, the engine, the invocation);
 * the **families**, any number each, which extend the DSL at one fixed point:
-  ``decorators`` (:class:`DecoratorPlugin`: a decorator such as ``@kernel``
-  and its launcher, with hooks around every trace) and ``adapters``
+  ``decorators`` (:class:`DecoratorPlugin`: a kind of decorated function,
+  ``@jit`` or ``@kernel``: its decorator, the op it is traced into, what a call
+  from Python and a call inside a trace do, with hooks around every trace) and
+  ``adapters``
   (:class:`AdapterPlugin`: the host boundary in both directions, host objects
   becoming arguments and the compiled entry exposed through another ABI).
 
@@ -29,11 +30,10 @@ its plugins once, as a :class:`Plugins` record on the class::
     class MyDSL(BaseDSL):
         plugins = Plugins(
             type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),
-            func_entry=func.Entry(),
             ast_preprocessor=scf.ASTPreprocessor(),
             compiler=execution_engine.Compiler(),
-            decorators=[gpu.Kernels()],
-            adapters=[numpy.NumpyPlugin(), pytorch.PyTorchPlugin(), tvm_ffi.TvmFfiPlugin()],
+            decorators=[func.Jit(), gpu.Kernels()],
+            adapters=[dlpack.DlpackPlugin(), tvm_ffi.TvmFfiPlugin()],
         )
 
 ``BaseDSL.__init_subclass__`` installs the decorators of the record on the
@@ -43,7 +43,8 @@ is dropped and remembered in ``dsl.unavailable_plugins``, the others are
 copied and installed in record order (roles, then decorators, then
 adapters). A variant DSL is ``dataclasses.replace(Base.plugins,
 decorators=(), adapters=())``. The base names nothing: there is no default
-world in the core, and no decorator but ``@jit``.
+world in the core, and no decorator at all; ``@jit`` is the shipped
+``func.Jit`` plugin.
 """
 
 from __future__ import annotations
@@ -54,7 +55,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Sequence
 
 from ... import ir
-from .common import DSLRuntimeError
+from .common import DSLRuntimeError, DSLUserCodeError, in_trace
+from .diagnostics import DiagId
 from .mlir_op import OpEmitter
 
 if TYPE_CHECKING:
@@ -65,7 +67,6 @@ __all__ = [
     "AdapterPlugin",
     "CompilerPlugin",
     "DecoratorPlugin",
-    "FuncEntryPlugin",
     "Plugin",
     "Plugins",
     "TypeOpsPlugin",
@@ -147,52 +148,17 @@ class TypeOpsPlugin(Plugin, OpEmitter):
     role: ClassVar[str] = "type_ops"
 
 
-class FuncEntryPlugin(Plugin):
-    """The ``func_entry`` role: the host entry of a ``@jit`` function.
-
-    The core decides what is returned (the numeric leaves of the traced return
-    value); the plugin decides the function op, how several leaves travel back
-    to the host and how a raw slot value becomes each leaf's Python value. The
-    plugin is stateless: ``generate_func_op`` returns the op it built and
-    ``generate_return`` takes it back.
-    """
-
-    role: ClassVar[str] = "func_entry"
-
-    def generate_func_op(
-        self, name: str, arg_types: list[Any], arg_attrs: list[Any], loc: Any = None
-    ) -> tuple[Any, ir.Block]:
-        """Create the entry ``name`` with ``arg_types`` and no results; return
-        ``(func_op, entry_block)``."""
-        return self._unsupported("generate_func_op")
-
-    def generate_return(self, func_op: Any, values: list[Any], loc: Any = None) -> None:
-        """Emit the terminator returning ``values`` from ``func_op`` and fix
-        the entry's result types."""
-        self._unsupported("generate_return")
-
-    def pack_results(
-        self, values: list[Any], prototypes: list[Any], loc: Any = None
-    ) -> tuple[list[Any], Any]:
-        """The values the entry returns for the result leaves ``values`` (of
-        dtypes ``prototypes``) and the host-side slot descriptor, None for no
-        result."""
-        return self._unsupported("pack_results")
-
-    def unpack_result(self, slot: Any, raw: Any, prototypes: list[Any]) -> list[Any]:
-        """The Python value of each result leaf from the filled slot ``raw``."""
-        return self._unsupported("unpack_result")
-
-
 class ASTPreprocessorPlugin(Plugin):
     """The ``ast_preprocessor`` role: Python syntax mapped onto the executors.
 
     It provides the preprocessor that rewrites native ``for``/``if``/``while``
     into region functions and the executors (the preprocessor's helper
     callbacks) that run or stage those regions at trace time.
-    ``BaseDSL.__init__`` installs its executors and, when the DSL preprocesses,
-    builds its preprocessor. ``@jit(preprocess=False)`` and
-    ``<PREFIX>_AST_PREPROCESSOR=0`` still bypass the rewrite.
+    ``BaseDSL.__init__`` installs its executors and builds its preprocessor:
+    naming the plugin is what turns the rewrite on, a DSL without one never
+    rewrites, and ``<PREFIX>_AST_PREPROCESSOR=0`` turns it off for a process.
+    The rewrite imports ``and_``/``or_``/``not_``/``as_ir_value`` from
+    :meth:`helpers_package`.
     """
 
     role: ClassVar[str] = "ast_preprocessor"
@@ -209,6 +175,13 @@ class ASTPreprocessorPlugin(Plugin):
         ``loop_execute_range_dynamic``, ``if_dynamic``, ``while_dynamic``,
         ``compare_executor``, ``builtin_redirector`` and ``ifexp_dynamic``."""
         return {}
+
+    def helpers_package(self) -> list[str]:
+        """The package the rewrite imports as ``__module_dsl__`` (``and_``,
+        ``or_``, ``not_``, ``as_ir_value``), as path parts: the plugin's own
+        package. A DSL that re-exports those helpers under its own namespace
+        overrides it with the ``dsl_package_name`` constructor argument."""
+        return type(self).__module__.split(".")
 
 
 class _NoRemarkSession:
@@ -285,36 +258,123 @@ class CompilerPlugin(Plugin):
 
 
 class DecoratorPlugin(Plugin):
-    """The ``decorators`` family: a decorator and what calling it does.
+    """The ``decorators`` family: one kind of decorated function.
 
-    ``decorators`` returns the decorators the plugin adds to the DSL class;
-    ``BaseDSL.__init_subclass__`` installs them (``@MyDSL.kernel``). Build one
-    with ``dsl_cls.make_decorator(name, on_call)``: the core wrapper handles
-    the lazy instance, the AST preprocessing and the active-DSL context and
-    hands the call to ``on_call(dsl, func, *args, **kwargs)``, the plugin's
-    launcher. The hooks run around every ``@jit`` trace, so the plugin owns
-    its per-trace state (a kernel container, the launches it expects) and its
-    rules at the host boundary; ``finish_compiled_function`` records what the
-    trace did on the compiled function.
+    A decorator plugin owns everything about the functions it marks: the
+    decorator (``decorator_name``, ``@jit`` by default), the op such a function
+    is traced into (the entry protocol: ``generate_func_op``,
+    ``generate_return``, ``pack_results``, ``unpack_result``), what a call of
+    the function does from plain Python (:meth:`call`) and what it does inside
+    the trace of another decorated function (:meth:`launch`). The defaults
+    describe a host function: ``call`` runs the core's pipeline (bind the
+    arguments, trace into the entry, compile through the compiler role when
+    there is one, cache, invoke) and ``launch`` inlines the body into the
+    enclosing trace. A kernels plugin overrides both: calling a kernel
+    prepares a launch, issuing it emits the kernel and its launch op.
+
+    ``BaseDSL.__init_subclass__`` installs :meth:`decorators` on the DSL class;
+    the core wrapper handles the lazy instance, the AST rewrite and the
+    active-DSL context and hands the call to :meth:`_dispatch`, which picks
+    ``launch`` or ``call`` by whether a trace is open. The hooks run around
+    every top-level trace, so a plugin owns its per-trace state (a kernel
+    container, the launches it expects) and its rules at the host boundary;
+    ``finish_compiled_function`` records what the trace did on the compiled
+    function.
     """
 
     role: ClassVar[str] = "decorators"
+    #: The decorator this plugin adds to the DSL class.
+    decorator_name: ClassVar[str] = "jit"
 
     def decorators(self, dsl_cls: type) -> dict[str, Callable[..., Any]]:
-        """The decorators this plugin adds to the DSL class, by name."""
-        return self._unsupported("decorators")
+        """The decorators this plugin adds to the DSL class, by name: one,
+        ``decorator_name``, dispatching to :meth:`call` or :meth:`launch`."""
+        return {
+            self.decorator_name: dsl_cls.make_decorator(
+                self.decorator_name, self._dispatch
+            )
+        }
+
+    def _dispatch(self, dsl: BaseDSL, func: Any, *args: Any, **kwargs: Any) -> Any:
+        """What calling a decorated function does: ``launch`` inside an open
+        trace, ``call`` otherwise, on the copy of this plugin installed on
+        ``dsl``, the DSL the function was decorated with (one DSL instance at a
+        time is assumed). A record lacking the plugin (a variant that dropped
+        it, a decorator inherited from a parent class) is
+        ``CALL_PLUGIN_REQUIRED``."""
+        plugin = dsl.plugins.decorator(self.decorator_name)
+        if plugin is None:
+            raise DSLUserCodeError(
+                DiagId.CALL_PLUGIN_REQUIRED,
+                name=f"@{self.decorator_name}",
+                plugin=f"the `{type(self).__name__}` plugin",
+                fix=f"plugins = Plugins(..., decorators=[{type(self).__name__}()])",
+                context=(
+                    {"unavailable plugins": dict(dsl.unavailable_plugins)}
+                    if dsl.unavailable_plugins
+                    else None
+                ),
+            )
+        if in_trace():
+            return plugin.launch(dsl, func, *args, **kwargs)
+        return plugin.call(dsl, func, *args, **kwargs)
+
+    # -- what a call does ----------------------------------------------------
+
+    def call(self, dsl: BaseDSL, func: Any, *args: Any, **kwargs: Any) -> Any:
+        """A call from plain Python: the core pipeline, tracing ``func`` into
+        the op this plugin builds, compiling it through the compiler role
+        when the DSL names one (a DSL without one returns the trace result)
+        and invoking it."""
+        return dsl.run(self, func, *args, **kwargs)
+
+    def launch(self, dsl: BaseDSL, func: Any, *args: Any, **kwargs: Any) -> Any:
+        """A call inside the trace of another decorated function: the body is
+        inlined into that trace."""
+        return func(*args, **kwargs)
+
+    # -- the entry protocol: the op a decorated function is traced into -------
+
+    def generate_func_op(
+        self, name: str, arg_types: list[Any], arg_attrs: list[Any], loc: Any = None
+    ) -> tuple[Any, ir.Block]:
+        """Create the function op ``name`` with ``arg_types`` and no results at
+        the current insertion point; return ``(op, entry_block)``."""
+        return self._unsupported("generate_func_op")
+
+    def generate_return(self, op: Any, values: list[Any], loc: Any = None) -> None:
+        """Emit the terminator returning ``values`` from ``op`` at the current
+        insertion point and fix the op's result types."""
+        self._unsupported("generate_return")
+
+    def pack_results(
+        self, values: list[Any], prototypes: list[Any], loc: Any = None
+    ) -> tuple[list[Any], Any]:
+        """The values the op returns for the result leaves ``values`` (of
+        dtypes ``prototypes``) and the host-side slot descriptor the compiler
+        reads them through; ``([], None)`` for no result, which is the default
+        and all a function that returns nothing needs."""
+        if not values:
+            return [], None
+        return self._unsupported("pack_results")
+
+    def unpack_result(self, slot: Any, raw: Any, prototypes: list[Any]) -> list[Any]:
+        """The Python value of each result leaf from the filled slot ``raw``."""
+        return self._unsupported("unpack_result")
+
+    # -- hooks around every top-level trace -------------------------------------
 
     def before_trace(
         self, dsl: BaseDSL, module: ir.Module, *, loc: Any, attrs: dict[str, Any]
     ) -> None:
-        """Set up per-trace state before the host entry of a ``@jit`` trace is
+        """Set up per-trace state before the entry of a top-level trace is
         built, with the insertion point at the body of the fresh ``module``.
         ``attrs`` are the attributes the call passed as ``container_attrs``."""
 
     def after_trace(self, dsl: BaseDSL, module: ir.Module) -> None:
-        """Finish per-trace state after the host body was traced, before the
-        module is hashed (prune an empty container, report a kernel call that
-        was never launched)."""
+        """Finish per-trace state after the body was traced, before the module
+        is hashed (prune an empty container, report a kernel call that was
+        never launched)."""
 
     def check_arguments(
         self,
@@ -383,7 +443,6 @@ class AdapterPlugin(Plugin):
 
 _ROLE_TYPES: dict[str, type[Plugin]] = {
     "type_ops": TypeOpsPlugin,
-    "func_entry": FuncEntryPlugin,
     "ast_preprocessor": ASTPreprocessorPlugin,
     "compiler": CompilerPlugin,
 }
@@ -420,13 +479,15 @@ class Plugins:
 
     Every role field takes an instance of the role's plugin class (or None for
     a role the DSL does not fill); the two family fields take sequences of
-    their family's plugins. A plugin in the wrong field is an error. Iterating the
-    record yields the role plugins in field order, then the families in order:
-    the order plugins are installed and their shared hooks are called in.
+    their family's plugins. A plugin in the wrong field is an error, and so is
+    a decorator name shared by two decorator plugins (the first would win
+    silently). Iterating the record yields the role plugins in field order,
+    then the families in order: the order plugins are installed and their
+    shared hooks are called in. :meth:`without` drops family members for a
+    variant (``MlirTestDSL.plugins.without("gpu")``).
     """
 
     type_ops: TypeOpsPlugin | None = None
-    func_entry: FuncEntryPlugin | None = None
     ast_preprocessor: ASTPreprocessorPlugin | None = None
     compiler: CompilerPlugin | None = None
     decorators: Sequence[DecoratorPlugin] = ()
@@ -459,6 +520,46 @@ class Plugins:
                         f"`Plugins.{family}` takes `{base.__name__}` instances, not {_describe(plugin)}"
                     )
             object.__setattr__(self, family, plugins)
+        seen: dict[str, DecoratorPlugin] = {}
+        for plugin in self.decorators:
+            kind = plugin.decorator_name
+            if not kind:
+                raise DSLRuntimeError(
+                    f"`{type(plugin).__name__}` names no decorator: set `decorator_name`"
+                )
+            if kind in seen:
+                raise DSLRuntimeError(
+                    f"`{type(seen[kind]).__name__}` and `{type(plugin).__name__}` both "
+                    f"add the decorator `@{kind}`; a record has one plugin per decorator"
+                )
+            seen[kind] = plugin
+
+    def decorator(self, decorator_name: str) -> DecoratorPlugin | None:
+        """The decorator plugin adding ``@<decorator_name>``, or None."""
+        for plugin in self.decorators:
+            if plugin.decorator_name == decorator_name:
+                return plugin
+        return None
+
+    def without(self, *keys: str | type) -> "Plugins":
+        """A copy of the record without the family members named by ``keys``:
+        a plugin ``name`` (``"gpu"``), a ``decorator_name`` (``"kernel"``) or a
+        plugin class. The roles are untouched; the shipped variants are spelled
+        this way (``MlirTestDSL.plugins.without("gpu")`` is CPU-only)."""
+
+        def dropped(plugin: Plugin) -> bool:
+            for key in keys:
+                if isinstance(key, type):
+                    if isinstance(plugin, key):
+                        return True
+                elif key in (plugin.name, getattr(plugin, "decorator_name", None)):
+                    return True
+            return False
+
+        fields = {role: getattr(self, role) for role in self.ROLES}
+        for family in self.FAMILIES:
+            fields[family] = tuple(p for p in getattr(self, family) if not dropped(p))
+        return Plugins(**fields)
 
     def __iter__(self):
         for role in self.ROLES:

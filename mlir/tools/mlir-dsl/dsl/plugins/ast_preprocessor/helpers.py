@@ -21,11 +21,10 @@ import builtins
 import inspect
 import itertools
 from collections.abc import Callable, Iterator, Sequence
-from functools import wraps
 from types import BuiltinFunctionType
 from typing import Any, Optional
 
-from ...core.common import DSLRuntimeError, DSLUserCodeError
+from ...core.common import DSLUserCodeError
 from ...core.diagnostics import DiagId
 from ...core.staging import (
     Executor,
@@ -46,6 +45,7 @@ __all__ = [
     "ifexp_executor",
     "range",
     "is_dynamic_range",
+    "close_for_iter",
     "materialize_for_iter",
     "register_deferred_for_error",
     "raise_deferred_for_error",
@@ -356,6 +356,17 @@ def materialize_for_iter(factory: Callable[..., Any], *args: Any, **kwargs: Any)
         return range(*args, **kwargs)
 
     return factory(*args, **kwargs)
+
+
+def close_for_iter(iterable: Any) -> None:
+    """Close the iterable of a dispatched ``for`` when the loop statement is
+    left, normally or by an exception. A builder generator such as ``for_``
+    holds an insertion point across its ``yield``; closing it here, before
+    the enclosing contexts unwind, keeps the insertion-point stack balanced
+    instead of leaving the generator to be finalised later, out of order.
+    Anything but a suspended generator is left alone."""
+    if inspect.isgenerator(iterable):
+        iterable.close()
 
 
 # =============================================================================

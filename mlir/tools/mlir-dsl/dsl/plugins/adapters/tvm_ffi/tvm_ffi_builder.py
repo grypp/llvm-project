@@ -22,7 +22,7 @@ parameters. The ``tvm_ffi`` package is imported lazily (through
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Any, Callable, Literal, Optional, Union
+from typing import Callable, Literal, Optional, Union
 
 from ..... import ir
 from .....dialects import llvm

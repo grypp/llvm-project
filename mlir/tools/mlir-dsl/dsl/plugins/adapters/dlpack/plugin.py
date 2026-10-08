@@ -26,6 +26,17 @@ from ....core.arguments import JitArgAdapterRegistry, _check_contiguous
 from ....types.typing import (
     BFloat16,
     Boolean,
+    Float4E2M1FN,
+    Float6E2M3FN,
+    Float6E3M2FN,
+    Float8E3M4,
+    Float8E4M3,
+    Float8E4M3B11FNUZ,
+    Float8E4M3FN,
+    Float8E4M3FNUZ,
+    Float8E5M2,
+    Float8E5M2FNUZ,
+    Float8E8M0FNU,
     Float16,
     Float32,
     Float64,
@@ -33,12 +44,14 @@ from ....types.typing import (
     Int16,
     Int32,
     Int64,
+    Int128,
     Numeric,
     Pointer,
     Uint8,
     Uint16,
     Uint32,
     Uint64,
+    Uint128,
 )
 from ....util.logger import log
 
@@ -46,21 +59,36 @@ __all__ = ["DlpackPlugin", "DlpackTensor", "available", "speaks_dlpack"]
 
 _EXTENSION = "mlir._mlir_libs._mlirDslDlpack"
 
-# (DLPack type code, bits) -> DSL element type; lanes must be 1.
+# (DLPack type code, bits) -> DSL element type; lanes must be 1. The codes
+# are DLPack's ``DLDataTypeCode``, including the narrow floats of DLPack 1.1
+# (7 to 17), which is how a framework hands over an fp8/fp6/fp4 tensor.
 _DTYPES: dict[tuple[int, int], type[Numeric]] = {
     (0, 8): Int8,
     (0, 16): Int16,
     (0, 32): Int32,
     (0, 64): Int64,
+    (0, 128): Int128,
     (1, 8): Uint8,
     (1, 16): Uint16,
     (1, 32): Uint32,
     (1, 64): Uint64,
+    (1, 128): Uint128,
     (2, 16): Float16,
     (2, 32): Float32,
     (2, 64): Float64,
     (4, 16): BFloat16,
     (6, 8): Boolean,
+    (7, 8): Float8E3M4,
+    (8, 8): Float8E4M3,
+    (9, 8): Float8E4M3B11FNUZ,
+    (10, 8): Float8E4M3FN,
+    (11, 8): Float8E4M3FNUZ,
+    (12, 8): Float8E5M2,
+    (13, 8): Float8E5M2FNUZ,
+    (14, 8): Float8E8M0FNU,
+    (15, 6): Float6E2M3FN,
+    (16, 6): Float6E3M2FN,
+    (17, 4): Float4E2M1FN,
 }
 
 # DLPack device type -> the ``Pointer`` kind of the host payload.

@@ -22,7 +22,7 @@ from ....core.common import DSLUserCodeError
 from ....core.diagnostics import DiagId
 from ....core.dsl import BaseDSL
 from ....core.plugin import ASTPreprocessorPlugin
-from ....types.typing import max_ as max, min_ as min
+from ....types.typing import as_ir_value, max_ as max, min_ as min
 from ....core.staging import is_mlir_op
 from ..preprocessor import DSLPreprocessor
 from .builders import WhileLoopContext, for_, if_, while_, yield_
@@ -48,6 +48,7 @@ __all__ = [
     "all_",
     "and_",
     "any_",
+    "as_ir_value",
     "for_",
     "if_",
     "in_",

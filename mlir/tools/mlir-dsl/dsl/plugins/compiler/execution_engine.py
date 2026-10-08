@@ -25,7 +25,6 @@ from ...core.diagnostics import DiagId
 from ...core.plugin import CompilerPlugin
 from ...core.remarks import RemarkSession, error_diagnostics, remarks_available
 from ...util import profiler
-from ...util.logger import log
 
 __all__ = [
     "Compiler",
@@ -249,7 +248,7 @@ class Compiler(CompilerPlugin):
         wrapper for every public function; :func:`lookup_packed_function`
         resolves it and :class:`JitCompiledFunction` marshals each call into
         ``c_void_p`` slots and reads the result back through ``result_ctype``,
-        the slot type the host entry (the ``func_entry`` plugin) declared. A
+        the slot type the entry (the decorator plugin, ``func.Jit``) declared. A
         compiler plugin for another backend returns its own callable here; the
         DSL relies only on ``__call__``, ``ir_module``, ``function_name`` and,
         when present,

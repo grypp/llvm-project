@@ -6,7 +6,7 @@
 
 The core: the types (``Int32``, ``Pointer``, ``@struct``, ``Vector``), the
 staging decision and the host boundary (``BaseDSL``), the plugin roles
-(``TypeOpsPlugin``, ``FuncEntryPlugin``, ``ASTPreprocessorPlugin``, ``CompilerPlugin``) and the
+(``TypeOpsPlugin``, ``ASTPreprocessorPlugin``, ``CompilerPlugin``) and the
 families (``DecoratorPlugin``, ``AdapterPlugin``), and
 the ``Plugins`` record a DSL names them in, and the extension points
 (``register_leaf``, ``register_jit_arg_adapter``). It emits no dialect op of
@@ -79,7 +79,6 @@ from .core.plugin import (
     AdapterPlugin,
     CompilerPlugin,
     DecoratorPlugin,
-    FuncEntryPlugin,
     Plugin,
     Plugins,
     TypeOpsPlugin,
@@ -154,7 +153,6 @@ __all__ = [
     "Plugin",
     "Plugins",
     "TypeOpsPlugin",
-    "FuncEntryPlugin",
     "CompilerPlugin",
     "DecoratorPlugin",
     "AdapterPlugin",

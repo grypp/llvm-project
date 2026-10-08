@@ -4,37 +4,34 @@
 # The AST preprocessor plugin: a `BaseDSL` assembled from a `Plugins` record
 # gets native control flow from the `scf.ASTPreprocessor` plugin (preprocessor
 # + executors); its `closure_check` knob allows captures in staged regions; a
-# DSL that preprocesses without an `ast_preprocessor` plugin is a configuration
-# error; a plugin subclass may swap the executors.
+# DSL without an `ast_preprocessor` plugin never rewrites (native control flow
+# over a staged value fails, the explicit builders still work); a plugin
+# subclass may swap the executors.
 from dataclasses import replace
 
 import mlir.mlir_dsl as m
 from mlir.dsl.plugins.ast_preprocessor import scf
 from mlir.dsl.plugins.compiler import execution_engine
-from mlir.dsl.plugins.func_entry import func
+from mlir.dsl.plugins.decorators.jit import func
 from mlir.dsl.plugins.type_ops import arith, llvm, vector
 from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps
 
 
-def make(name, ast_preprocessor=None, preprocess=True):
+def make(name, ast_preprocessor=None):
     class Custom(m.BaseDSL):
         # The record names the AST preprocessor next to the other roles.
         plugins = m.Plugins(
             type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),
-            func_entry=func.Entry(),
             ast_preprocessor=ast_preprocessor,
             compiler=execution_engine.Compiler(),
+            decorators=[func.Jit()],
         )
 
         def pipeline(self):
             return list(m.LOWER_TO_LLVM)
 
         def __init__(self):
-            super().__init__(
-                name=name,
-                dsl_package_name=["mlir", "mlir_dsl"],
-                preprocess=preprocess,
-            )
+            super().__init__(name=name)
 
     Custom.__name__ = name
     return Custom
@@ -69,13 +66,13 @@ print(
 
 
 class CpuOnly(m.MlirTestDSL):
-    # Drops the decorator and adapter plugins, not the language's
-    # AST preprocessor.
-    plugins = replace(m.MlirTestDSL.plugins, decorators=(), adapters=())
+    # Drops the gpu kernels plugin and the adapters, not the language's AST
+    # preprocessor; `@jit` is the `func.Jit` decorator plugin and stays.
+    plugins = replace(m.MlirTestDSL.plugins, decorators=[func.Jit()], adapters=())
 
 
-# CHECK: DEFAULT PREPROCESSOR: ASTPreprocessor True []
-# EXEC:  DEFAULT PREPROCESSOR: ASTPreprocessor True []
+# CHECK: DEFAULT PREPROCESSOR: ASTPreprocessor True ['func']
+# EXEC:  DEFAULT PREPROCESSOR: ASTPreprocessor True ['func']
 cpu = CpuOnly()
 print(
     "DEFAULT PREPROCESSOR:",
@@ -84,15 +81,26 @@ print(
     [p.name for f in m.Plugins.FAMILIES for p in getattr(cpu.plugins, f)],
 )
 
-try:
-    make("NO_FRONTEND", None)()
-    print("no error (unexpected)")
-except m.DSLRuntimeError as e:
-    # CHECK: NO PREPROCESSOR: the DSL preprocesses (preprocess=True) but names no `ast_preprocessor`
-    # EXEC:  NO PREPROCESSOR: the DSL preprocesses (preprocess=True) but names no `ast_preprocessor`
-    print("NO PREPROCESSOR:", e.message[:80])
+# Naming the plugin is the switch: a record without one never rewrites, so a
+# native loop over a staged bound is the plain-Python failure.
+Builders = make("MLIR_DSL", None)
 
-Builders = make("MLIR_DSL", None, preprocess=False)
+
+@Builders.jit
+def native_without_plugin(n: m.Int32) -> m.Int32:
+    acc = m.Int32(0)
+    for i in range(n):
+        acc = acc + i
+    return acc
+
+
+try:
+    native_without_plugin(5)
+    print("NO PREPROCESSOR: no error (unexpected)")
+except m.DSLUserCodeError as e:
+    print("NO PREPROCESSOR:", Builders().enable_preprocessor, e.diag_id.name)
+# CHECK: NO PREPROCESSOR: False PHASE_DYNAMIC_INDEX
+# EXEC:  NO PREPROCESSOR: False PHASE_DYNAMIC_INDEX
 
 
 @Builders.jit

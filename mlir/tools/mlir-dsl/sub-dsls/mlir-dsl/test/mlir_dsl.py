@@ -8,6 +8,7 @@
 from dataclasses import replace
 
 import mlir.mlir_dsl as m
+from mlir.dsl.plugins.decorators.jit import func
 from mlir.dsl.plugins.decorators.kernels import gpu as g
 
 # The namespace: core names, the control-flow names, the DSL and its record.
@@ -18,7 +19,7 @@ print(
     m.range.__name__,
     type(m.MlirTestDSL.plugins.ast_preprocessor).__name__,
     type(m.MlirTestDSL.plugins.type_ops).__name__,
-    type(m.MlirTestDSL.plugins.func_entry).__name__,
+    type(m.MlirTestDSL.plugins.named("func")).__name__,
     type(m.MlirTestDSL.plugins.compiler).__name__,
 )
 print(
@@ -31,14 +32,15 @@ print(
 # The index helpers are in the namespace exactly when the gpu bindings are built.
 print("GPU HELPERS:", hasattr(m, "thread_idx") == g.Kernels.available())
 # CHECK: CORE: Int32 <class 'mlir.dsl.types.typing.Pointer'> <function struct{{.*}}> <class 'mlir.dsl.types.vector.Vector'> BaseDSL
-# CHECK: PLUGINS: for_ range ASTPreprocessor UpstreamDialectTypeOps Entry Compiler
+# CHECK: PLUGINS: for_ range ASTPreprocessor UpstreamDialectTypeOps Jit Compiler
 # CHECK: DSL: MlirTestDSL jit kernel compile
 # CHECK: GPU HELPERS: True
 
 
 class CpuOnly(m.MlirTestDSL):
-    # Drops the decorator and adapter plugins, not the language.
-    plugins = replace(m.MlirTestDSL.plugins, decorators=(), adapters=())
+    # Drops the gpu kernels plugin and the adapters, not the language: `@jit`
+    # is the `func.Jit` decorator plugin, so it stays in the list.
+    plugins = replace(m.MlirTestDSL.plugins, decorators=[func.Jit()], adapters=())
 
 
 dsl = CpuOnly()
@@ -46,18 +48,18 @@ print("AST:", type(dsl.plugins.ast_preprocessor).__name__, dsl.enable_preprocess
 print(
     "DIALECTS:",
     type(dsl.plugins.type_ops).__name__,
-    type(dsl.plugins.func_entry).__name__,
+    type(dsl.plugins.named("func")).__name__,
 )
 print("ROLES:", [p.name for p in dsl.plugins], dsl.plugins.named("gpu"))
 print("PIPELINE:", dsl._get_pipeline(None))
 print("PREFIX:", dsl.name, dsl.envar.dryrun)
 # CHECK: AST: ASTPreprocessor True
-# CHECK: DIALECTS: UpstreamDialectTypeOps Entry
-# CHECK: ROLES: ['arith+vector+llvm', 'func', 'scf', 'execution_engine'] None
+# CHECK: DIALECTS: UpstreamDialectTypeOps Jit
+# CHECK: ROLES: ['arith+vector+llvm', 'scf', 'execution_engine', 'func'] None
 # CHECK: PIPELINE: builtin.module(convert-scf-to-cf,convert-cf-to-llvm,convert-vector-to-llvm,convert-arith-to-llvm,convert-math-to-llvm,convert-func-to-llvm,reconcile-unrealized-casts)
 # CHECK: PREFIX: MLIR_DSL True
 
-# The record lists five family members (one decorator plugin, four adapters);
+# The record lists four family members (two decorator plugins, two adapters);
 # an instance installs the available ones and remembers the others.
 FAMILIES = m.Plugins.FAMILIES
 listed = [type(p).__name__ for f in FAMILIES for p in getattr(m.MlirTestDSL.plugins, f)]
@@ -68,10 +70,10 @@ dropped = {
 print("DEFAULTS:", listed)
 print(
     "INSTALLED:",
-    installed <= {"gpu", "numpy", "tvm_ffi", "pytorch", "dlpack"},
-    len(installed) + len(dropped) == 5,
+    installed <= {"func", "gpu", "tvm_ffi", "dlpack"},
+    len(installed) + len(dropped) == 4,
 )
-# CHECK: DEFAULTS: ['Kernels', 'NumpyPlugin', 'PyTorchPlugin', 'DlpackPlugin', 'TvmFfiPlugin']
+# CHECK: DEFAULTS: ['Jit', 'Kernels', 'DlpackPlugin', 'TvmFfiPlugin']
 # CHECK: INSTALLED: True True
 
 

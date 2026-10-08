@@ -5,10 +5,11 @@
 """The generic half of a kernels plugin: the ``@kernel`` decorator, its
 launcher and the entry protocol a target implements.
 
-:class:`KernelsPlugin` adds the decorator to the DSL class through
-``DecoratorPlugin.decorators``. Calling a decorated function returns a
-:class:`KernelLauncher`; ``.launch(config)`` inside a ``@jit`` body traces the
-kernel into the plugin's container and emits the launch at the call site. The
+:class:`KernelsPlugin` is a ``DecoratorPlugin`` whose ``decorator_name`` is
+``kernel``. Calling a decorated function, from Python or inside a trace,
+returns a :class:`KernelLauncher`; ``.launch(config)`` inside a ``@jit`` body
+traces the kernel into the plugin's container and emits the launch at the
+call site (outside one it is ``LAUNCH_OUTSIDE_JIT``). The
 plugin owns the kernel state of a trace: the container (``before_trace``/``after_trace``), the launches it expects (a call
 never launched is ``LAUNCH_NEVER_ISSUED``), the buffer-kind rule at the host
 boundary (``check_arguments``) and the kernel records handed to the compiled
@@ -26,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..... import ir
-from ....core.common import DSLRuntimeError, DSLUserCodeError
+from ....core.common import DSLRuntimeError, DSLUserCodeError, in_trace
 from ....core.diagnostics import DiagId, find_user_source_location
 from ....core.plugin import DecoratorPlugin
 from ....util import tree_utils
@@ -118,9 +119,8 @@ class KernelLauncher:
         Accepts one :class:`LaunchConfig` or its constructor arguments.
         """
         kernel_name = getattr(self.func, "__name__", "<kernel>")
-        # No active MLIR context means there is no @jit compilation in
-        # progress to emit the launch into.
-        if ir.Context.current is None:
+        # No open trace means there is no host body to emit the launch into.
+        if not in_trace():
             raise DSLUserCodeError(
                 self.plugin.diag("LAUNCH_OUTSIDE_JIT"), kernel_name=kernel_name
             )
@@ -140,7 +140,7 @@ class KernelLauncher:
             raise DSLUserCodeError(
                 self.plugin.diag("LAUNCH_STREAM_UNSUPPORTED"), kernel_name=kernel_name
             )
-        ret, self.name = self.plugin.launch(
+        ret, self.name = self.plugin.emit_launch(
             self.dsl, self.func, self.func_args, self.func_kwargs, config
         )
         return ret
@@ -152,15 +152,16 @@ class KernelLauncher:
 class KernelsPlugin(DecoratorPlugin):
     """A plugin adding ``@<decorator_name>`` and the launch of what it marks.
 
-    A target subclass implements the entry protocol and names its diagnostic
-    catalogue in ``diag_ids`` (the ``LAUNCH_*`` codes the launcher raises
-    through it). The plugin instance installed on a DSL keeps the per-trace
-    state: the container, the launchers created during the host trace, the
-    kernel records of the last trace (``kernel_info``, ``num_kernels``,
-    ``launch_count``).
+    Calling a kernel, from Python or inside a trace, prepares a launch (both
+    :meth:`call` and :meth:`launch` return a :class:`KernelLauncher`); issuing
+    it emits the kernel and its launch op into the open trace. A target
+    subclass implements the entry protocol and names its diagnostic catalogue
+    in ``diag_ids`` (the ``LAUNCH_*`` codes the launcher raises through it).
+    The plugin instance installed on a DSL keeps the per-trace state: the
+    container, the launchers created during the host trace, the kernel records
+    of the last trace (``kernel_info``, ``num_kernels``, ``launch_count``).
     """
 
-    #: The name of the decorator the plugin adds to the DSL class.
     decorator_name: ClassVar[str] = "kernel"
     diag_ids: ClassVar[Any] = None
 
@@ -172,32 +173,17 @@ class KernelsPlugin(DecoratorPlugin):
         self._module: Any = None
         self._container: Any = None
 
-    # -- the decorator and its launcher ----------------------------------------
+    # -- what a call does: a deferred launch -------------------------------------
 
-    def decorators(self, dsl_cls: type) -> dict[str, Callable[..., Any]]:
-        return {
-            self.decorator_name: dsl_cls.make_decorator(
-                self.decorator_name, self._kernel_call
-            )
-        }
+    def call(self, dsl: "BaseDSL", func: Any, *args: Any, **kwargs: Any) -> Any:
+        """A kernel called from plain Python prepares its launch like one called
+        inside a trace; issuing it there is ``LAUNCH_OUTSIDE_JIT``."""
+        return KernelLauncher(dsl, self, func, *args, **kwargs)
 
-    def _kernel_call(self, dsl: "BaseDSL", func: Any, *args: Any, **kwargs: Any) -> Any:
-        """What calling a decorated kernel does: a deferred launcher, built with
-        the copy of this plugin installed on ``dsl``."""
-        plugin = dsl.plugins.named(self.name)
-        if not isinstance(plugin, KernelsPlugin):
-            raise DSLUserCodeError(
-                DiagId.CALL_PLUGIN_REQUIRED,
-                name=f"@{self.decorator_name}",
-                plugin=f"the `{type(self).__name__}` plugin",
-                fix=f"plugins = Plugins(..., decorators=[{type(self).__name__}()])",
-                context=(
-                    {"unavailable plugins": dict(dsl.unavailable_plugins)}
-                    if dsl.unavailable_plugins
-                    else None
-                ),
-            )
-        return KernelLauncher(dsl, plugin, func, *args, **kwargs)
+    def launch(self, dsl: "BaseDSL", func: Any, *args: Any, **kwargs: Any) -> Any:
+        """A kernel called inside a host trace: the deferred launcher, whose
+        ``.launch(config)`` emits the kernel and its launch op."""
+        return KernelLauncher(dsl, self, func, *args, **kwargs)
 
     def diag(self, code: str) -> Any:
         """The launch diagnostic ``code`` of the target's catalogue."""
@@ -286,7 +272,7 @@ class KernelsPlugin(DecoratorPlugin):
 
     # -- the launch driver -------------------------------------------------------
 
-    def launch(
+    def emit_launch(
         self,
         dsl: "BaseDSL",
         func: Callable[..., Any],
@@ -326,7 +312,7 @@ class KernelsPlugin(DecoratorPlugin):
                     detail=" from a kernel",
                 )
             with ir.InsertionPoint(block):
-                self.generate_return(op, loc=loc)
+                self.generate_return(op, [], loc=loc)
         symbol = self.kernel_symbol(name)
         ret = self.generate_launch(op, symbol, jit_args.values, config, loc=loc)
         self.kernel_info[name] = config
@@ -342,8 +328,9 @@ class KernelsPlugin(DecoratorPlugin):
         insertion point; return ``(op, entry_block)``."""
         return self._unsupported("generate_func_op")
 
-    def generate_return(self, op: Any, loc: Any = None) -> None:
-        """Terminate the kernel body at the current insertion point."""
+    def generate_return(self, op: Any, values: list[Any], loc: Any = None) -> None:
+        """Terminate the kernel body at the current insertion point; a kernel
+        returns nothing, so ``values`` is empty."""
         self._unsupported("generate_return")
 
     def generate_launch(

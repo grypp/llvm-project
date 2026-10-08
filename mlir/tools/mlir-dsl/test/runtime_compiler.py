@@ -104,28 +104,33 @@ common = R.get_registered_adapter(Handle(1)) is adapt_handle
 scalars = [R.get_registered_adapter(v) for v in (1, 2.5, "s", None)]
 print(f"REGISTRY: {common} {scoped} {R.get_registered_adapter(object())} {scalars}")
 lazy_before = Third in R.jit_arg_adapter_registry
+lazy_named = f"{__name__}.Third" in R.lazy_jit_arg_adapter_registry
 lazy_hit = R.get_registered_adapter(Third()) is adapt_third
-lazy_torch = "torch.Tensor" in R.lazy_jit_arg_adapter_registry
-print(f"LAZY: {lazy_before} {lazy_hit} {Third in R.jit_arg_adapter_registry}", end=" ")
-print(lazy_torch, "torch" in sys.modules)
+# The lazy entry is keyed by qualified name until the first instance promotes
+# it to the type-keyed registry.
+print(
+    f"LAZY: {lazy_before} {lazy_named} {lazy_hit} {Third in R.jit_arg_adapter_registry}"
+)
 dup = failure(lambda: R.register_jit_arg_adapter(Handle)(lambda h: h))
 bad = failure(lambda: R.register_jit_arg_adapter("T", lazy=True))
 print("MALFORMED:", dup, "|", bad)
 # CHECK:      REGISTRY: True True None [None, None, None, None]
-# CHECK-NEXT: LAZY: False True True True False
+# CHECK-NEXT: LAZY: False True True True
 # CHECK-NEXT: MALFORMED: {{.*}}already registered{{.*}} | {{.*}}must be fully-qualified
 
 # --- the buffer adapters -----------------------------------------
-# A C-contiguous numpy array (or CPU torch tensor) becomes a host `Pointer`
-# over its own storage, dtype by name, the buffer kept alive, nothing copied;
-# a non-contiguous buffer and an unmapped dtype are diagnostics naming the
-# argument being adapted.
+# A C-contiguous numpy array (or CPU torch tensor) becomes, through the dlpack
+# adapter, a host `Pointer` over its own storage, dtype from the DLPack type
+# code, the buffer kept alive by the view, nothing copied; a non-contiguous
+# buffer and an unmapped dtype are diagnostics naming the argument being
+# adapted.
 adapt_np = R.get_registered_adapter(np.zeros(1))
 arr = np.arange(4, dtype=np.float32)
 p = adapt_np(arr)
 kinds = (np.bool_, np.int8, np.uint16, np.int64, np.float16, np.float64)
 print(f"NUMPY: {type(p).__name__} {p.dtype.__name__} {p.kind}", end=" ")
-print(p.address == arr.ctypes.data, p._keepalive is arr, end=" ")
+keeps = p._keepalive is arr or getattr(p._keepalive, "tensor", None) is arr
+print(p.address == arr.ctypes.data, keeps, end=" ")
 print([adapt_np(np.zeros(1, d)).dtype.__name__ for d in kinds])
 print("NUMPY_ERRORS:", failure(lambda: adapt_np(arr[::2])), end=" ")
 print(failure(lambda: adapt_np(np.zeros((2, 3), np.float32).T)), end=" ")
@@ -276,10 +281,10 @@ print(failure(lambda: binder(tiny).generate_execution_args((1.0,), {})))
 # CHECK-NEXT: BIND: [1, 2, 9] CALL_ARGUMENTS CALL_ARGUMENTS ARG_UNSUPPORTED_TYPE
 
 # --- scalars both ways -------------------------------------------
-# `func.Entry` decodes the half types from their bit patterns
+# `func.Jit` decodes the half types from their bit patterns
 # (infinities, NaN and subnormals included); the widest integer and a half
 # survive a round trip through compiled code.
-from mlir.dsl.plugins.func_entry.func import _scalar_from_ctypes as dec
+from mlir.dsl.plugins.decorators.jit.func import _scalar_from_ctypes as dec
 
 f16 = [dec(m.Float16, u16(bits)).value for bits in (0x3E00, 0xFC00, 0x0001)]
 print(f"DECODE: {f16[:2]} {f16[2] == 2.0**-24}", end=" ")

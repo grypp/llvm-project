@@ -39,6 +39,7 @@ from .tvm_ffi_builder import (
 )
 
 __all__ = [
+    "TvmFfiDiagId",
     "NumericToTVMFFIDtype",
     "TvmFfiJitCompiledFunction",
     "TvmFfiPlugin",

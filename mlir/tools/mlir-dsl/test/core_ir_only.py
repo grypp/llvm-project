@@ -3,14 +3,14 @@
 # traces, prints the module under PRINT_IR and returns the trace result with
 # no DRYRUN set: there is nothing to compile or run. `compile_only=True` on
 # such a DSL is the error naming the missing plugin. The DSL names only the
-# `func` entry and the arith type ops, so neither the execution engine nor the
-# pass manager module is imported for it.
+# `func.Jit` decorator plugin and the arith type ops, so neither the execution
+# engine nor the pass manager module is imported for it.
 import sys
 
 from mlir.dsl.core.common import DSLRuntimeError
 from mlir.dsl.core.dsl import BaseDSL
 from mlir.dsl.core.plugin import Plugins
-from mlir.dsl.plugins.func_entry import func
+from mlir.dsl.plugins.decorators.jit import func
 from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps, arith
 from mlir.dsl.types.typing import Int32
 
@@ -18,15 +18,11 @@ from mlir.dsl.types.typing import Int32
 class IrOnlyDSL(BaseDSL):
     plugins = Plugins(
         type_ops=UpstreamDialectTypeOps(scalars=arith),
-        func_entry=func.Entry(),
+        decorators=[func.Jit()],
     )
 
     def __init__(self):
-        super().__init__(
-            name="MLIR_DSL",
-            dsl_package_name=["mlir", "dsl"],
-            preprocess=False,
-        )
+        super().__init__(name="MLIR_DSL")
 
 
 @IrOnlyDSL.jit
