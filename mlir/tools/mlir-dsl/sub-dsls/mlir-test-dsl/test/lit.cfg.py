@@ -8,15 +8,16 @@ import lit.util
 
 from lit.llvm import llvm_config
 
-# Configuration file for the 'lit' test runner of the mlir.dsl Python DSL.
+# Configuration file for the 'lit' test runner of the mlir.mlir_dsl sub-DSL:
+# the IR-level tests here and the compile-and-run tests under Integration/.
 
 # name: The name of this test suite.
-config.name = "MLIR-DSL"
+config.name = "MLIR-DSL-MlirTestDSL"
 
 config.test_format = lit.formats.ShTest()
 
 # suffixes: A list of file extensions to treat as test files.
-config.suffixes = [".py"]
+config.suffixes = [".py", ".test"]
 
 # excludes: A list of directories and files to exclude from the testsuite.
 config.excludes = ["Inputs", "CMakeLists.txt", "lit.cfg.py", "lit.site.cfg.py.in"]
@@ -77,3 +78,18 @@ def have_host_jit_feature_support(feature_name):
 
 if config.enable_execution_engine and have_host_jit_feature_support("jit"):
     config.available_features.add("host-supports-jit")
+
+# The TVM-FFI export test needs the optional ``tvm_ffi`` package of the test
+# interpreter. Probed from a neutral cwd: importing tvm_ffi from inside its own
+# package directory fails on a stdlib name clash.
+try:
+    _probe = subprocess.run(
+        [config.python_executable, "-c", "import tvm_ffi"],
+        capture_output=True,
+        cwd=config.test_exec_root if os.path.isdir(config.test_exec_root) else None,
+        timeout=120,
+    )
+    if _probe.returncode == 0:
+        config.available_features.add("tvm_ffi")
+except Exception:
+    pass

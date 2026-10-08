@@ -7,15 +7,17 @@ launcher and the entry protocol a target implements.
 
 :class:`KernelsPlugin` is a ``DecoratorPlugin`` whose ``decorator_name`` is
 ``kernel``. Calling a decorated function, from Python or inside a trace,
-returns a :class:`KernelLauncher`; ``.launch(config)`` inside a ``@jit`` body
+returns a :class:`KernelLauncher`; ``.launch(...)`` inside a ``@jit`` body
 traces the kernel into the plugin's container and emits the launch at the
 call site (outside one it is ``LAUNCH_OUTSIDE_JIT``). The
 plugin owns the kernel state of a trace: the container (``before_trace``/``after_trace``), the launches it expects (a call
 never launched is ``LAUNCH_NEVER_ISSUED``), the buffer-kind rule at the host
 boundary (``check_arguments``) and the kernel records handed to the compiled
 function (``finish_compiled_function``). A target subclass implements the entry
-protocol: ``generate_func_op``, ``generate_return``, ``generate_launch`` and the
-container hooks, with the ``LAUNCH_*`` codes in its ``diag_ids`` catalogue.
+protocol: ``launch_config`` (what ``.launch(...)`` accepts: the gpu target's
+``LaunchConfig``), ``generate_func_op``, ``generate_return``, ``generate_launch``
+and the container hooks, with the ``LAUNCH_*`` codes in its ``diag_ids``
+catalogue. Nothing here is CUDA-shaped: the grid and block live in the target.
 """
 
 from __future__ import annotations
@@ -23,7 +25,6 @@ from __future__ import annotations
 import inspect
 from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..... import ir
@@ -36,46 +37,16 @@ from ....types import typing as t
 if TYPE_CHECKING:
     from ....core.dsl import BaseDSL
 
-__all__ = ["KernelLauncher", "KernelsPlugin", "LaunchConfig"]
-
-
-@dataclass
-class LaunchConfig:
-    """Grid, block and optional cluster dimensions plus dynamic shared memory
-    of one kernel launch.
-
-    Dimensions accept Python ints or staged integers and are padded to three
-    entries; their type and count are validated by the plugin that emits the
-    launch. ``async_deps`` is kept for signature fidelity and must be empty:
-    launches are synchronous.
-    """
-
-    cluster: list[Any] | None = None
-    grid: list[Any] = field(default_factory=lambda: [1, 1, 1])
-    block: list[Any] = field(default_factory=lambda: [1, 1, 1])
-    smem: int | None = None
-    async_deps: list[Any] = field(default_factory=list)
-
-    @staticmethod
-    def _pad_dim(dim: Any) -> list[Any]:
-        """Return ``dim`` (a scalar or a sequence) as a list padded with 1s to
-        three entries; a longer list is left for the launch to diagnose."""
-        if not isinstance(dim, (list, tuple)):
-            dim = [dim]
-        return list(dim) + [1] * (3 - len(dim))
-
-    def __post_init__(self) -> None:
-        self.grid = self._pad_dim(self.grid)
-        self.block = self._pad_dim(self.block)
-        if self.cluster is not None:
-            self.cluster = self._pad_dim(self.cluster)
+__all__ = ["KernelLauncher", "KernelsPlugin"]
 
 
 class KernelLauncher:
-    """Bound kernel arguments awaiting their launch inside a ``@jit`` body::
+    """Bound kernel arguments awaiting their launch inside a ``@jit`` body;
+    ``.launch(...)`` takes the target's launch configuration (the gpu target:
+    a ``LaunchConfig`` or its fields)::
 
-    kernel(arg1, arg2).launch(LaunchConfig(grid=[1, 1, 1], block=[1, 1, 1]))
-    kernel(arg1, arg2).launch(grid=[1, 1, 1], block=[1, 1, 1])
+        kernel(arg1, arg2).launch(LaunchConfig(grid=[1, 1, 1], block=[1, 1, 1]))
+        kernel(arg1, arg2).launch(grid=[1, 1, 1], block=[1, 1, 1])
     """
 
     def __init__(
@@ -92,7 +63,6 @@ class KernelLauncher:
         self.func = func
         self.func_args = func_args
         self.func_kwargs = func_kwargs
-        self.name: str | None = None
 
         # While a host body is being traced, register so an un-launched call is
         # reported; capture the call site now, while the user's frame is live,
@@ -114,10 +84,8 @@ class KernelLauncher:
             ) from e
 
     def launch(self, *args: Any, **kwargs: Any) -> Any:
-        """Emit the kernel and its launch at the current insertion point.
-
-        Accepts one :class:`LaunchConfig` or its constructor arguments.
-        """
+        """Emit the kernel and its launch at the current insertion point; the
+        arguments are what the plugin's ``launch_config`` accepts."""
         kernel_name = getattr(self.func, "__name__", "<kernel>")
         # No open trace means there is no host body to emit the launch into.
         if not in_trace():
@@ -132,18 +100,10 @@ class KernelLauncher:
         # `my_kernel(...)` call.
         self._launched = True
 
-        if len(args) == 1 and not kwargs and isinstance(args[0], LaunchConfig):
-            config = args[0]
-        else:
-            config = LaunchConfig(*args, **kwargs)
-        if config.async_deps:
-            raise DSLUserCodeError(
-                self.plugin.diag("LAUNCH_STREAM_UNSUPPORTED"), kernel_name=kernel_name
-            )
-        ret, self.name = self.plugin.emit_launch(
+        config = self.plugin.launch_config(self.func, *args, **kwargs)
+        return self.plugin.emit_launch(
             self.dsl, self.func, self.func_args, self.func_kwargs, config
         )
-        return ret
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.launch(*args, **kwargs)
@@ -278,12 +238,13 @@ class KernelsPlugin(DecoratorPlugin):
         func: Callable[..., Any],
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
-        config: LaunchConfig,
-    ) -> tuple[Any, str]:
+        config: Any,
+    ) -> Any:
         """Trace ``func`` as a kernel of the current host trace and emit its
         launch at the current insertion point.
 
-        :return: What ``generate_launch`` returned and the kernel's symbol name
+        :param config: What ``launch_config`` returned
+        :return: What ``generate_launch`` returned
         """
         base = getattr(func, "__name__", "<kernel>")
         signature, cargs, ckwargs, jit_args = dsl.bind_arguments(
@@ -317,9 +278,16 @@ class KernelsPlugin(DecoratorPlugin):
         ret = self.generate_launch(op, symbol, jit_args.values, config, loc=loc)
         self.kernel_info[name] = config
         self.launch_count += 1
-        return ret, name
+        return ret
 
     # -- the entry protocol a target implements ----------------------------------
+
+    def launch_config(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """The launch configuration behind ``kernel(...).launch(*args,
+        **kwargs)``: whatever this target's ``generate_launch`` reads (the gpu
+        target: a ``LaunchConfig`` or its fields). ``func`` is the kernel, for
+        diagnostics."""
+        return self._unsupported("launch_config")
 
     def generate_func_op(
         self, name: str, arg_types: list[Any], arg_attrs: list[Any], loc: Any = None
@@ -338,12 +306,13 @@ class KernelsPlugin(DecoratorPlugin):
         op: Any,
         symbol: ir.Attribute,
         operands: list[Any],
-        config: LaunchConfig,
+        config: Any,
         *,
         loc: Any = None,
     ) -> Any:
         """Emit the launch of kernel ``op`` (referred to as ``symbol``) with
-        ``operands`` under ``config`` at the current insertion point."""
+        ``operands`` under ``config`` (what ``launch_config`` returned) at the
+        current insertion point."""
         return self._unsupported("generate_launch")
 
     def build_container(self, attrs: dict[str, Any], loc: Any = None) -> Any:

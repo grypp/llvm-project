@@ -1,9 +1,10 @@
 # The Python DSL base layer ``mlir.dsl`` (``dsl/``: the core, the dialect op
-# modules, the role plugins and the plugin families) and its test sub-DSL
-# ``mlir.mlir_dsl`` (``sub-dsls/mlir-dsl/dsl/``). A file is installed into the
-# ``mlir`` Python package at its path relative to ROOT_DIR: the core's directory
-# therefore carries the package name, while the sub-DSL has a module target of
-# its own that installs it under ``mlir_dsl/``. This directory is added from
+# modules, the role plugins and the plugin families) and its test sub-DSLs
+# ``mlir.mlir_dsl`` (``sub-dsls/mlir-test-dsl/dsl/``) and ``mlir.emitc_dsl``
+# (``sub-dsls/emitc-test-dsl/dsl/``). A file is installed into the ``mlir``
+# Python package at its path relative to ROOT_DIR: the core's directory
+# therefore carries the package name, while each sub-DSL has a module target of
+# its own that installs it under its package name. This directory is added from
 # mlir/python after MLIRPythonSources is declared.
 declare_mlir_python_sources(MLIRPythonSources.DSL
   ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -73,12 +74,12 @@ declare_mlir_python_extension(MLIRPythonExtension.DSL.Dlpack
     DlpackPlugin.cpp
 )
 
-# The test sub-DSL: ``mlir.mlir_dsl``, a sibling package of the core. Its
-# sources live in ``sub-dsls/mlir-dsl/dsl/``; a module target of its own
-# installs them under the package name, ``<prefix>/mlir_dsl/``, so the
+# The reference test sub-DSL: ``mlir.mlir_dsl``, a sibling package of the core.
+# Its sources live in ``sub-dsls/mlir-test-dsl/dsl/``; a module target of its
+# own installs them under the package name, ``<prefix>/mlir_dsl/``, so the
 # directory name is free (``MLIRPythonModules`` depends on this target).
 declare_mlir_python_sources(MLIRPythonSources.DSL.MlirTestDSL
-  ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/sub-dsls/mlir-dsl/dsl"
+  ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/sub-dsls/mlir-test-dsl/dsl"
   SOURCES
     __init__.py
     mlir_dsl.py
@@ -89,7 +90,23 @@ add_mlir_python_modules(MLIRPythonModulesMlirTestDSL
   DECLARED_SOURCES MLIRPythonSources.DSL.MlirTestDSL
 )
 
+# The second test sub-DSL: ``mlir.emitc_dsl``, the reference programs with their
+# ``+``/``*`` answered by the EmitC dialect and no compiler plugin.
+declare_mlir_python_sources(MLIRPythonSources.DSL.EmitCTestDSL
+  ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/sub-dsls/emitc-test-dsl/dsl"
+  SOURCES
+    __init__.py
+    emitc_dsl.py
+)
+add_mlir_python_modules(MLIRPythonModulesEmitCTestDSL
+  ROOT_PREFIX "${MLIRPythonModules_ROOT_PREFIX}/emitc_dsl"
+  INSTALL_PREFIX "${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}/emitc_dsl"
+  DECLARED_SOURCES MLIRPythonSources.DSL.EmitCTestDSL
+)
+
 if(MLIR_INCLUDE_TESTS)
+  # The core-only suite first; the sub-DSL suites hook themselves onto it.
   add_subdirectory(test)
-  add_subdirectory(sub-dsls/mlir-dsl/test)
+  add_subdirectory(sub-dsls/mlir-test-dsl/test)
+  add_subdirectory(sub-dsls/emitc-test-dsl/test)
 endif()

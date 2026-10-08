@@ -7,8 +7,9 @@ The DSL base class :class:`BaseDSL`.
 
 A sub-DSL inherits :class:`BaseDSL` and names its plugins in one ``Plugins``
 record on the class. The base owns what is the same for every DSL: the
-``@jit`` decorator and the decorator machinery plugins build on
-(:meth:`BaseDSL.make_decorator`, :meth:`BaseDSL.jit_runner`), the AST
+decorator machinery every decorator plugin builds on
+(:meth:`BaseDSL.make_decorator`, :meth:`BaseDSL.jit_runner`; ``@jit`` itself
+is the ``func.Jit`` plugin's), the AST
 preprocessor run, the host argument boundary, tracing the body into the entry
 the decorator plugin builds, the pass pipeline, the in-memory and on-disk
 compile caches and the invocation through the ``compiler`` plugin, and the
@@ -35,6 +36,7 @@ from ..core.common import DSLBaseError, DSLRuntimeError, DSLUserCodeError, activ
 from ..core.diagnostics import DiagId
 from ..core.env_manager import EnvironmentVarManager
 from .plugin import DecoratorPlugin, Plugins, _NoRemarkSession
+from .remarks import REMARK_POLICIES
 from ..types import typing as t
 from ..util import profiler
 from ..util.profiler import timer
@@ -198,9 +200,6 @@ class _PluginDecorator:
         self.on_call = on_call
         self._bound: dict[type, Callable[..., Any]] = {}
 
-    def __set_name__(self, owner: type, name: str) -> None:
-        self.kind = name
-
     def __get__(self, obj: Any, owner: type | None = None) -> Callable[..., Any]:
         cls = owner if owner is not None else type(obj)
         bound = self._bound.get(cls)
@@ -258,6 +257,12 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         ``decorators``; an inherited record was installed on the parent."""
         super().__init_subclass__(**kwargs)
         record = cls.__dict__.get("plugins")
+        if record is not None and not isinstance(record, Plugins):
+            raise DSLRuntimeError(
+                f"`{cls.__name__}.plugins` must be a `Plugins` record, not a "
+                f"`{type(record).__name__}`: write `plugins = Plugins(type_ops=..., "
+                "compiler=..., decorators=[...], adapters=[...])`"
+            )
         if isinstance(record, Plugins):
             for plugin in record.decorators:
                 for name, decorator in plugin.decorators(cls).items():
@@ -291,9 +296,23 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         return compiler.remark_session(
             context,
             remark_filter=self.envar.remarks,
-            remark_policy=self.envar.remarks_policy,
+            remark_policy=self._remarks_policy,
             remark_output=self.envar.remarks_output,
         )
+
+    @property
+    def _remarks_policy(self) -> str:
+        """The ``REMARKS_POLICY`` setting, checked once remarks are requested:
+        one of ``REMARK_POLICIES`` (a user's typo is ``CONFIG_INVALID``)."""
+        policy = self.envar.remarks_policy
+        if self.envar.remarks and policy not in REMARK_POLICIES:
+            raise DSLUserCodeError(
+                DiagId.CONFIG_INVALID,
+                var=f"{self.envar.prefix}_REMARKS_POLICY",
+                detail=f"`{policy}` is not a remark policy; expected one of "
+                + ", ".join(f"`{name}`" for name in REMARK_POLICIES),
+            )
+        return policy
 
     def __init__(
         self,
@@ -372,9 +391,13 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         if ast_preprocessor is not None:
             self.executor.set_functions(**ast_preprocessor.executors(self))
             if ast_preprocessor.preprocessor_class is not None:
+                # The rewrite recognises the decorators the class installs.
                 self.preprocessor = ast_preprocessor.preprocessor_class(
                     dsl_package_name or ast_preprocessor.helpers_package(),
                     closure_check=ast_preprocessor.closure_check,
+                    decorator_names=[
+                        p.decorator_name for p in type(self).plugins.decorators
+                    ],
                 )
                 self.enable_preprocessor = bool(self.envar.ast_preprocessor)
 
@@ -509,9 +532,17 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             return jit_wrapper
 
         if len(decorator_args) == 1 and callable(decorator_args[0]):
-            return jit_runner_decorator(decorator_args[0])
-        else:
-            return jit_runner_decorator
+            return jit_runner_decorator(decorator_args[0])  # bare `@jit`
+        if decorator_args:
+            # `@jit(3)`: the decorators take no option, so a value here is a
+            # mistake, not a configuration.
+            raise DSLUserCodeError(
+                DiagId.CALL_ARGUMENTS,
+                function_name=f"@{kind}",
+                detail=f"it takes no option, but {len(decorator_args)} positional "
+                "value(s) were given",
+            )
+        return jit_runner_decorator  # `@jit()`
 
     @classmethod
     def make_decorator(cls, kind: str, on_call: Callable[..., Any]) -> Any:
@@ -1144,7 +1175,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 enable_pass_profiling=self.envar.enable_pass_profiling,
                 enable_debug_info=self.envar.debuginfo,
                 remark_filter=self.envar.remarks,
-                remark_policy=self.envar.remarks_policy,
+                remark_policy=self._remarks_policy,
                 remark_output=self.envar.remarks_output,
                 after_lowering=self._after_lowering,
             )
@@ -1782,6 +1813,12 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             transformed_ast = preprocessor_session.transform(
                 original_function, exec_globals
             )
+            if original_function not in preprocessor_session.processed_functions:
+                # The function carries no decorator the rewrite recognises:
+                # nothing was rewritten, so no code object is swapped in.
+                log().info("[%s] left as it is: no DSL decorator", function_name)
+                original_function._preprocessed = True
+                return None
             if self.envar.debug:
                 log().info(
                     "# Printing unparsed AST after preprocess of func=`%s`",

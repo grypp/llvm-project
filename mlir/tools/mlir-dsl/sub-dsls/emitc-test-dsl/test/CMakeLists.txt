@@ -18,22 +18,21 @@ configure_lit_site_cfg(
 set(MLIR_DSL_TEST_DEPENDS
   FileCheck count not
   MLIRPythonModules
-  MLIRPythonModulesMlirTestDSL
+  MLIRPythonModulesEmitCTestDSL
+  mlir-translate
 )
 if(MLIR_ENABLE_EXECUTION_ENGINE)
   # Provides the `host-supports-jit` feature probe.
   list(APPEND MLIR_DSL_TEST_DEPENDS mlir-runner)
 endif()
 
-add_lit_testsuite(check-mlir-dsl "Running the mlir.dsl core tests (the sub-DSL suites depend on it)"
+add_lit_testsuite(check-mlir-dsl-emitc-test-dsl "Running the mlir.emitc_dsl sub-DSL tests"
   ${CMAKE_CURRENT_BINARY_DIR}
   DEPENDS ${MLIR_DSL_TEST_DEPENDS}
 )
-set_target_properties(check-mlir-dsl PROPERTIES FOLDER "MLIR/Tests")
+set_target_properties(check-mlir-dsl-emitc-test-dsl PROPERTIES FOLDER "MLIR/Tests")
 
-add_lit_testsuites(MLIR_DSL ${CMAKE_CURRENT_SOURCE_DIR} DEPENDS ${MLIR_DSL_TEST_DEPENDS})
+add_lit_testsuites(MLIR_DSL_EMITC_TEST_DSL ${CMAKE_CURRENT_SOURCE_DIR} DEPENDS ${MLIR_DSL_TEST_DEPENDS})
 
-# `check-mlir` covers the DSL tests too.
-if(TARGET check-mlir)
-  add_dependencies(check-mlir check-mlir-dsl)
-endif()
+# `check-mlir-dsl` covers the sub-DSL tests too.
+add_dependencies(check-mlir-dsl check-mlir-dsl-emitc-test-dsl)

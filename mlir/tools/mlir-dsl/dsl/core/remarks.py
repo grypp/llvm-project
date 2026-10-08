@@ -20,7 +20,10 @@ from . import diagnostics as _diagnostics
 from .common import DSLRuntimeError
 from ..util.logger import log
 
-__all__ = ["RemarkSession", "error_diagnostics", "remarks_available"]
+__all__ = ["REMARK_POLICIES", "RemarkSession", "error_diagnostics", "remarks_available"]
+
+# The ``REMARKS_POLICY`` values a DSL accepts (``BaseDSL`` checks the setting).
+REMARK_POLICIES: tuple[str, ...] = ("all", "final")
 
 
 # ``Remark::print`` spells the kind as a bracketed prefix; the headline drops it

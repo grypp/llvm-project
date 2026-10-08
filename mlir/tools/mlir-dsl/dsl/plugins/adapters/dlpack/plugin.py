@@ -109,15 +109,34 @@ class DlpackTensor:
     """The metadata of a DLPack tensor, valid while this object lives.
 
     :param tensor: Any object with ``__dlpack__``
-    :raises DSLUserCodeError: ``TYPE_UNKNOWN_DTYPE_NAME`` for an element type
-        the DSL has no numeric type for
+    :raises DSLUserCodeError: ``ARG_BUFFER_INVALID`` for a tensor DLPack cannot
+        import (an object or datetime array, a big-endian dtype),
+        ``TYPE_UNKNOWN_DTYPE_NAME`` for an element type the DSL has no numeric
+        type for
     """
 
     def __init__(self, tensor: Any) -> None:
         from mlir._mlir_libs import _mlirDslDlpack
 
         self.tensor = tensor
-        self._view = _mlirDslDlpack.TensorView(tensor)
+        try:
+            self._view = _mlirDslDlpack.TensorView(tensor)
+        except (TypeError, ValueError, RuntimeError, BufferError) as e:
+            # nanobind describes no object, datetime or big-endian array, and
+            # a framework may refuse to export a dtype: a diagnostic, not the
+            # binding's TypeError.
+            arg_name, _ = JitArgAdapterRegistry.active_argument()
+            kind = f"{type(tensor).__module__}.{type(tensor).__qualname__}"
+            dtype = getattr(tensor, "dtype", None)
+            raise DSLUserCodeError(
+                DiagId.ARG_BUFFER_INVALID,
+                arg_name=arg_name,
+                arg_type=kind,
+                detail=f"it is a `{kind}`"
+                + (f" of dtype `{dtype}`" if dtype is not None else "")
+                + f" that DLPack cannot import ({type(e).__name__})",
+                cause=e,
+            ) from e
         key = (self._view.dtype_code, self._view.dtype_bits)
         dtype = _DTYPES.get(key) if self._view.dtype_lanes == 1 else None
         if dtype is None:
@@ -168,7 +187,7 @@ class DlpackTensor:
 
     @property
     def size_in_bytes(self) -> int:
-        return math.prod(self.shape) * self.dtype.width // 8
+        return self.dtype.n_bytes(math.prod(self.shape))
 
     def pointer(self) -> Pointer:
         """A host ``Pointer`` over the data, keeping this descriptor alive."""
@@ -199,5 +218,5 @@ class DlpackPlugin(AdapterPlugin):
 
     def register(self, dsl: Any) -> None:
         # The protocol registry is process-wide: one registration serves
-        # every DSL instance. Type-keyed adapters (NumPy, PyTorch) win first.
+        # every DSL instance. An adapter a DSL registers for a type wins first.
         JitArgAdapterRegistry.register_protocol_adapter(speaks_dlpack, _convert_dlpack)

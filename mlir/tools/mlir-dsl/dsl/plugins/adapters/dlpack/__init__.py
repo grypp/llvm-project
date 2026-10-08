@@ -4,6 +4,6 @@
 
 """The ``dlpack`` plugin: any object speaking the DLPack protocol as a ``Pointer``."""
 
-from .plugin import DlpackPlugin, DlpackTensor, available
+from .plugin import DlpackPlugin, DlpackTensor, available, speaks_dlpack
 
-__all__ = ["DlpackPlugin", "DlpackTensor", "available"]
+__all__ = ["DlpackPlugin", "DlpackTensor", "available", "speaks_dlpack"]

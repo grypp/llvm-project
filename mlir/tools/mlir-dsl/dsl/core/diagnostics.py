@@ -797,10 +797,10 @@ class DiagId(DiagCatalog, enum.Enum):
     # --- PHASE ---
     PHASE_MUTATE_PYTHON = (
         "`{var}` is a {meta}, but it is changed inside a for/while/if controlled by a "
-        "runtime value{detail}. Only a runtime value can change there: the code inside "
+        "{staged}{detail}. Only a {staged} can change there: the code inside "
         "is compiled once, not run once per iteration or per taken branch.",
         (
-            "Create `{var}` as a runtime value of the matching type before the "
+            "Create `{var}` as a {staged} of the matching type before the "
             "for/while/if, e.g. `{var} = Int32(0)`, `Float32(0.0)`, or "
             "`Boolean(False)`, and update it inside.",
             "If `{var}` is a fixed setting, assign it once before the for/while/if and "
@@ -813,19 +813,19 @@ class DiagId(DiagCatalog, enum.Enum):
         (
             "For a loop: put `for ... in range(...)` inside a function decorated with "
             "`@jit` (with the preprocessor enabled), so it becomes a for controlled by "
-            "a runtime value, or build the loop with `for_(...)`.",
+            "a {staged}, or build the loop with `for_(...)`.",
             "For an index: if it is known at compile time, keep it a Python `int`, "
-            "i.e. a {meta}, instead of a runtime value.",
+            "i.e. a {meta}, instead of a {staged}.",
         ),
     )
     PHASE_DYNAMIC_TO_STATIC_BOOL = (
         "A {staged} is used where plain Python needs a true/false answer, for example "
         "`if x:` in a function that is not compiled or has preprocessing disabled, or "
-        "`sorted()` comparing runtime values; only a {meta} can be used there.",
+        "`sorted()` comparing {staged}s; only a {meta} can be used there.",
         (
             "Decorate the function that contains the `if`/`while` with `@jit` and keep "
             "the preprocessor enabled, so it becomes an if/while controlled by a "
-            "runtime value, or build it with `if_(...)`/`while_(...)`.",
+            "{staged}, or build it with `if_(...)`/`while_(...)`.",
             "If the condition is decided at compile time, make it a {meta}.",
         ),
     )
@@ -853,7 +853,7 @@ class DiagId(DiagCatalog, enum.Enum):
             "path has the new type.",
             "If one path sets `{var}` to `None`, a tuple, or an object, use a number "
             "or `Boolean` flag instead, or decide the branch at compile time with an "
-            "`if` on a Meta value.",
+            "`if` on a {meta}.",
         ),
     )
     TYPE_CONDITIONAL_BRANCH_MISMATCH = (
@@ -928,14 +928,14 @@ class DiagId(DiagCatalog, enum.Enum):
         (
             "Set `{var}` before the for/while/if, even if every branch or iteration "
             "assigns it later.",
-            "Set it before any compile-time `if` as well: a branch on a Meta value "
+            "Set it before any compile-time `if` as well: a branch on a {meta} "
             "that is not taken does not assign the variables inside it.",
         ),
     )
     SCOPE_CLOSURE_CAPTURE = (
         "Function `{func_name}` captures variable `{var_name}` from the enclosing "
         "scope, but `{func_name}` is used inside a for/while/if controlled by a "
-        "runtime value, where captured variables are not supported.",
+        "{staged}, where captured variables are not supported.",
         (
             "Pass `{var_name}` to `{func_name}` as an argument.",
             "Define `{func_name}` inside the body of the for/while/if.",
@@ -948,7 +948,7 @@ class DiagId(DiagCatalog, enum.Enum):
         "runs zero times or takes a different path.",
         (
             "Read `{var}` inside the {region} body that creates it.",
-            "Create `{var}` as a runtime value before the {region}, e.g. `{var} = "
+            "Create `{var}` as a {staged} before the {region}, e.g. `{var} = "
             "Int32(0)`, and assign it inside so the value is carried on every path.",
         ),
     )
@@ -962,7 +962,7 @@ class DiagId(DiagCatalog, enum.Enum):
             "Assign `{var}` a value of the same type and structure on every branch and "
             "every iteration of the `{op_type}`.",
             "If `{var}` is meant to change structure, do it in a compile-time for/if "
-            "(one whose bounds or condition are Meta values).",
+            "(one whose bounds or condition are {meta}s).",
         ),
     )
     CONTAINER_UNSUPPORTED = (
@@ -1004,11 +1004,11 @@ class DiagId(DiagCatalog, enum.Enum):
     )
     UNSUP_EARLY_EXIT = (
         "Early exit ({kind}) is not allowed in {where}. The `{kind}` sits inside a "
-        "for/while/if controlled by a runtime value, and that block always runs to its "
+        "for/while/if controlled by a {staged}, and that block always runs to its "
         "end when the kernel runs, so it cannot leave early. (An `if`/`while` whose "
-        "condition is a Meta value runs in Python and may exit early.)",
+        "condition is a {meta} runs in Python and may exit early.)",
         (
-            "If the condition is decided at compile time, make it a Meta value (a "
+            "If the condition is decided at compile time, make it a {meta} (a "
             "plain Python value, not a staged one); the `{kind}` then runs in Python "
             "and is allowed.",
             "If the condition is only decided when the kernel runs, replace the "

@@ -25,10 +25,10 @@ using namespace nb::literals;
 namespace {
 /// Holds the imported array; nanobind keeps the producer alive through it.
 struct TensorView {
-  nb::ndarray<> array;
+  nb::ndarray<nb::ro> array;
 };
 
-nb::tuple dims(const nb::ndarray<> &array, bool strides) {
+nb::tuple dims(const nb::ndarray<nb::ro> &array, bool strides) {
   nb::list values;
   for (size_t i = 0, n = array.ndim(); i < n; ++i)
     values.append(strides ? nb::int_(array.stride(i))
@@ -45,10 +45,12 @@ NB_MODULE(_mlirDslDlpack, m) {
                          "or buffer protocol; keeps the tensor alive.")
       .def(
           "__init__",
-          [](TensorView *self, nb::ndarray<> array) {
+          [](TensorView *self, nb::ndarray<nb::ro> array) {
             new (self) TensorView{std::move(array)};
           },
-          "tensor"_a, "Imports `tensor`, any object with `__dlpack__`.")
+          "tensor"_a,
+          "Imports `tensor`, any object with `__dlpack__` or the buffer "
+          "protocol, writable or read-only.")
       .def_prop_ro(
           "data_ptr",
           [](const TensorView &self) {
@@ -67,7 +69,8 @@ NB_MODULE(_mlirDslDlpack, m) {
       .def_prop_ro(
           "dtype_code",
           [](const TensorView &self) { return int(self.array.dtype().code); },
-          "The DLPack type code (0 int, 1 uint, 2 float, 4 bfloat, 6 bool).")
+          "The DLPack type code (0 int, 1 uint, 2 float, 4 bfloat, 6 bool, "
+          "7 to 17 the narrow floats of DLPack 1.1).")
       .def_prop_ro(
           "dtype_bits",
           [](const TensorView &self) { return int(self.array.dtype().bits); })

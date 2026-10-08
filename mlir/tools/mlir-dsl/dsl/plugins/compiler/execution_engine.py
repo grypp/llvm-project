@@ -15,6 +15,7 @@ remarks of a compile are ``core/remarks.py``'s business
 """
 
 import collections.abc
+import importlib.util
 import os
 import sys
 from typing import Any
@@ -62,12 +63,13 @@ class Compiler(CompilerPlugin):
     @classmethod
     def available(cls) -> bool:
         """Whether the bindings carry the pass manager and the execution
-        engine (``MLIR_ENABLE_EXECUTION_ENGINE``)."""
-        try:
-            from .... import execution_engine, passmanager  # noqa: F401
-        except ImportError:
-            return False
-        return True
+        engine (``MLIR_ENABLE_EXECUTION_ENGINE``): a probe of the package,
+        importing neither (the engine is imported at the first compile)."""
+        root = __package__.rsplit(".", 3)[0]  # the `mlir` package
+        return all(
+            importlib.util.find_spec(f"{root}.{module}") is not None
+            for module in ("execution_engine", "passmanager")
+        )
 
     @property
     def passmanager(self) -> Any:

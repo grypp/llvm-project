@@ -41,10 +41,10 @@ class (``@MyDSL.kernel``); ``BaseDSL.__init__`` resolves the record once per
 instance (:meth:`Plugins.resolve`): a plugin whose ``available()`` is False
 is dropped and remembered in ``dsl.unavailable_plugins``, the others are
 copied and installed in record order (roles, then decorators, then
-adapters). A variant DSL is ``dataclasses.replace(Base.plugins,
-decorators=(), adapters=())``. The base names nothing: there is no default
-world in the core, and no decorator at all; ``@jit`` is the shipped
-``func.Jit`` plugin.
+adapters). A variant DSL is ``Base.plugins.without("gpu")`` (the same DSL
+without kernels) or ``dataclasses.replace(Base.plugins, adapters=())``. The
+base names nothing: there is no default world in the core, and no decorator at
+all; ``@jit`` is the shipped ``func.Jit`` plugin's.
 """
 
 from __future__ import annotations
@@ -545,7 +545,8 @@ class Plugins:
         """A copy of the record without the family members named by ``keys``:
         a plugin ``name`` (``"gpu"``), a ``decorator_name`` (``"kernel"``) or a
         plugin class. The roles are untouched; the shipped variants are spelled
-        this way (``MlirTestDSL.plugins.without("gpu")`` is CPU-only)."""
+        this way (``MlirTestDSL.plugins.without("gpu")`` is the DSL without
+        kernels)."""
 
         def dropped(plugin: Plugin) -> bool:
             for key in keys:

@@ -50,7 +50,7 @@ assert "mlir.dialects.gpu" not in sys.modules
 # CHECK: loaded mlir.execution_engine: False
 # CHECK: loaded mlir.passmanager: False
 
-# The plugins a CPU-only DSL needs, imported only now (`@jit` itself is the
+# The plugins a DSL with `@jit` alone needs, imported only now (`@jit` itself is the
 # `func.Jit` decorator plugin; numpy arrays arrive through the dlpack adapter
 # plugin like any DLPack tensor; the core adapts no host buffer and knows no
 # decorator).
@@ -61,7 +61,7 @@ from mlir.dsl.plugins.type_ops import arith, llvm, vector
 from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps
 
 
-class CpuOnlyDSL(BaseDSL):
+class JitOnlyDSL(BaseDSL):
     plugins = Plugins(
         type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),
         compiler=execution_engine.Compiler(),
@@ -84,7 +84,7 @@ class CpuOnlyDSL(BaseDSL):
         super().__init__(name="MLIR_DSL")
 
 
-@CpuOnlyDSL.jit
+@JitOnlyDSL.jit
 def scale_store(a: Int32, out: Pointer[Float32]) -> Int32:
     out[0] = Float32(a)
     return a * 2 + 1
@@ -107,7 +107,7 @@ def scale_store(a: Int32, out: Pointer[Float32]) -> Int32:
 # CHECK:         gpu bindings loaded: False
 print("RESULT:", scale_store(3, np.zeros(4, np.float32)))
 print(
-    "plugins:", [p.name for p in CpuOnlyDSL().plugins], CpuOnlyDSL().unavailable_plugins
+    "plugins:", [p.name for p in JitOnlyDSL().plugins], JitOnlyDSL().unavailable_plugins
 )
-print("pipeline:", CpuOnlyDSL()._get_pipeline(None))
+print("pipeline:", JitOnlyDSL()._get_pipeline(None))
 print("gpu bindings loaded:", "mlir.dialects.gpu" in sys.modules)

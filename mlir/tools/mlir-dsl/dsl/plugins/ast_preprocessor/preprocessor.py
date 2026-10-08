@@ -33,7 +33,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum, auto
 from itertools import chain
 from types import ModuleType
-from typing import Any, ClassVar, TypeVar
+from typing import Any, TypeVar
 
 from .... import ir
 from ...core.common import DSLRuntimeError, DSLUserCodeError
@@ -598,7 +598,7 @@ _ComprehensionT = TypeVar(
 
 
 class DSLPreprocessor(ast.NodeTransformer):
-    """The AST transformer behind ``@jit``/``@kernel``.
+    """The AST transformer behind the DSL decorators (``@jit``, ``@kernel``, ...).
 
     - ``for`` loops become ``@loop_selector`` body functions, ``if``/``elif``/
       ``else`` become ``@if_selector`` regions and ``while`` loops
@@ -610,12 +610,18 @@ class DSLPreprocessor(ast.NodeTransformer):
     - ``global`` is rejected, ``nonlocal`` must name a bound variable, ``_``
       cannot be read, and the DSL decorator must be the innermost one.
 
-    :param client_module_name: The DSL package the rewrite imports as
-        ``__module_dsl__`` (the DSL's ``dsl_package_name``, ``["mlir", "mlir_dsl"]``
-        for ``MlirTestDSL``), as path parts
+    :param client_module_name: The package the rewrite imports as
+        ``__module_dsl__`` (the DSL's ``dsl_package_name`` when given, else the
+        ``ast_preprocessor`` plugin's own package, where ``and_``/``or_``/
+        ``not_``/``as_ir_value`` live), as path parts
     :param if_born_locals_escape: Whether a name first bound in an arm of a
         staged ``if`` and read after it is threaded through the region (seeded
         ``None``); when False such a read is ``SCOPE_REGION_LOCAL_ESCAPES``
+    :param closure_check: Whether a region calling nested functions gets a
+        ``closure_check`` call
+    :param decorator_names: The decorators marking a function for the rewrite:
+        the ``decorator_name`` of every decorator plugin of the DSL
+        (``BaseDSL.__init__`` passes them); ``("jit",)`` by default
     """
 
     DECORATOR_FOR_STATEMENT = "loop_selector"
@@ -629,15 +635,6 @@ class DSLPreprocessor(ast.NodeTransformer):
     COMPARE_EXECUTOR = "compare_executor"
     BUILTIN_REDIRECTOR = "redirect_builtin_function"
     BOOL_SHORT_CIRCUITS = "bool_short_circuits"
-
-    # The decorators that mark a function for preprocessing (``@m.jit``,
-    # ``@m.kernel``); a sub-DSL with its own spellings overrides this on its
-    # preprocessor class.
-    DSL_DECORATOR_NAMES: ClassVar[tuple[str, ...]] = ("jit", "kernel")
-
-    # Decorator keywords that do not prevent decorator recognition.
-    # "preprocess" controls whether AST preprocessing is enabled.
-    KNOWN_DSL_DECORATOR_KWARGS: ClassVar[frozenset[str]] = frozenset()
 
     def generic_visit(self, node: ast.AST) -> ast.AST:
         """
@@ -683,11 +680,16 @@ class DSLPreprocessor(ast.NodeTransformer):
         *,
         if_born_locals_escape: bool = True,
         closure_check: bool = True,
+        decorator_names: Iterable[str] = ("jit",),
     ) -> None:
         super().__init__()
         # Persistent state
         self.processed_functions: set[Callable[..., Any]] = set()
         self.client_module_name = client_module_name
+        # The decorators marking a function for the rewrite (``@m.jit``,
+        # ``@m.kernel``, a sub-DSL's own); a function carrying none is left as
+        # it is.
+        self.decorator_names: frozenset[str] = frozenset(decorator_names)
         # False: a region calling nested functions gets no ``closure_check`` call.
         self.closure_check: bool = closure_check
         # A name first bound inside an arm of a staged ``if`` and read after
@@ -2300,22 +2302,13 @@ class DSLPreprocessor(ast.NodeTransformer):
             name = decorator.id
         else:
             return None
-        return name if name in self.DSL_DECORATOR_NAMES else None
+        return name if name in self.decorator_names else None
 
     def get_dsl_decorator_index(self, decorator_list: list[ast.expr]) -> int | None:
-        """The index of the DSL decorator in ``decorator_list``, or ``None``.
-
-        ``@jit`` and ``@jit()`` qualify; the core decorators take no options,
-        so a call with a keyword outside ``KNOWN_DSL_DECORATOR_KWARGS`` (empty
-        here; a sub-DSL whose decorators accept options extends the set) is
-        not recognised as the DSL decorator.
-        """
+        """The index of the DSL decorator in ``decorator_list``, or ``None``;
+        ``@jit`` and ``@jit()`` both qualify (the decorators take no options)."""
         for i, d in enumerate(decorator_list):
-            if self._dsl_decorator_name(d) is None:
-                continue
-            if not isinstance(d, ast.Call) or all(
-                keyword.arg in self.KNOWN_DSL_DECORATOR_KWARGS for keyword in d.keywords
-            ):
+            if self._dsl_decorator_name(d) is not None:
                 return i
         return None
 

@@ -14,8 +14,10 @@ the annotation picks the reader (bool, int, ``int | None`` or str), and
 redeclares or adds settings; ``BaseDSL`` constructs one per instance under the
 DSL's name as prefix.
 
-Malformed values raise :class:`DSLRuntimeError` from the typed readers: they
-describe the process environment, not the author's kernel.
+A malformed value is the user's mistake: the typed readers raise
+:class:`DSLUserCodeError` ``CONFIG_INVALID`` naming the variable. A malformed
+declaration (an annotation without a reader, a bad default) is the DSL
+author's and raises :class:`DSLRuntimeError`.
 """
 
 import inspect
@@ -28,7 +30,8 @@ from typing import Any, Callable, Union, get_args, get_origin
 
 from ..util import profiler
 from ..util.logger import setup_log
-from .common import DSLRuntimeError, DSLWarning
+from .common import DSLRuntimeError, DSLUserCodeError, DSLWarning
+from .diagnostics import DiagId
 
 
 @dataclass(frozen=True)
@@ -239,7 +242,8 @@ def get_bool_env_var(var_name: str, default_value: bool = False) -> bool:
     returns ``default_value``.
 
     Raises:
-        DSLRuntimeError: if the variable is set to any other value.
+        DSLUserCodeError: ``CONFIG_INVALID`` if the variable is set to any
+            other value.
     """
     raw = get_str_env_var(var_name)
     if raw is None:
@@ -251,11 +255,12 @@ def get_bool_env_var(var_name: str, default_value: bool = False) -> bool:
         return True
     if normalized in _BOOL_FALSE_VALUES:
         return False
-    raise DSLRuntimeError(
-        f"Invalid value for environment variable {var_name}={raw!r}. "
-        f"Expected a boolean (case-insensitive): "
-        f"{sorted(_BOOL_TRUE_VALUES) + sorted(_BOOL_FALSE_VALUES)} "
-        f"or empty/unset to use the default ({default_value!r})."
+    accepted = ", ".join(sorted(_BOOL_TRUE_VALUES) + sorted(_BOOL_FALSE_VALUES))
+    raise DSLUserCodeError(
+        DiagId.CONFIG_INVALID,
+        var=var_name,
+        detail=f"`{raw}` is not a boolean; expected one of {accepted} "
+        f"(case-insensitive), or empty for the default `{default_value!r}`",
     )
 
 
@@ -268,8 +273,8 @@ def get_int_env_var(var_name: str, default_value: int = 0) -> int:
     ``-5``) are accepted.
 
     Raises:
-        DSLRuntimeError: if the variable is set to a value that is not a
-            valid base-10 integer.
+        DSLUserCodeError: ``CONFIG_INVALID`` if the variable is set to a value
+            that is not a valid base-10 integer.
     """
     raw = get_str_env_var(var_name)
     if raw is None:
@@ -280,10 +285,11 @@ def get_int_env_var(var_name: str, default_value: int = 0) -> int:
     try:
         return int(stripped)
     except ValueError:
-        raise DSLRuntimeError(
-            f"Invalid value for environment variable {var_name}={raw!r}. "
-            f"Expected a base-10 integer, or empty/unset to use the "
-            f"default ({default_value!r})."
+        raise DSLUserCodeError(
+            DiagId.CONFIG_INVALID,
+            var=var_name,
+            detail=f"`{raw}` is not a base-10 integer; expected one, or empty "
+            f"for the default `{default_value!r}`",
         ) from None
 
 
@@ -300,7 +306,8 @@ def get_int_or_none_env_var(
     An unset variable or one with an empty value returns ``default_value``.
 
     Raises:
-        DSLRuntimeError: if the variable is set to anything else.
+        DSLUserCodeError: ``CONFIG_INVALID`` if the variable is set to
+            anything else.
     """
     raw = get_str_env_var(var_name)
     if raw is None:
@@ -313,10 +320,11 @@ def get_int_or_none_env_var(
     try:
         return int(normalized)
     except ValueError:
-        raise DSLRuntimeError(
-            f"Invalid value for environment variable {var_name}={raw!r}. "
-            f"Expected a base-10 integer, the literal 'none', or "
-            f"empty/unset to use the default ({default_value!r})."
+        raise DSLUserCodeError(
+            DiagId.CONFIG_INVALID,
+            var=var_name,
+            detail=f"`{raw}` is not a base-10 integer or `none`; expected one of "
+            f"those, or empty for the default `{default_value!r}`",
         ) from None
 
 
@@ -406,7 +414,7 @@ class EnvironmentVarManager(LogEnvironmentManager):
     - [DSL_NAME]_DEBUG: Master debug switch for DSL developers (default: False).
       When True, raises the default of DEBUGINFO and SHOW_STACKTRACE. These
       defaults remain independently overridable by their own env vars.
-    - [DSL_NAME]_SHOW_STACKTRACE: Show full stack traces on failure (default: False)
+    - [DSL_NAME]_SHOW_STACKTRACE: Show full stack traces on failure (default: DEBUG)
     - [DSL_NAME]_DEBUGINFO: Attach source locations to every op (default: DEBUG)
     - [DSL_NAME]_VERIFY_TRACE: Verify every op as it is built while tracing (default: False)
     - [DSL_NAME]_LOG_LEVEL: Logging level to set, for LOG_TO_CONSOLE or LOG_TO_FILE (default: 1).

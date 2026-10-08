@@ -30,7 +30,7 @@ concerns.
   folders and are imported when a DSL names the plugin.
 - The emitter behind the types, the host entry behind `@jit` and the compiler
   are hooks with a working default and an exercised override
-  (`test/plugins_type_ops.py`, example 14 trace one program under two type-ops plugins).
+  (`sub-dsls/mlir-test-dsl/test/plugins_type_ops.py`, example 14 trace one program under two type-ops plugins).
 - `Compiler` is a thin, idiomatic use of the bindings and almost method for
   method `test/Examples/NVGPU/tools/nvgpucompiler.py`; the host entry is
   `nvdsl`'s `func.func` with the C interface and a packed invoke.
@@ -62,10 +62,10 @@ Structural, meaning the current seams do not contain them:
    lowering only; the README's statement that the compiler is a hook is half
    true. A compiler that does not produce an `ExecutionEngine` cannot be
    plugged in today.
-2. **A CUDA-shaped launch protocol lives in the core**: `LaunchConfig`, the
+2. **A CUDA-shaped launch protocol lived in the core**: `LaunchConfig`, the
    launcher, `@kernel`, the `gpu_module_attrs` call keyword, and the mandatory
    constructor arguments `pass_sm_arch_name` and `dsl_package_name`, which a
-   CPU-only DSL still has to supply.
+   DSL without kernels still had to supply.
 3. **The default world imported `mlir.execution_engine` at module import**
    (then `dsl/plugins/dialects/llvm/plugin.py`), an upstream-optional
    component, while `MLIR_ENABLE_PYTHON_DSL` defaulted to ON (both fixed
@@ -125,7 +125,8 @@ Decided or already done (2026-10-07):
   of the core lives on exactly one of them. A dialect the DSL only emits ops
   from is a module in the folder of the plugin that emits it, not a plugin. `pipeline()` and
   `register_dialects()` stay methods of the DSL.
-- [x] Decorators are plugins (`DecoratorPlugin`): the core knows only `@jit`.
+- [x] Decorators are plugins (`DecoratorPlugin`): the core knows no decorator,
+  only the default name `jit`; `@jit` is the `func.Jit` plugin's.
   A plugin's `decorators()` is installed on the DSL class by
   `__init_subclass__`; the shared services `bind_arguments` and `trace_body`
   and the hooks `before_trace`, `after_trace`, `check_arguments`,

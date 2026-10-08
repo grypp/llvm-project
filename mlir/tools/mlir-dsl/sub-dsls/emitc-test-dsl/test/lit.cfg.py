@@ -8,10 +8,11 @@ import lit.util
 
 from lit.llvm import llvm_config
 
-# Configuration file for the 'lit' test runner of the mlir.dsl Python DSL.
+# Configuration file for the 'lit' test runner of the mlir.emitc_dsl sub-DSL:
+# the IR-level tests here and the mlir-translate test under Integration/.
 
 # name: The name of this test suite.
-config.name = "MLIR-DSL"
+config.name = "MLIR-DSL-EmitCTestDSL"
 
 config.test_format = lit.formats.ShTest()
 
@@ -37,8 +38,10 @@ config.substitutions.append(("%PYTHON", config.python_executable))
 llvm_config.with_system_environment(["HOME", "INCLUDE", "LIB", "TMP", "TEMP"])
 llvm_config.use_default_substitutions()
 
-# FileCheck, not, count and the MLIR tools.
+# FileCheck, not, count and the MLIR tools; mlir-translate turns the traced
+# module into C in the Integration test.
 llvm_config.with_environment("PATH", config.llvm_tools_dir, append_path=True)
+llvm_config.add_tool_substitutions(["mlir-translate"], [config.llvm_tools_dir])
 
 # The `mlir` Python package of this build.
 llvm_config.with_environment(
@@ -50,10 +53,10 @@ llvm_config.with_environment(
 # ASan does not play well with the Python interpreter.
 config.environment["ASAN_OPTIONS"] = "detect_leaks=0"
 
-# MLIR_DSL_KEEP_IR dumps and the file cache go under MLIR_DSL_CACHE_DIR: keep
+# EMITC_DSL_KEEP_IR dumps and the file cache go under EMITC_DSL_CACHE_DIR: keep
 # them out of the source tree and of the shared system temp dir.
-config.environment["MLIR_DSL_CACHE_DIR"] = os.path.join(
-    config.test_exec_root, "Output", "mlir_dsl_cache"
+config.environment["EMITC_DSL_CACHE_DIR"] = os.path.join(
+    config.test_exec_root, "Output", "emitc_dsl_cache"
 )
 
 

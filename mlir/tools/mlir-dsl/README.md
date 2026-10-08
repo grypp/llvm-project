@@ -22,8 +22,9 @@ def saxpy(a: m.Float32, x: m.Pointer[m.Float32], y: m.Pointer[m.Float32], n: m.I
 
 ```
 mlir/tools/mlir-dsl/
+├── docs/                            mlir-design-fit.md: how the layer fits MLIR's premises, the checklist
 ├── dsl/                             CORE, installed as `mlir.dsl`: the language, no dialect of its own
-│   ├── core/                        BaseDSL (@jit; plugins add the other decorators), staging (Python value vs MLIR op), the host
+│   ├── core/                        BaseDSL (the decorator machinery; every decorator, @jit included, is a plugin's), staging (Python value vs MLIR op), the host
 │   │                                boundary (argument adapters), the plugin roles and the Plugins record,
 │   │                                OpEmitter, diagnostics, env, remarks
 │   ├── types/                       Int32/Float32/..., Pointer, @struct, Vector, max/min
@@ -32,24 +33,35 @@ mlir/tools/mlir-dsl/
 │   │   ├── ast_preprocessor/        the rewrite, its helpers; scf/: ASTPreprocessor, the scf builders and executors
 │   │   ├── compiler/                Compiler: pass manager + ExecutionEngine + packed invoke; jit_executor
 │   │   ├── decorators/jit/          @jit: func.py (Jit: the func.func host entry with the C interface)
-│   │   ├── decorators/kernels/      @kernel: launch.py (decorator, launcher, LaunchConfig); gpu/: Kernels + index ops
+│   │   ├── decorators/kernels/      @kernel: launch.py (decorator, launcher, the target protocol); gpu/: Kernels, LaunchConfig, index ops
 │   │   └── adapters/                the host boundary: dlpack (numpy arrays, torch tensors, anything DLPack in), tvm_ffi (the entry out as another ABI)
 │   └── util/                        pytrees, caches, profiler, logger
-├── test/                            core and plugin tests (lit suite MLIR-DSL)
-└── sub-dsls/
-    └── mlir-dsl/                    the reference sub-DSL
-        ├── dsl/                     installed as `mlir.mlir_dsl`: MlirTestDSL, jit, kernel, compile, the namespace
-        ├── test/                    its own lit suite (MLIR-DSL-MlirTestDSL)
-        └── examples/                14 runnable examples, one concept per file
+├── test/                            the core-only lit suite MLIR-DSL: an IR-only DSL, a jit-only DSL, the no-builtin-raises scan
+└── sub-dsls/                        the test sub-DSLs, one folder each: dsl/ (installed), test/ (IR-level), test/Integration/ (execution)
+    ├── mlir-test-dsl/               the reference sub-DSL
+    │   ├── dsl/                     installed as `mlir.mlir_dsl`: MlirTestDSL, jit, kernel, compile, the namespace
+    │   ├── test/                    the core, type, plugin and DSL tests, each checked at the IR level on every build (MLIR-DSL-MlirTestDSL)
+    │   │   └── Integration/         what needs the engine or a tool: the compiler, remarks, TVM-FFI, and one driver per example
+    │   └── examples/                14 runnable examples, one concept per file
+    └── emitc-test-dsl/              the second sub-DSL, installed as `mlir.emitc_dsl`: `+`/`*` answered by EmitC, no compiler
+        ├── dsl/                     EmitCScalarOps, EmitCTestDSL, jit
+        └── test/                    the IR (MLIR-DSL-EmitCTestDSL); Integration/: the module through mlir-translate --mlir-to-cpp
 ```
 
-A sub-DSL of your own is the same shape as `sub-dsls/mlir-dsl/`: a package
+A sub-DSL of your own is the same shape as `sub-dsls/mlir-test-dsl/`: a package
 that subclasses `BaseDSL`, names its plugins in one `Plugins` record, and
-re-exports the names its users write. It never imports `mlir.mlir_dsl`. The
-core's directory is `dsl/` because the build installs every file at its path
-relative to the declared root inside the `mlir` package; the sub-DSL's `dsl/`
-directory is installed as `mlir.mlir_dsl` by a module target of its own, so a
-sub-DSL's directory name is free.
+re-exports the names its users write. It never imports `mlir.mlir_dsl`.
+`sub-dsls/emitc-test-dsl/` is the second one in tree: a `type_ops` plugin that
+answers `add` and `mul` with the EmitC dialect and inherits the rest, the `scf`
+preprocessor, `func.Jit`, and no compiler, so the traced module is the product
+and its Integration test turns it into C with `mlir-translate --mlir-to-cpp`.
+The core's directory is `dsl/` because the build installs every file at its
+path relative to the declared root inside the `mlir` package; a sub-DSL's `dsl/`
+directory is installed under its package name by a module target of its own, so
+a sub-DSL's directory name is free. Each sub-DSL's `test/` holds the tests that
+check IR, rewritten Python or diagnostics and run on every build (an executing
+RUN line is wrapped in `%if host-supports-jit %{ ... %}`); `test/Integration/`
+holds what needs the execution engine, a device or an external tool.
 
 ## The core emits no dialect
 
@@ -83,7 +95,7 @@ class MlirTestDSL(BaseDSL):
         adapters=[dlpack.DlpackPlugin(), tvm_ffi.TvmFfiPlugin()],  # the host boundary: DLPack tensors in, another ABI out
     )
     def pipeline(self): ...                     # the pass list; no plugin contributes a pass
-    def register_dialects(self, ctx): ...       # out-of-tree dialects
+    # optional: def register_dialects(self, ctx) registers out-of-tree dialects (the test DSL has none)
 ```
 
 A dialect that only adds operations (`math`, your own) is a module, not a
@@ -93,7 +105,7 @@ lowering in `pipeline()`.
 A dialect takes over a role of the core by being named in the record: a tile
 dialect names a `type_ops` plugin answering rank-0 tiles, its own `compiler`
 when the shipped one does not apply, and its own decorator plugins (a jit
-plugin over its entry op, a kernels plugin). `test/plugins_type_ops.py` and example 14 trace one program under two
+plugin over its entry op, a kernels plugin). `sub-dsls/mlir-test-dsl/test/plugins_type_ops.py` and example 14 trace one program under two
 type-ops plugins. Outside a trace there is no DSL and no `type_ops`, so
 `Int32.mlir_type` is an error there; a plugin instance answers directly.
 
@@ -107,7 +119,7 @@ the fields that hold any number, each extending the DSL at one fixed point:
 | Role | Base class | Contract | In tree |
 |---|---|---|---|
 | `type_ops` | `TypeOpsPlugin` | the `OpEmitter` hooks above | the `UpstreamDialectTypeOps` composer over the op modules `arith`/`vector`/`llvm` beside it, every part optional (`plugins/type_ops/`) |
-| `ast_preprocessor` | `ASTPreprocessorPlugin` | `preprocessor_class`, `closure_check`, `executors(dsl)` | `scf.ASTPreprocessor` (`plugins/ast_preprocessor/`) |
+| `ast_preprocessor` | `ASTPreprocessorPlugin` | `preprocessor_class` (constructed with the helpers package, `closure_check` and the record's decorator names), `closure_check`, `helpers_package()`, `executors(dsl)` | `scf.ASTPreprocessor` (`plugins/ast_preprocessor/`) |
 | `compiler` | `CompilerPlugin` | `compile`, `jit`, `compile_and_jit`, `load`, `remark_session`, `print_ir_after_passes` | `execution_engine.Compiler` (`plugins/compiler/`) |
 
 | Family | Base class | Contract | In tree |
@@ -117,45 +129,50 @@ the fields that hold any number, each extending the DSL at one fixed point:
 
 `Plugin` itself keeps only the lifecycle every plugin shares: `available()` (a
 class-level probe: is the optional dependency importable, are the dialect
-bindings built), `install(dsl)`, `shared_libs()` and `register_dialects(ctx)`.
+bindings built), `install(dsl)`, `shared_libs()`, `register_dialects(ctx)` and
+`pipeline_options()` (options merged into a `<PREFIX>_PIPELINE` override, the
+gpu plugin's chip).
 Each hook of the core lives on exactly one role or family, so a plugin's
 connection is its base class, and the record names it a second time.
 `BaseDSL.__init__` resolves the record once per instance: a plugin whose
 `available()` is False is dropped and listed in `dsl.unavailable_plugins`, the
 others are copied and installed in record order (roles, then decorators,
 then adapters), and every hook loop runs over its own family. A variant
-of a DSL is its record with a change: `replace(MlirTestDSL.plugins,
-decorators=(), adapters=())` is a CPU-only DSL. The same plugin
+of a DSL is its record with a change: `MlirTestDSL.plugins.without("gpu")`
+is the same DSL without kernels (`@jit` stays: it is the `func.Jit` plugin's),
+`replace(MlirTestDSL.plugins, adapters=())` one without the host adapters. The same plugin
 instance may be named by any number of sub-DSLs (each gets a shallow copy).
 Importing `mlir.dsl.plugins` pulls in no plugin and no optional dependency
 (CUDA runtime, `torch`, `tvm_ffi`, the execution engine live only under
 `plugins/`). The staging decision and the host boundary stay with `BaseDSL`.
 
-Adding a decorator. The core's only decorator is `@jit`; every other one comes
-from a `DecoratorPlugin`. Its `decorators(dsl_cls)` returns the decorator,
-built with `dsl_cls.make_decorator(name, on_call)`, and
-`BaseDSL.__init_subclass__` installs it on every class whose record names the
-plugin, so `@MyDSL.kernel` exists exactly when the record says so. The core
-wrapper handles the lazy instance, the AST preprocessing and the active-DSL
-context and hands each call to `on_call(dsl, func, *args, **kwargs)`, the
-plugin's launcher. The launcher builds its function with the shared services
-`dsl.bind_arguments(...)` (the signature, canonical arguments and their IR
-operands, types and attributes) and `dsl.trace_body(entry, ...)` (the function
-op the entry protocol describes, with the body traced into it), and keeps its
-per-trace state through `before_trace`, `after_trace` and `check_arguments`.
+Adding a decorator. Every decorator is a `DecoratorPlugin`'s, `@jit` included
+(the core knows only the default decorator name). A plugin's `decorator_name`
+is the decorator it adds; `decorators(dsl_cls)` returns it, built with
+`dsl_cls.make_decorator(name, dispatch)`, and `BaseDSL.__init_subclass__`
+installs it on every class whose record names the plugin, so `@MyDSL.kernel`
+exists exactly when the record says so. The core wrapper handles the lazy
+instance and the AST preprocessing (the rewrite recognises every decorator
+name of the record) and hands each call to the plugin's dispatch: `call(dsl,
+func, *args, **kwargs)` from Python, `launch(...)` inside a trace. The plugin
+builds its function with the shared services `dsl.bind_arguments(...)` (the
+signature, canonical arguments and their IR operands, types and attributes)
+and `dsl.trace_body(entry, ...)` (the function op the entry protocol describes,
+with the body traced into it), and keeps its per-trace state through
+`before_trace`, `after_trace` and `check_arguments`.
 `plugins/decorators/kernels/launch.py` is the template: the `kernel` decorator,
-the deferred `KernelLauncher`, `LaunchConfig` and the entry protocol a target
-such as `gpu/` (its `__init__.py` holds `Kernels`) implements. The three shapes of a DSL are three records:
+the deferred `KernelLauncher` and the target protocol (`launch_config`, the
+entry ops, the launch); `gpu/` is the target (`Kernels`, `LaunchConfig`). The three shapes of a DSL are three records:
 
 ```python
 class JitOnly(BaseDSL):      # @jit
     plugins = Plugins(type_ops=..., compiler=..., decorators=[func.Jit()])
 
 class WithKernels(BaseDSL):  # @jit, @kernel
-    plugins = Plugins(..., decorators=[gpu.Kernels(chip_option="cubin-chip")])
+    plugins = Plugins(..., decorators=[func.Jit(), gpu.Kernels(chip_option="cubin-chip")])
 
 class WithMore(BaseDSL):     # @jit, @kernel, @task
-    plugins = Plugins(..., decorators=[gpu.Kernels(), tasks.Tasks()])
+    plugins = Plugins(..., decorators=[func.Jit(), gpu.Kernels(), tasks.Tasks()])
 ```
 
 How another sub-DSL would map onto this (a sketch; only the test DSL ships):
@@ -201,9 +218,9 @@ CMake options:
 
 | Option | Default | Effect |
 |---|---|---|
-| `MLIR_ENABLE_BINDINGS_PYTHON` | `OFF` | Required. Both packages are part of the `mlir` Python package. |
-| `MLIR_ENABLE_PYTHON_DSL` | `OFF` | Builds `mlir.dsl` and `mlir.mlir_dsl` into the Python package and adds both lit suites; opt in with `-DMLIR_ENABLE_PYTHON_DSL=ON`. |
-| `MLIR_INCLUDE_TESTS` | `ON` | Adds the lit suites `check-mlir-dsl` (`test/`, which also runs `check-mlir-dsl-mlir-dsl` for `sub-dsls/mlir-dsl/test/`); `check-mlir` depends on them. |
+| `MLIR_ENABLE_BINDINGS_PYTHON` | `OFF` | Required. All three packages are part of the `mlir` Python package. |
+| `MLIR_ENABLE_PYTHON_DSL` | `OFF` | Builds `mlir.dsl`, `mlir.mlir_dsl` and `mlir.emitc_dsl` into the Python package and adds the lit suites; opt in with `-DMLIR_ENABLE_PYTHON_DSL=ON`. |
+| `MLIR_INCLUDE_TESTS` | `ON` | Adds the lit suites: `check-mlir-dsl` (the core-only `test/`, which also runs `check-mlir-dsl-mlir-test-dsl` and `check-mlir-dsl-emitc-test-dsl` for the sub-DSLs, each with its `Integration/` folder); `check-mlir` depends on them. |
 | `MLIR_ENABLE_EXECUTION_ENGINE` | `ON` | Needed to run compiled code; tests that execute require the lit feature `host-supports-jit` (also needs the host in `LLVM_TARGETS_TO_BUILD`). |
 | `MLIR_ENABLE_CUDA_RUNNER` | `OFF` | Builds the CUDA runtime library the gpu kernels plugin hands to the engine when it finds it; `MlirTestDSL` names the plugin whenever the gpu bindings import, `MLIR_DSL_ARCH` selects the target. |
 
@@ -217,12 +234,12 @@ cmake -S llvm -B build -G Ninja \
 cmake --build build --target MLIRPythonModules
 ninja -C build check-mlir-dsl
 export PYTHONPATH="$PWD/build/tools/mlir/python_packages/mlir_core"
-python mlir/tools/mlir-dsl/sub-dsls/mlir-dsl/examples/01_staging.py
+python mlir/tools/mlir-dsl/sub-dsls/mlir-test-dsl/examples/01_staging.py
 ```
 
-Lit features: `host-supports-jit` gates the executing RUN lines; `tvm_ffi`
-(added when the test interpreter can import the `tvm_ffi` package) gates the
-TVM-FFI export test.
+Lit features: `host-supports-jit` gates the executing RUN lines and the
+Integration tests; `tvm_ffi` (added when the test interpreter can import the
+`tvm_ffi` package) gates the TVM-FFI export test.
 
 Runtime configuration is read from `MLIR_DSL_*` environment variables (see
 `core/env_manager.py`); `MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR=1` prints the IR

@@ -22,6 +22,7 @@ from __future__ import annotations
 import enum
 import os
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Optional, Union
 
@@ -29,7 +30,7 @@ from ...... import _mlir_libs, ir
 from .....core.common import DSLRuntimeError, DSLUserCodeError
 from .....core.diagnostics import USAGE, DiagCatalog, DiagId, classify
 from .....core.mlir_op import current_emitter
-from ..launch import KernelsPlugin, LaunchConfig
+from ..launch import KernelsPlugin
 from .....types.typing import Boolean, Int32, Int64, Integer, Numeric
 from .....util.logger import log
 
@@ -41,6 +42,7 @@ except ImportError:  # the gpu bindings are not built into this MLIR
 __all__ = [
     "GpuDiagId",
     "Kernels",
+    "LaunchConfig",
     "check_arch",
     "cuda_runtime_library",
 ]
@@ -141,6 +143,44 @@ classify(
     "LAUNCH_STREAM_UNSUPPORTED",
 )
 classify(GpuDiagId, USAGE, "compile options", "CONFIG_UNSUPPORTED_ARCH")
+
+
+# =============================================================================
+# Launch configuration
+# =============================================================================
+
+
+@dataclass
+class LaunchConfig:
+    """Grid, block and optional cluster dimensions plus dynamic shared memory
+    of one ``gpu.launch_func``: what ``kernel(...).launch(...)`` takes under
+    this plugin, whole or as its fields.
+
+    Dimensions accept Python ints or staged integers and are padded to three
+    entries; their type and count are validated when the launch is emitted.
+    ``async_deps`` is kept for signature fidelity and must be empty: launches
+    are synchronous.
+    """
+
+    cluster: list[Any] | None = None
+    grid: list[Any] = field(default_factory=lambda: [1, 1, 1])
+    block: list[Any] = field(default_factory=lambda: [1, 1, 1])
+    smem: int | None = None
+    async_deps: list[Any] = field(default_factory=list)
+
+    @staticmethod
+    def _pad_dim(dim: Any) -> list[Any]:
+        """Return ``dim`` (a scalar or a sequence) as a list padded with 1s to
+        three entries; a longer list is left for the launch to diagnose."""
+        if not isinstance(dim, (list, tuple)):
+            dim = [dim]
+        return list(dim) + [1] * (3 - len(dim))
+
+    def __post_init__(self) -> None:
+        self.grid = self._pad_dim(self.grid)
+        self.block = self._pad_dim(self.block)
+        if self.cluster is not None:
+            self.cluster = self._pad_dim(self.cluster)
 
 
 # =============================================================================
@@ -424,6 +464,20 @@ class Kernels(KernelsPlugin):
     def generate_return(self, op: Any, values: list[Any], loc: Any = None) -> None:
         """Terminate the kernel body with a ``gpu.return``."""
         gpu.ReturnOp([], loc=loc)
+
+    def launch_config(self, func: Any, *args: Any, **kwargs: Any) -> LaunchConfig:
+        """One :class:`LaunchConfig` or its constructor arguments; a launch is
+        synchronous, so ``async_deps`` must be empty."""
+        if len(args) == 1 and not kwargs and isinstance(args[0], LaunchConfig):
+            config = args[0]
+        else:
+            config = LaunchConfig(*args, **kwargs)
+        if config.async_deps:
+            raise DSLUserCodeError(
+                GpuDiagId.LAUNCH_STREAM_UNSUPPORTED,
+                kernel_name=getattr(func, "__name__", "<kernel>"),
+            )
+        return config
 
     def generate_launch(
         self,

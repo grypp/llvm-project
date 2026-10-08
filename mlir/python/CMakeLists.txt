@@ -997,6 +997,10 @@ if(TARGET MLIRPythonModulesMlirTestDSL)
   # The reference sub-DSL of mlir/tools/mlir-dsl is installed by its own target.
   add_dependencies(MLIRPythonModules MLIRPythonModulesMlirTestDSL)
 endif()
+if(TARGET MLIRPythonModulesEmitCTestDSL)
+  # The EmitC test sub-DSL of mlir/tools/mlir-dsl, likewise.
+  add_dependencies(MLIRPythonModules MLIRPythonModulesEmitCTestDSL)
+endif()
 if(MLIR_PYTHON_STUBGEN_ENABLED)
   add_dependencies(MLIRPythonModules "${_mlir_typestub_gen_target}")
   if(MLIR_INCLUDE_TESTS)
