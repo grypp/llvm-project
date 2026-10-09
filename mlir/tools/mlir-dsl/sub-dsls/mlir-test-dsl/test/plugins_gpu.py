@@ -1,20 +1,19 @@
-# RUN: env MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR=1 MLIR_DSL_ARCH=sm_90 %PYTHON %s 2>&1 | FileCheck %s
-# RUN: env MLIR_DSL_DRYRUN=1 %PYTHON %s 2>&1 | FileCheck %s --check-prefix=NOARCH
-# The gpu kernels plugin: `gpu.Kernels` is the decorator
-# plugin in MlirTestDSL's `Plugins` record that adds `@kernel`, installed
-# whenever the gpu bindings are present (kernel function, `gpu.module`
-# container, launch); it validates the arch at install and merges its chip
-# option into a `<PREFIX>_PIPELINE` override through `pipeline_options()`;
-# `MlirTestDSL.pipeline` puts `gpu-lower-to-nvvm-pipeline{cubin-chip=<arch>}`
-# ahead of the LLVM lowering when an arch is set. Calling a `@kernel` prepares a deferred launch; its
-# `.launch` emits the `gpu.func` (gpu.kernel, `known_block_size` for a static
-# block) in `gpu.module @kernels` and a synchronous `gpu.launch_func` with i64
-# dimensions and the host values flattened to operands; the index helpers read
-# the NVVM special registers as Int32. The launch validates its LaunchConfig and
-# the buffer kinds and raises the namespaced `gpu:` diagnostics. Traced only (no
-# GPU, no CUDA toolkit); the lowering is MLIR's. Without an arch the plugin is
-# still installed and the first launch diagnoses the missing arch.
-import os
+# RUN: env MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR=1 %PYTHON %s 2>&1 | FileCheck %s
+# The gpu kernels plugin: `gpu_plugin.Kernels` is the decorator plugin in
+# MlirTestDSL's `Plugins` record that adds `@kernel`, installed whenever the gpu
+# bindings are present (kernel function, `gpu.module` container, launch). It reads
+# the target (`<PREFIX>_ARCH`, any chip name MLIR's lowering accepts) only when a
+# launch is compiled, merges its chip option into a `<PREFIX>_PIPELINE` override
+# through `pipeline_options()`, and `MlirTestDSL.pipeline` puts
+# `gpu-lower-to-nvvm-pipeline{cubin-chip=<arch>}` ahead of the LLVM lowering when a
+# target is set. Calling a `@kernel` prepares a launch; its `.launch` emits the
+# `gpu.func` (gpu.kernel, `known_block_size` for a static block) in
+# `gpu.module @kernels` and a synchronous `gpu.launch_func` with i64 dimensions
+# and the host values flattened to operands. A kernel body is the host's language
+# (loads, stores, loops): the DSL exposes no thread indices, so the kernels here
+# run one thread. The launch validates its LaunchConfig and the buffer kinds and
+# raises the namespaced `gpu:` diagnostics. Traced only (no GPU, no CUDA toolkit,
+# no target); the lowering is MLIR's.
 from dataclasses import replace
 from typing import Annotated
 
@@ -23,7 +22,7 @@ import numpy as np
 import mlir.mlir_dsl as m
 from mlir import ir
 from mlir.dsl.plugins.decorators.jit import func
-from mlir.dsl.plugins.decorators.kernels import gpu as g
+from mlir.dsl.plugins.decorators.kernels import gpu_plugin as g
 
 
 def report(fn, *args, **kwargs):
@@ -44,25 +43,25 @@ print(
     isinstance(m.MlirTestDSL.plugins.named("gpu"), g.Kernels),
 )
 # The kernels plugin is named in MlirTestDSL's record; `available()` says whether
-# the gpu bindings are built, with or without an arch.
+# the gpu bindings are built. Tracing needs no target.
 # CHECK:  AVAILABLE: True True
-# NOARCH: AVAILABLE: True True
+# The target is any non-empty chip name, validated by MLIR's lowering when a
+# launch is compiled; unset or empty is the one thing `check_arch` rejects.
 rejected = []
-for arch in (None, "", "sm90", "gfx90a", "SM_90", "sm_90b", 90):
+for arch in (None, ""):
     try:
         g.check_arch(arch, var="MLIR_DSL_ARCH")
     except m.DSLUserCodeError as e:
         rejected.append(e.diag_id.name)
 print(
     "ARCH:",
-    [g.check_arch(a, var="MLIR_DSL_ARCH") for a in ("sm_80", "sm_90a", "sm_100f")],
+    [g.check_arch(a, var="MLIR_DSL_ARCH") for a in ("chip-a", "chip-b")],
     set(rejected),
     len(rejected),
 )
-# CHECK:  ARCH: ['sm_80', 'sm_90a', 'sm_100f'] {'CONFIG_UNSUPPORTED_ARCH'} 7
-# NOARCH: ARCH: ['sm_80', 'sm_90a', 'sm_100f'] {'CONFIG_UNSUPPORTED_ARCH'} 7
-# CHECK:  error[gpu:CONFIG_UNSUPPORTED_ARCH]:{{.*}} The GPU architecture `<unset>` is not a CUDA target this DSL can compile for; `MY_ARCH` must name one such as `sm_80` or `sm_90a`.
-# CHECK:  suggestion:{{.*}}Set the environment variable `MY_ARCH=<arch>`, e.g. `MY_ARCH=sm_90a`.
+# CHECK:  ARCH: ['chip-a', 'chip-b'] {'CONFIG_MISSING_ARCH'} 2
+# CHECK:  error[gpu:CONFIG_MISSING_ARCH]:{{.*}} No target chip is set for the gpu kernels this function launches: `MY_ARCH` must name the chip MLIR's gpu lowering compiles for.
+# CHECK:  suggestion:{{.*}}Set the environment variable `MY_ARCH=<chip>` before the DSL is first used.
 report(g.check_arch, "", var="MY_ARCH")
 print(
     "DIAGS:",
@@ -70,12 +69,12 @@ print(
     [d.name for d in g.GpuDiagId],
     g.Kernels.diag_ids is g.GpuDiagId,
 )
-# CHECK:  DIAGS: gpu ['LAUNCH_INVALID_DIMENSION', 'LAUNCH_INVALID_GRID', 'LAUNCH_OUTSIDE_JIT', 'LAUNCH_NEVER_ISSUED', 'LAUNCH_ALREADY_ISSUED', 'LAUNCH_HOST_BUFFER', 'LAUNCH_STREAM_UNSUPPORTED', 'CONFIG_UNSUPPORTED_ARCH'] True
+# CHECK:  DIAGS: gpu ['LAUNCH_INVALID_DIMENSION', 'LAUNCH_INVALID_GRID', 'LAUNCH_HOST_BUFFER', 'LAUNCH_STREAM_UNSUPPORTED', 'CONFIG_MISSING_ARCH'] True
 
 
 class GpuDSL(m.MlirTestDSL):
     # The plugin named explicitly with its chip option; the record installs a
-    # copy bound to the instance (NOARCH still builds it).
+    # copy bound to the instance.
     plugins = replace(
         m.MlirTestDSL.plugins,
         decorators=[func.Jit(), g.Kernels(chip_option="cubin-chip")],
@@ -96,38 +95,20 @@ print(
 )
 print("PASSES:", [p for p in dsl.pipeline() if p.startswith("gpu-")])
 print("PIPELINE:", dsl._get_pipeline(None))
-# Without an arch the DSL's pipeline has no gpu pass (the launch diagnoses
-# the missing arch).
-# CHECK:  INSTALLED: 'sm_90' True
-# CHECK:  SEAMS: True True {'cubin-chip': 'sm_90'}
-# CHECK:  PASSES: ['gpu-lower-to-nvvm-pipeline{cubin-chip=sm_90}']
-# CHECK:  PIPELINE: builtin.module(gpu-lower-to-nvvm-pipeline{cubin-chip=sm_90},convert-scf-to-cf,convert-cf-to-llvm,convert-vector-to-llvm,convert-arith-to-llvm,convert-math-to-llvm,convert-func-to-llvm,reconcile-unrealized-casts)
-# NOARCH: INSTALLED: {{None|''}} True
-# NOARCH: SEAMS: True True {}
-# NOARCH: PASSES: []
-# NOARCH: PIPELINE: builtin.module(convert-scf-to-cf,convert-cf-to-llvm,
-dsl.envar.arch = "sm_80"  # the arch is a property of the instance
-print("OVERRIDE:", [p for p in dsl.pipeline() if p.startswith("gpu-")])
+# Without a target the DSL's pipeline has no gpu pass and the plugin offers no
+# pipeline option; the target is a property of the instance.
+# CHECK:  INSTALLED: {{None|''}} True
+# CHECK:  SEAMS: True True {}
+# CHECK:  PASSES: []
+# CHECK:  PIPELINE: builtin.module(convert-scf-to-cf,convert-cf-to-llvm,convert-vector-to-llvm,convert-arith-to-llvm,convert-math-to-llvm,convert-func-to-llvm,reconcile-unrealized-casts)
+dsl.envar.arch = "chip-a"
+print(
+    "TARGET:",
+    [p for p in dsl.pipeline() if p.startswith("gpu-")],
+    dsl.plugins.named("gpu").pipeline_options(),
+)
 del dsl.envar.arch
-# CHECK:  OVERRIDE: ['gpu-lower-to-nvvm-pipeline{cubin-chip=sm_80}']
-# NOARCH: OVERRIDE: ['gpu-lower-to-nvvm-pipeline{cubin-chip=sm_80}']
-
-# An invalid MLIR_DSL_ARCH fails at DSL construction.
-saved_arch = os.environ.get("MLIR_DSL_ARCH")
-os.environ["MLIR_DSL_ARCH"] = "gfx90a"
-
-
-class BadArchDSL(m.MlirTestDSL):
-    plugins = replace(m.MlirTestDSL.plugins, decorators=[func.Jit(), g.Kernels()])
-
-
-report(BadArchDSL)
-# CHECK:  error[gpu:CONFIG_UNSUPPORTED_ARCH]:{{.*}} The GPU architecture `gfx90a` is not a CUDA target this DSL can compile for; `MLIR_DSL_ARCH` must name one
-# NOARCH: error[gpu:CONFIG_UNSUPPORTED_ARCH]:{{.*}} `gfx90a`
-if saved_arch is None:
-    del os.environ["MLIR_DSL_ARCH"]
-else:
-    os.environ["MLIR_DSL_ARCH"] = saved_arch
+# CHECK:  TARGET: ['gpu-lower-to-nvvm-pipeline{cubin-chip=chip-a}'] {'cubin-chip': 'chip-a'}
 
 
 # =============================================================================
@@ -135,11 +116,9 @@ else:
 # =============================================================================
 @m.kernel
 def axpy(n: m.Int32, a: m.Float32, x: m.Pointer[m.Float32], y: m.Pointer[m.Float32]):
-    tx, _, _ = m.thread_idx()
-    bx, _, _ = m.block_idx()
-    bdx, _, _ = m.block_dim()
-    i = bx * bdx + tx
-    if i < n:
+    for i in range(
+        n
+    ):  # one thread does the whole vector: the body is the host's language
         y[i] = a * x[i] + y[i]
 
 
@@ -147,30 +126,23 @@ def axpy(n: m.Int32, a: m.Float32, x: m.Pointer[m.Float32], y: m.Pointer[m.Float
 def axpy_host(
     n: m.Int32, a: m.Float32, x: m.Pointer[m.Float32], y: m.Pointer[m.Float32]
 ):
-    axpy(n, a, x, y).launch(grid=[4], block=[128])
+    axpy(n, a, x, y).launch(grid=[1], block=[1])
 
 
 # CHECK-LABEL: module attributes {gpu.container_module} {
 # CHECK-NEXT:    gpu.module @kernels {
-# CHECK-NEXT:      gpu.func @kernel_axpy_0(%[[N:[^:]+]]: i32, %[[A:[^:]+]]: f32, %[[X:[^:]+]]: !llvm.ptr, %[[Y:[^:]+]]: !llvm.ptr) kernel attributes {known_block_size = array<i32: 128, 1, 1>, sym_visibility = "public"} {
-# CHECK-NEXT:        %[[TX:.+]] = nvvm.read.ptx.sreg.tid.x : i32
-# CHECK:             %[[BX:.+]] = nvvm.read.ptx.sreg.ctaid.x : i32
-# CHECK:             %[[BDX:.+]] = nvvm.read.ptx.sreg.ntid.x : i32
-# CHECK:             %[[MUL:.+]] = arith.muli %[[BX]], %[[BDX]] : i32
-# CHECK-NEXT:        %[[I:.+]] = arith.addi %[[MUL]], %[[TX]] : i32
-# CHECK-NEXT:        %[[COND:.+]] = arith.cmpi slt, %[[I]], %[[N]] : i32
-# CHECK-NEXT:        scf.if %[[COND]] {
+# CHECK-NEXT:      gpu.func @kernel_axpy_0(%[[N:[^:]+]]: i32, %[[A:[^:]+]]: f32, %[[X:[^:]+]]: !llvm.ptr, %[[Y:[^:]+]]: !llvm.ptr) kernel attributes {known_block_size = array<i32: 1, 1, 1>, sym_visibility = "public"} {
+# CHECK:             scf.for %[[I:.+]] = %{{.+}} to %[[N]] step %{{.+}} : i32 {
 # CHECK:               llvm.getelementptr %[[X]][%[[I]]] : (!llvm.ptr, i32) -> !llvm.ptr, f32
+# CHECK:               llvm.store
 # CHECK:             gpu.return
 # CHECK:           func.func @axpy_host(%[[HN:[^:]+]]: i32, %[[HA:[^:]+]]: f32, %[[HX:[^:]+]]: !llvm.ptr, %[[HY:[^:]+]]: !llvm.ptr) attributes {llvm.emit_c_interface} {
-# CHECK-DAG:         %[[G0:.+]] = arith.constant 4 : i64
-# CHECK-DAG:         %[[B0:.+]] = arith.constant 128 : i64
-# CHECK:             gpu.launch_func @kernels::@kernel_axpy_0 blocks in (%[[G0]], %{{.+}}, %{{.+}}) threads in (%[[B0]], %{{.+}}, %{{.+}}) : i64 args(%[[HN]] : i32, %[[HA]] : f32, %[[HX]] : !llvm.ptr, %[[HY]] : !llvm.ptr)
+# CHECK:             %[[G0:.+]] = arith.constant 1 : i64
+# CHECK:             gpu.launch_func @kernels::@kernel_axpy_0 blocks in (%[[G0]], %{{.+}}, %{{.+}}) threads in (%{{.+}}, %{{.+}}, %{{.+}}) : i64 args(%[[HN]] : i32, %[[HA]] : f32, %[[HX]] : !llvm.ptr, %[[HY]] : !llvm.ptr)
 # CHECK-NEXT:        return
 # CHECK-NOT:         index
 # CHECK-NOT:         gpu.thread_id
 # CHECK:           OK axpy_host
-# NOARCH:          error[gpu:CONFIG_UNSUPPORTED_ARCH]:{{.*}} The GPU architecture `<unset>` is not a CUDA target this DSL can compile for
 report(axpy_host, 512, 2.0, 0, 0)
 
 
@@ -188,10 +160,9 @@ Pointers = tuple[m.Pointer[m.Float32], m.Pointer[m.Float32]]
 
 @m.kernel
 def scaled(p: Params, xs: Pointers, k, v: m.Float32):
-    tx, _, _ = m.thread_idx()
-    if tx < p.n:
-        for i in range(k):
-            xs[0][tx * k + i] = xs[1][tx] * p.scale + v
+    if p.n >= k:  # a struct field in a staged condition
+        for i in range(k):  # k is a Python value: the loop unrolls
+            xs[0][i] = xs[1][i] * p.scale + v
 
 
 @m.jit
@@ -206,7 +177,7 @@ def args_host(p: Params, xs: Pointers):
 # (`kernel_<name>_<meta values>_<count>`); the loop unrolls.
 # CHECK-LABEL: gpu.func @kernel_scaled_2_0(
 # CHECK-SAME:    %[[PN:[^:]+]]: i32, %[[PF:[^:]+]]: f32, %[[DST:[^:]+]]: !llvm.ptr, %[[SRC:[^:]+]]: !llvm.ptr, %[[V:[^:]+]]: f32) kernel
-# CHECK:         arith.cmpi slt, %{{.+}}, %[[PN]] : i32
+# CHECK:         arith.cmpi sge, %[[PN]], %{{.+}} : i32
 # CHECK-COUNT-2: llvm.store
 # CHECK-NOT:     llvm.store
 # CHECK:         gpu.return
@@ -222,8 +193,15 @@ ptr = m.Pointer(0, dtype=m.Float32)
 report(args_host, Params(n=4, scale=2.0), (ptr, ptr))
 
 
+class _Tag:
+    """A test-only `Annotated` marker; the core turns it into an argument attribute."""
+
+    def __extract_mlir_attributes__(self):
+        return [ir.DictAttr.get({"test.tag": ir.UnitAttr.get()})]
+
+
 @m.kernel
-def constant_ptr(p: Annotated[m.Pointer, m.grid_constant], n: m.Int32):
+def marked_ptr(p: Annotated[m.Pointer, _Tag()], n: m.Int32):
     pass
 
 
@@ -233,8 +211,8 @@ def returns(x: m.Pointer[m.Float32]) -> m.Int32:
 
 
 @m.jit
-def grid_constant_host(p: m.Pointer[m.Float32], n: m.Int32):
-    constant_ptr(p, n).launch()
+def marked_host(p: m.Pointer[m.Float32], n: m.Int32):
+    marked_ptr(p, n).launch()
 
 
 @m.jit
@@ -244,16 +222,16 @@ def return_host(x: m.Pointer[m.Float32]):
 
 @m.jit
 def too_few(x: m.Pointer[m.Float32]):
-    constant_ptr(x).launch()
+    marked_ptr(x).launch()
 
 
-# CHECK-LABEL: gpu.func @kernel_constant_ptr_0(
-# CHECK-SAME:    %{{[^:]+}}: !llvm.ptr {cuda.grid_constant}, %{{[^:]+}}: i32) kernel
-# CHECK:       OK grid_constant_host
+# CHECK-LABEL: gpu.func @kernel_marked_ptr_0(
+# CHECK-SAME:    %{{[^:]+}}: !llvm.ptr {test.tag}, %{{[^:]+}}: i32) kernel
+# CHECK:       OK marked_host
 # CHECK:       error[TYPE_RETURN_MISMATCH]:{{.*}} This function returns a `Int32`, which a compiled function cannot return from a kernel.
 # CHECK:       suggestion:{{.*}}A kernel cannot return a value: write its results through a `Pointer` argument
 # CHECK:       error[CALL_ARGUMENTS]:{{.*}} The call to `{{.*}}` does not match its parameters: 1 positional and 0 keyword argument(s) do not bind
-report(grid_constant_host, 0, 1)
+report(marked_host, 0, 1)
 report(return_host, 0)
 report(too_few, 0)
 
@@ -263,8 +241,7 @@ report(too_few, 0)
 # =============================================================================
 @m.kernel
 def fill(x: m.Pointer[m.Float32], v: m.Float32):
-    tx, _, _ = m.thread_idx()
-    x[tx] = v
+    x[0] = v
 
 
 @m.jit
@@ -298,7 +275,6 @@ print(
 # Without an arch every launch stops at the arch check after its kernel was
 # built, so the last trace counts one kernel and no launch.
 # CHECK:  LAST TRACE: 3 3 ['kernel_fill_0', 'kernel_fill_1', 'kernel_fill_2']
-# NOARCH: LAST TRACE: 1 0 []
 
 
 @m.jit
@@ -306,9 +282,9 @@ def never(x: m.Pointer[m.Float32]):
     fill(x, 1.0)
 
 
-# CHECK:      error[gpu:LAUNCH_NEVER_ISSUED]:{{.*}} Kernel `fill` was called but never launched. Calling a `@kernel` function only prepares a launch; the kernel does not run until `.launch(...)` is called on the result.
+# CHECK:      error[CALL_NEVER_ISSUED]:{{.*}} `fill` was called but never issued. Calling a `@kernel` function only prepares the call; it runs when the prepared call is issued.
 # CHECK:      -->{{.*}}plugins_gpu.py:[[#@LINE-4]]:5
-# CHECK:      suggestion:{{.*}}Launch the kernel, e.g. `fill(...).launch(grid=[...], block=[...])`.
+# CHECK:      suggestion:{{.*}}Issue it, e.g. `fill(...).launch(grid=[...], block=[...])`.
 report(never, 0)
 
 
@@ -319,10 +295,10 @@ def twice(x: m.Pointer[m.Float32]):
     launcher.launch()
 
 
-# CHECK:      error[gpu:LAUNCH_ALREADY_ISSUED]:{{.*}} Kernel `fill` is launched twice from one prepared call; `fill(...)` runs once.
-# CHECK:      suggestion:{{.*}}Call `fill(...)` again for a second launch, one `.launch(...)` each.
-# CHECK:      error[gpu:LAUNCH_OUTSIDE_JIT]:{{.*}} Kernel `fill` is being launched from plain Python, but a kernel can only be launched from inside a function decorated with `@jit`.
-# CHECK:      suggestion:{{.*}}Wrap the launch in a host function decorated with `@jit` and call that.
+# CHECK:      error[CALL_ALREADY_ISSUED]:{{.*}} `fill` is issued twice from one prepared call; `fill(...)` runs once.
+# CHECK:      suggestion:{{.*}}Call `fill(...)` again for a second issue, one `.launch(grid=[...], block=[...])`
+# CHECK:      error[CALL_OUTSIDE_JIT]:{{.*}} `fill(...).launch(grid=[...], block=[...])` was called from plain Python, but it can only be used inside a function decorated with `@jit`.
+# CHECK:      suggestion:{{.*}}Move this call into a function decorated with `@jit`, then call that function.
 report(twice, 0)
 report(lambda: fill(0, 1.0).launch())
 
@@ -333,11 +309,11 @@ report(lambda: fill(0, 1.0).launch())
 @m.jit
 def config(x: m.Pointer[m.Float32], n: m.Int32, nb: m.Uint32, bytes_: m.Int64):
     fill(x, 1.0).launch(m.LaunchConfig(grid=[2], block=64, smem=m.Int32(256)))
-    fill(x, 1.0)(grid=n, block=[nb], cluster=[2], smem=bytes_)
+    fill(x, 1.0).launch(grid=n, block=[nb], cluster=[2], smem=bytes_)
     fill(x, 1.0).launch(grid=[0, 1, 1], block=[32])
 
 
-# `launch` takes a LaunchConfig or its fields and the launcher is callable;
+# `launch` takes a LaunchConfig or its fields (and is the launcher's one verb);
 # scalar dimensions pad to three; a Python-valued Integer folds to a static
 # `known_block_size`; staged dimensions are promoted to i64 by signedness and
 # guarded by `scf.if (all > 0)`; `smem` is an i32 operand; a static zero grid
@@ -429,22 +405,6 @@ report(host_only, host_array)
 
 
 # =============================================================================
-# The index helpers outside a kernel body
-# =============================================================================
-@m.jit
-def host_tid(n: m.Int32) -> m.Int32:
-    tx, _, _ = m.thread_idx()
-    return tx + n
-
-
-# CHECK:      error[CALL_OUTSIDE_JIT]:{{.*}} `thread_idx()` was called from plain Python, but it can only be used inside a function decorated with `@kernel`.
-# CHECK:      suggestion:{{.*}}Move this call into a function decorated with `@kernel`, then call that function.
-# CHECK:      error[CALL_OUTSIDE_JIT]:{{.*}} `grid_dim()` was called from plain Python
-report(host_tid, 1)  # a `@jit` host body is not a kernel body
-report(m.grid_dim)
-
-
-# =============================================================================
 # A DSL without the plugin, one with it but no arch, and a sub-DSL's kernel entry
 # =============================================================================
 class JitOnlyDSL(m.MlirTestDSL):
@@ -465,7 +425,6 @@ def host_without_plugin(x: m.Pointer[m.Float32]):
 
 # CHECK:  error[CALL_PLUGIN_REQUIRED]:{{.*}} `@kernel` needs the `Kernels` plugin, which this DSL does not name.
 # CHECK:  suggestion:{{.*}}Name it: `plugins = Plugins(..., decorators=[Kernels()])`.
-# NOARCH: error[CALL_PLUGIN_REQUIRED]:{{.*}} `@kernel` needs the `Kernels` plugin
 report(host_without_plugin, 0)
 
 
@@ -480,8 +439,6 @@ def explicit_host(x: m.Pointer[m.Float32]):
 
 
 # CHECK:      OK explicit_host
-# NOARCH:     error[gpu:CONFIG_UNSUPPORTED_ARCH]:{{.*}} The GPU architecture `<unset>` is not a CUDA target this DSL can compile for; `MLIR_DSL_ARCH` must name one
-# NOARCH-NOT: OK explicit_host
 report(explicit_host, 0)
 
 

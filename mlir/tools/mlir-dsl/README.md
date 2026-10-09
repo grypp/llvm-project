@@ -33,7 +33,7 @@ mlir/tools/mlir-dsl/
 │   │   ├── ast_preprocessor/        the rewrite, its helpers; scf/: ASTPreprocessor, the scf builders and executors
 │   │   ├── compiler/                Compiler: pass manager + ExecutionEngine + packed invoke; jit_executor
 │   │   ├── decorators/jit/          @jit: func.py (Jit: the func.func host entry with the C interface)
-│   │   ├── decorators/kernels/      @kernel: launch.py (decorator, launcher, the target protocol); gpu/: Kernels, LaunchConfig, index ops
+│   │   ├── decorators/kernels/      @kernel: gpu_plugin.py (KernelsPlugin + the DeferredDecoratorCall launcher, Kernels over gpu.func/gpu.launch_func, LaunchConfig)
 │   │   └── adapters/                the host boundary: dlpack (numpy arrays, torch tensors, anything DLPack in), tvm_ffi (the entry out as another ABI)
 │   └── util/                        pytrees, caches, profiler, logger
 ├── test/                            the core-only lit suite MLIR-DSL: an IR-only DSL, a jit-only DSL, the no-builtin-raises scan
@@ -41,8 +41,8 @@ mlir/tools/mlir-dsl/
     ├── mlir-test-dsl/               the reference sub-DSL
     │   ├── dsl/                     installed as `mlir.mlir_dsl`: MlirTestDSL, jit, kernel, compile, the namespace
     │   ├── test/                    the core, type, plugin and DSL tests, each checked at the IR level on every build (MLIR-DSL-MlirTestDSL)
-    │   │   └── Integration/         what needs the engine or a tool: the compiler, remarks, TVM-FFI, and one driver per example
-    │   └── examples/                14 runnable examples, one concept per file
+    │   │   ├── Integration/         what needs the engine or a tool: the compiler, remarks, TVM-FFI
+    │   │   └── Examples/            14 runnable examples, one concept per file, each its own lit test (the dry run everywhere, the execution where the host JITs)
     └── emitc-test-dsl/              the second sub-DSL, installed as `mlir.emitc_dsl`: `+`/`*` answered by EmitC, no compiler
         ├── dsl/                     EmitCScalarOps, EmitCTestDSL, jit
         └── test/                    the IR (MLIR-DSL-EmitCTestDSL); Integration/: the module through mlir-translate --mlir-to-cpp
@@ -91,7 +91,7 @@ class MlirTestDSL(BaseDSL):
         type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),  # one dialect module per hook group
         ast_preprocessor=scf.ASTPreprocessor(), # Python keywords -> the scf executors
         compiler=execution_engine.Compiler(),   # the pass manager and execution engine: lowering and invocation
-        decorators=[func.Jit(), gpu.Kernels(chip_option="cubin-chip")],  # @jit over func.func, @kernel over gpu.func
+        decorators=[func.Jit(), gpu_plugin.Kernels(chip_option="cubin-chip")],  # @jit over func.func, @kernel over gpu.func
         adapters=[dlpack.DlpackPlugin(), tvm_ffi.TvmFfiPlugin()],  # the host boundary: DLPack tensors in, another ABI out
     )
     def pipeline(self): ...                     # the pass list; no plugin contributes a pass
@@ -124,7 +124,7 @@ the fields that hold any number, each extending the DSL at one fixed point:
 
 | Family | Base class | Contract | In tree |
 |---|---|---|---|
-| `decorators` | `DecoratorPlugin` | `decorator_name` (default `jit`), `call` (from Python), `launch` (inside a trace), the entry protocol `generate_func_op`, `generate_return`, `pack_results`, `unpack_result`, and the hooks `before_trace`, `after_trace`, `check_arguments`, `finish_compiled_function` | `func.Jit` (`plugins/decorators/jit/`), `gpu.Kernels` (`plugins/decorators/kernels/`) |
+| `decorators` | `DecoratorPlugin` | `decorator_name` (default `jit`), `call` (from Python), `launch` (inside a trace), `emit` (issuing a `DeferredDecoratorCall` with the plugin's own options), the entry protocol `generate_func_op`, `generate_return`, `pack_results`, `unpack_result`, and the hooks `before_trace`, `after_trace`, `check_arguments`, `finish_compiled_function` | `func.Jit` (`plugins/decorators/jit/`), `gpu_plugin.Kernels` (`plugins/decorators/kernels/`) |
 | `adapters` | `AdapterPlugin` | inbound `register(dsl)`; outbound `attach_to_module`, `after_lowering`, `wrap_compiled_function` | `DlpackPlugin`, `TvmFfiPlugin` (`plugins/adapters/`) |
 
 `Plugin` itself keeps only the lifecycle every plugin shares: `available()` (a
@@ -154,25 +154,29 @@ installs it on every class whose record names the plugin, so `@MyDSL.kernel`
 exists exactly when the record says so. The core wrapper handles the lazy
 instance and the AST preprocessing (the rewrite recognises every decorator
 name of the record) and hands each call to the plugin's dispatch: `call(dsl,
-func, *args, **kwargs)` from Python, `launch(...)` inside a trace. The plugin
+func, *args, **kwargs)` from Python, `launch(...)` inside a trace. A plugin whose
+functions need options to be issued returns a `DeferredDecoratorCall` from both: `f(args)`
+prepares the call, `f(args).issue(*options)` (the kernels plugin spells it `.launch`) issues it through the plugin's `emit`, and
+the core, which never names the options, reports a prepared call that is never
+issued, issued twice or issued outside a trace. The plugin
 builds its function with the shared services `dsl.bind_arguments(...)` (the
 signature, canonical arguments and their IR operands, types and attributes)
 and `dsl.trace_body(entry, ...)` (the function op the entry protocol describes,
 with the body traced into it), and keeps its per-trace state through
 `before_trace`, `after_trace` and `check_arguments`.
-`plugins/decorators/kernels/launch.py` is the template: the `kernel` decorator,
-the deferred `KernelLauncher` and the target protocol (`launch_config`, the
-entry ops, the launch); `gpu/` is the target (`Kernels`, `LaunchConfig`). The three shapes of a DSL are three records:
+`plugins/decorators/kernels/gpu_plugin.py` is the template: `KernelsPlugin` (the
+`kernel` decorator, a `DeferredDecoratorCall` launcher, the target protocol) and `Kernels`, the
+gpu target with its `LaunchConfig`. The three shapes of a DSL are three records:
 
 ```python
 class JitOnly(BaseDSL):      # @jit
     plugins = Plugins(type_ops=..., compiler=..., decorators=[func.Jit()])
 
 class WithKernels(BaseDSL):  # @jit, @kernel
-    plugins = Plugins(..., decorators=[func.Jit(), gpu.Kernels(chip_option="cubin-chip")])
+    plugins = Plugins(..., decorators=[func.Jit(), gpu_plugin.Kernels(chip_option="cubin-chip")])
 
 class WithMore(BaseDSL):     # @jit, @kernel, @task
-    plugins = Plugins(..., decorators=[func.Jit(), gpu.Kernels(), tasks.Tasks()])
+    plugins = Plugins(..., decorators=[func.Jit(), gpu_plugin.Kernels(), tasks.Tasks()])
 ```
 
 How another sub-DSL would map onto this (a sketch; only the test DSL ships):
@@ -194,7 +198,7 @@ record). The class attributes it may set:
 | `plugins.type_ops` | none (`MlirTestDSL`: `UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm)`) | The `TypeOpsPlugin` behind the types: their MLIR types and the ops of their operators, routed to the dialect modules. |
 | `plugins.ast_preprocessor` | none (`MlirTestDSL`: `scf.ASTPreprocessor()`) | The AST preprocessor and the executors that stage native control flow. `scf.ASTPreprocessor(closure_check=False)` lets nested functions capture variables inside staged regions; a subclass may replace the `DSLPreprocessor` or any executor. A DSL without one cannot preprocess and uses the explicit builders. |
 | `plugins.compiler` | none (`MlirTestDSL`: `execution_engine.Compiler()`) | The `CompilerPlugin`: it runs `pipeline()`, builds the engine and loads the entry into the callable the DSL caches (`load`), so lowering and invocation are both its. A DSL without one traces only: a call returns the trace result, as under `<name>_DRYRUN`, and `compile()` raises. The execution engine is imported by this plugin at the first DSL construction, never when `mlir.dsl` is imported. |
-| `plugins.decorators` | none (`MlirTestDSL`: `func.Jit()`, and `gpu.Kernels(chip_option="cubin-chip")` when the gpu bindings import) | The `DecoratorPlugin`s, one per kind of decorated function: each adds a decorator (`@jit`, `@kernel`), builds the op its functions are traced into, says what a call does from Python (`call`) and inside a trace (`launch`), keeps its per-trace state and its rules at the host boundary; the gpu one also hands the CUDA runtime library to the engine and checks `<name>_ARCH`. |
+| `plugins.decorators` | none (`MlirTestDSL`: `func.Jit()`, and `gpu_plugin.Kernels(chip_option="cubin-chip")` when the gpu bindings import) | The `DecoratorPlugin`s, one per kind of decorated function: each adds a decorator (`@jit`, `@kernel`), builds the op its functions are traced into, says what a call does from Python (`call`) and inside a trace (`launch`), keeps its per-trace state and its rules at the host boundary; the gpu one also hands the CUDA runtime library to the engine and reads `<name>_ARCH` when a launch is compiled. |
 | `plugins.adapters` | none (`MlirTestDSL`: `DlpackPlugin()`, `TvmFfiPlugin()`) | The `AdapterPlugin`s: inbound, host objects becoming arguments at the boundary (anything speaking DLPack: a `numpy.ndarray`, a `torch.Tensor` on the host or a device); the core adapts no host buffer itself; outbound, another ABI around the compiled entry, added to the traced module and wrapped around the compiled function. |
 | `pipeline()` | `[]` (`MlirTestDSL`: the gpu lowering when an architecture is set, then its own `LOWER_TO_LLVM` list) | The pass list of the DSL, in order; no plugin publishes passes. |
 | `_jit_arg_adapter_scope` | `None` | The adapter registry scope used at the host boundary; `None` is the common registry plus the single scope registering a type. |
@@ -222,7 +226,7 @@ CMake options:
 | `MLIR_ENABLE_PYTHON_DSL` | `OFF` | Builds `mlir.dsl`, `mlir.mlir_dsl` and `mlir.emitc_dsl` into the Python package and adds the lit suites; opt in with `-DMLIR_ENABLE_PYTHON_DSL=ON`. |
 | `MLIR_INCLUDE_TESTS` | `ON` | Adds the lit suites: `check-mlir-dsl` (the core-only `test/`, which also runs `check-mlir-dsl-mlir-test-dsl` and `check-mlir-dsl-emitc-test-dsl` for the sub-DSLs, each with its `Integration/` folder); `check-mlir` depends on them. |
 | `MLIR_ENABLE_EXECUTION_ENGINE` | `ON` | Needed to run compiled code; tests that execute require the lit feature `host-supports-jit` (also needs the host in `LLVM_TARGETS_TO_BUILD`). |
-| `MLIR_ENABLE_CUDA_RUNNER` | `OFF` | Builds the CUDA runtime library the gpu kernels plugin hands to the engine when it finds it; `MlirTestDSL` names the plugin whenever the gpu bindings import, `MLIR_DSL_ARCH` selects the target. |
+| `MLIR_ENABLE_CUDA_RUNNER` | `OFF` | Builds the CUDA runtime library the gpu kernels plugin hands to the engine when it finds it; `MlirTestDSL` names the plugin whenever the gpu bindings import, `MLIR_DSL_ARCH` names the chip when a launch is compiled; tracing needs none. |
 
 A typical configuration:
 
@@ -234,7 +238,7 @@ cmake -S llvm -B build -G Ninja \
 cmake --build build --target MLIRPythonModules
 ninja -C build check-mlir-dsl
 export PYTHONPATH="$PWD/build/tools/mlir/python_packages/mlir_core"
-python mlir/tools/mlir-dsl/sub-dsls/mlir-test-dsl/examples/01_staging.py
+python mlir/tools/mlir-dsl/sub-dsls/mlir-test-dsl/test/Examples/01_staging.py
 ```
 
 Lit features: `host-supports-jit` gates the executing RUN lines and the

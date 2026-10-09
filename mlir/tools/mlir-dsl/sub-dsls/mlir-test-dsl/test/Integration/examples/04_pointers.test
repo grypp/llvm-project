@@ -1,5 +1,0 @@
-# The example asserts its own results, so the exit code is the check; the
-# second run traces only, with the gpu target set so example 12 prints its IR.
-# RUN: %PYTHON %S/../../../examples/04_pointers.py
-# RUN: env MLIR_DSL_DRYRUN=1 MLIR_DSL_ARCH=sm_90 %PYTHON %S/../../../examples/04_pointers.py
-# REQUIRES: host-supports-jit

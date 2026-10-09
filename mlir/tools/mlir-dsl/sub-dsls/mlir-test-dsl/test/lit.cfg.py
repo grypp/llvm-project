@@ -17,7 +17,7 @@ config.name = "MLIR-DSL-MlirTestDSL"
 config.test_format = lit.formats.ShTest()
 
 # suffixes: A list of file extensions to treat as test files.
-config.suffixes = [".py", ".test"]
+config.suffixes = [".py"]
 
 # excludes: A list of directories and files to exclude from the testsuite.
 config.excludes = ["Inputs", "CMakeLists.txt", "lit.cfg.py", "lit.site.cfg.py.in"]

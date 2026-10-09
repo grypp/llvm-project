@@ -596,4 +596,4 @@ staged_vec("bool", lambda a, g, v: bool(v))
 # on two Pointers leaks Python's TypeError; `Cls.mlir_type` outside a context
 # leaks the bindings' RuntimeError; a `Vector`-typed struct field is accepted at
 # declaration; another `@struct` class is accepted for a struct-annotated
-# parameter; `grid_constant` on a `Pointer[T]` parameter is dropped.
+# parameter; an `Annotated` marker on a `Pointer[T]` parameter is dropped.

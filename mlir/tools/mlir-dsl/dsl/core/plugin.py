@@ -50,13 +50,14 @@ all; ``@jit`` is the shipped ``func.Jit`` plugin's.
 from __future__ import annotations
 
 import copy
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Sequence
 
 from ... import ir
 from .common import DSLRuntimeError, DSLUserCodeError, in_trace
-from .diagnostics import DiagId
+from .diagnostics import DiagId, find_user_source_location
 from .mlir_op import OpEmitter
 
 if TYPE_CHECKING:
@@ -67,6 +68,7 @@ __all__ = [
     "AdapterPlugin",
     "CompilerPlugin",
     "DecoratorPlugin",
+    "DeferredDecoratorCall",
     "Plugin",
     "Plugins",
     "TypeOpsPlugin",
@@ -269,8 +271,11 @@ class DecoratorPlugin(Plugin):
     describe a host function: ``call`` runs the core's pipeline (bind the
     arguments, trace into the entry, compile through the compiler role when
     there is one, cache, invoke) and ``launch`` inlines the body into the
-    enclosing trace. A kernels plugin overrides both: calling a kernel
-    prepares a launch, issuing it emits the kernel and its launch op.
+    enclosing trace. A plugin whose functions need options to be issued (a
+    kernel: its grid and block) returns a :class:`DeferredDecoratorCall` from both:
+    ``f(args)`` prepares the call, ``f(args).issue(*options)`` (or the plugin's
+    own verb for it) issues it through :meth:`emit`, and the core, not the
+    plugin, keeps the bookkeeping.
 
     ``BaseDSL.__init_subclass__`` installs :meth:`decorators` on the DSL class;
     the core wrapper handles the lazy instance, the AST rewrite and the
@@ -285,6 +290,9 @@ class DecoratorPlugin(Plugin):
     role: ClassVar[str] = "decorators"
     #: The decorator this plugin adds to the DSL class.
     decorator_name: ClassVar[str] = "jit"
+    #: How a prepared call of this plugin's functions is issued, for the
+    #: ``CALL_NEVER_ISSUED`` suggestion: the text after ``f(...)``.
+    issue_example: ClassVar[str] = ".issue(...)"
 
     def decorators(self, dsl_cls: type) -> dict[str, Callable[..., Any]]:
         """The decorators this plugin adds to the DSL class, by name: one,
@@ -332,6 +340,23 @@ class DecoratorPlugin(Plugin):
         """A call inside the trace of another decorated function: the body is
         inlined into that trace."""
         return func(*args, **kwargs)
+
+    def emit(
+        self,
+        dsl: BaseDSL,
+        func: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *issue_args: Any,
+        **issue_kwargs: Any,
+    ) -> Any:
+        """Issue a prepared call (:class:`DeferredDecoratorCall`): trace ``func`` with the
+        bound ``args``/``kwargs`` into the open trace and emit what the call
+        does, under this plugin's own options. The core passes ``issue_args``
+        and ``issue_kwargs`` through exactly as the user wrote them (the gpu
+        plugin reads a grid and a block, another plugin reads whatever it
+        defines); nothing in the core names them."""
+        return self._unsupported("emit")
 
     # -- the entry protocol: the op a decorated function is traced into -------
 
@@ -391,6 +416,76 @@ class DecoratorPlugin(Plugin):
     def finish_compiled_function(self, dsl: BaseDSL, jit_function: Any) -> None:
         """Record on the compiled function what the trace did (the kernels it
         launched), before any adapter wraps it."""
+
+
+class DeferredDecoratorCall:
+    """A prepared call of a decorated function, issued later with options.
+
+    What a decorator plugin returns from :meth:`DecoratorPlugin.launch`, and
+    from :meth:`DecoratorPlugin.call` when the function cannot run on its own,
+    whenever issuing the call needs options the call syntax does not carry:
+    ``f(args)`` binds the arguments and returns the prepared call; calling it
+    issues it, ``f(args).issue(*options, **options)`` (a plugin names its own
+    verb for that, the gpu kernels plugin's is ``.launch``), and the options
+    reach the plugin's :meth:`DecoratorPlugin.emit` untouched. The core keeps the
+    bookkeeping: a prepared call made inside a trace is registered with it and
+    reported when never issued (``CALL_NEVER_ISSUED``); issuing one twice is
+    ``CALL_ALREADY_ISSUED``, issuing one outside any trace ``CALL_OUTSIDE_JIT``.
+    A plugin subclasses it to name the issuing verb (``launch = issue`` for
+    kernels); the prepared call is deliberately not callable, so the verb is
+    always explicit.
+    """
+
+    def __init__(
+        self,
+        dsl: BaseDSL,
+        plugin: DecoratorPlugin,
+        func: Callable[..., Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> None:
+        self.dsl = dsl
+        self.plugin = plugin
+        self.func = func
+        self.args = tuple(args)
+        self.kwargs = dict(kwargs)
+        self.issued = False
+        # The user's call site, captured while the frame is live, for the
+        # ``CALL_NEVER_ISSUED`` caret; set by the DSL when a trace is open.
+        self.creation_loc: tuple[Any, Any, Any, Any] = (None, None, None, None)
+        try:
+            inspect.signature(func).bind(*self.args, **self.kwargs)
+        except TypeError as e:
+            raise DSLUserCodeError(
+                DiagId.CALL_ARGUMENTS,
+                function_name=self.name,
+                detail=f"{len(self.args)} positional and {len(self.kwargs)} keyword argument(s) do not bind to its parameters ({e})",
+                cause=e,
+            ) from e
+        dsl._register_deferred_call(self)
+
+    @property
+    def name(self) -> str:
+        return getattr(self.func, "__name__", "<function>")
+
+    def issue(self, *issue_args: Any, **issue_kwargs: Any) -> Any:
+        """Issue the prepared call inside the open trace; the options go to the
+        plugin's ``emit`` as written."""
+        example = self.plugin.issue_example
+        if not in_trace():
+            raise DSLUserCodeError(
+                DiagId.CALL_OUTSIDE_JIT,
+                api=f"{self.name}(...){example}",
+                decorator="@jit",
+            )
+        if self.issued:
+            raise DSLUserCodeError(
+                DiagId.CALL_ALREADY_ISSUED, function_name=self.name, issue=example
+            )
+        self.issued = True
+        return self.plugin.emit(
+            self.dsl, self.func, self.args, self.kwargs, *issue_args, **issue_kwargs
+        )
 
 
 class AdapterPlugin(Plugin):

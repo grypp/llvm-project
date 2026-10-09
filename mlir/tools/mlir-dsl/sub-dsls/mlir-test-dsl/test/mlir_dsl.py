@@ -9,7 +9,6 @@ from dataclasses import replace
 
 import mlir.mlir_dsl as m
 from mlir.dsl.plugins.decorators.jit import func
-from mlir.dsl.plugins.decorators.kernels import gpu as g
 
 # The namespace: core names, the control-flow names, the DSL and its record.
 print("CORE:", m.Int32, m.Pointer, m.struct, m.Vector, m.BaseDSL.__name__)
@@ -29,12 +28,9 @@ print(
     m.kernel.__name__,
     m.compile.__name__,
 )
-# The index helpers are in the namespace exactly when the gpu bindings are built.
-print("GPU HELPERS:", hasattr(m, "thread_idx") == g.Kernels.available())
 # CHECK: CORE: Int32 <class 'mlir.dsl.types.typing.Pointer'> <function struct{{.*}}> <class 'mlir.dsl.types.vector.Vector'> BaseDSL
 # CHECK: PLUGINS: for_ range ASTPreprocessor UpstreamDialectTypeOps Jit Compiler
 # CHECK: DSL: MlirTestDSL jit kernel compile
-# CHECK: GPU HELPERS: True
 
 
 class JitOnly(m.MlirTestDSL):

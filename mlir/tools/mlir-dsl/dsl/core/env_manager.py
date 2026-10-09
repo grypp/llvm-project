@@ -419,7 +419,7 @@ class EnvironmentVarManager(LogEnvironmentManager):
     - [DSL_NAME]_VERIFY_TRACE: Verify every op as it is built while tracing (default: False)
     - [DSL_NAME]_LOG_LEVEL: Logging level to set, for LOG_TO_CONSOLE or LOG_TO_FILE (default: 1).
     - [DSL_NAME]_DRYRUN: Generates IR only (default: False)
-    - [DSL_NAME]_ARCH: Target architecture for the plugins that need one, e.g. "sm_90a" for the gpu kernels plugin (default: None, no target)
+    - [DSL_NAME]_ARCH: Target chip for the plugins that need one, read by the gpu kernels plugin only when a launch is compiled (default: None, no target)
     - [DSL_NAME]_AST_PREPROCESSOR: Run the AST preprocessor on decorated functions (default: True)
     - [DSL_NAME]_WARNINGS_IGNORE: Ignore warnings (default: False)
     - [DSL_NAME]_JIT_TIME_PROFILING: Whether or not to profile the IR generation/compilation/execution time (default: False)

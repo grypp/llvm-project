@@ -19,7 +19,7 @@ missing).
 | `09_compile_and_cache.py` | Compilation and caches | `m.compile`, the in-memory cache keyed by the traced module (`cache_hits`, `cache_misses`), the on-disk cache shared between processes (`MLIR_DSL_CACHE_DIR`, `file_cache_hits`) |
 | `10_diagnostics.py` | Diagnostics | four deliberate mistakes, each a `m.DSLUserCodeError` identified by its stable `e.diag_id` (`m.DiagId.*`); the rendered headline, caret, category and suggestion |
 | `11_custom_dsl.py` | Building a sub-DSL | an `MlirTestDSL` variant whose `Plugins` record keeps `@jit` alone (`without("gpu")`) and drops its `adapters`, a `BaseDSL` subclass with its own `name` and environment prefix that names its plugins from scratch (`UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm)`, `scf.ASTPreprocessor`, `execution_engine.Compiler`, `func.Jit` for `@jit`) and its own `pipeline()`, `register_jit_arg_adapter` for a host type, `@kernel` without the gpu kernels plugin is `CALL_PLUGIN_REQUIRED` |
-| `12_gpu_kernels.py` | GPU kernels | `@m.kernel` is the gpu kernels plugin's decorator (a `DecoratorPlugin` listed in the record), its function becomes `gpu.func`, `.launch(grid=, block=)` from a `@m.jit` host becomes `gpu.launch_func`, CUDA tensors adapt to device pointers, `MLIR_DSL_ARCH` is fixed before the import, bounds checks in the kernel |
+| `12_gpu_kernels.py` | GPU kernels | `@m.kernel` is the gpu kernels plugin's decorator (a `DecoratorPlugin` listed in the record), its function becomes `gpu.func`, `.launch(grid=, block=)` from a `@m.jit` host becomes `gpu.launch_func`, CUDA tensors adapt to device pointers, the target chip (`MLIR_DSL_ARCH`) is read only when a launch is compiled, the kernel body is the host's loop |
 | `13_tvm_ffi_export.py` | TVM-FFI export | the `tvm_ffi` adapter plugin (the outbound half of the host boundary): `MLIR_DSL_ENABLE_TVM_FFI=1`, `m.compile(...).tvm_ffi_function` as a plain `tvm_ffi.Function`, staged and Meta arguments in the exported signature, a different Meta value rejected |
 | `14_type_ops_plugin.py` | The type-ops plugin behind the types | the `type_ops` role: a plugin subclassing the `UpstreamDialectTypeOps` composer, `mlir_type` makes `Int32` a rank-0 `tensor<i32>`, `scalar_type` maps it back, `const` builds the dialect's constant; the same `Int32(6) + a` traced under the test DSL and under the stand-in tile dialect, the pipeline it composes, and a plugin instance answering outside any trace |
 
@@ -35,7 +35,7 @@ then:
 
 ```sh
 export PYTHONPATH="$PWD/build/tools/mlir/python_packages/mlir_core${PYTHONPATH:+:$PYTHONPATH}"
-python mlir/tools/mlir-dsl/sub-dsls/mlir-test-dsl/examples/01_staging.py
+python mlir/tools/mlir-dsl/sub-dsls/mlir-test-dsl/test/Examples/01_staging.py
 ```
 
 Everything is controlled through `MLIR_DSL_*` environment variables plus a few
@@ -43,8 +43,8 @@ call keywords (`pipeline`, `no_cache`, `extra_link_libs`, `compile_only`,
 `container_attrs`):
 
 - `MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR=1` prints the traced IR instead of
-  compiling and running it. For `12_gpu_kernels.py` add `MLIR_DSL_ARCH=sm_90`
-  to trace the kernels on a machine without a GPU.
+  compiling and running it; `12_gpu_kernels.py` traces its kernels this way on
+  a machine without a GPU, and a trace needs no target chip.
 - The lowered module of each compiled function is kept on disk, so a second
   process skips the pass pipeline: in `MLIR_DSL_CACHE_DIR=<dir>` when set,
   otherwise under `$TMPDIR/<user>/mlir_dsl_cache`. A function loaded from there
@@ -52,10 +52,10 @@ call keywords (`pipeline`, `no_cache`, `extra_link_libs`, `compile_only`,
   two to count compiled functions. `MLIR_DSL_DISABLE_FILE_CACHING=1` turns the
   file cache off (09 does, so that its in-memory counters stand alone),
   `MLIR_DSL_NO_CACHE=1` every cache.
-- `MLIR_DSL_ARCH=sm_90` selects the CUDA target of the gpu kernels plugin (the
-  decorator plugin behind `@kernel`); `12_gpu_kernels.py` sets it from the
-  visible device before the import, the DSL itself detects nothing. The
-  variable is read when the DSL is first used, so set it before the import.
+- `MLIR_DSL_ARCH` names the chip the gpu kernels plugin's lowering compiles
+  for. It is read only when a launch is compiled and never interpreted by the
+  DSL, which detects nothing; `12_gpu_kernels.py` needs it set for its
+  executing path and skips with a message otherwise.
 - `MLIR_DSL_REMARKS=".*"` renders the compiler's remarks.
 
 The full list is in `dsl/core/env_manager.py` of the tool.

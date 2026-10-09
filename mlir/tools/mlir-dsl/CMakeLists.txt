@@ -46,9 +46,7 @@ declare_mlir_python_sources(MLIRPythonSources.DSL
     dsl/plugins/decorators/jit/__init__.py
     dsl/plugins/decorators/jit/func.py
     dsl/plugins/decorators/kernels/__init__.py
-    dsl/plugins/decorators/kernels/gpu/__init__.py
-    dsl/plugins/decorators/kernels/gpu/indices.py
-    dsl/plugins/decorators/kernels/launch.py
+    dsl/plugins/decorators/kernels/gpu_plugin.py
     dsl/plugins/type_ops/__init__.py
     dsl/plugins/type_ops/arith.py
     dsl/plugins/type_ops/llvm.py

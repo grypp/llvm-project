@@ -36,7 +36,7 @@ from mlir.dsl.core.diagnostics import (
     render_code_frame,
     render_user_diagnostic,
 )
-from mlir.dsl.plugins.decorators.kernels.gpu import GpuDiagId, check_arch
+from mlir.dsl.plugins.decorators.kernels.gpu_plugin import GpuDiagId, check_arch
 from mlir.dsl.plugins.adapters.tvm_ffi.diagnostics import TvmFfiDiagId
 
 HERE = os.path.abspath(__file__)
@@ -379,10 +379,9 @@ report(lambda: Vec(z=1))
 report(lambda: m.Pointer[1, 2, 3])
 # CHECK:      error[POINTER_BAD_SUBSCRIPT]:{{.*}} `Pointer[1, 2, 3]` is not a valid pointer annotation.
 # CHECK:      = category: usage (pointers)
-report(lambda: check_arch("foo", var="MY_DSL_ARCH"))
-# CHECK:      error[gpu:CONFIG_UNSUPPORTED_ARCH]:{{.*}} The GPU architecture `foo` is not a CUDA target this DSL can compile for; `MY_DSL_ARCH` must name one
-# CHECK:      = category: usage (compile options)
-# CHECK:      suggestion:{{.*}}Set the environment variable `MY_DSL_ARCH=<arch>`, e.g. `MY_DSL_ARCH=sm_90a`.
+report(lambda: check_arch("", var="MY_DSL_ARCH"))
+# CHECK:      error[gpu:CONFIG_MISSING_ARCH]:{{.*}} No target chip is set for the gpu kernels this function launches: `MY_DSL_ARCH` must name the chip MLIR's gpu lowering compiles for.
+# CHECK:      suggestion:{{.*}}Set the environment variable `MY_DSL_ARCH=<chip>` before the DSL is first used.
 # CHECK-NOT:  NO ERROR
 
 # --- DSLRuntimeError: the internal-error envelope ---------------------------

@@ -7,8 +7,7 @@
 ``import mlir.mlir_dsl as m``: the core names (``m.Int32``, ``m.Pointer``,
 ``m.struct``, ``m.Vector``, ``m.BaseDSL``, ``m.Plugins``, ...), the language
 the DSL's plugins bring (``m.range``, ``m.for_``/``m.if_``/``m.while_``/
-``m.yield_``, ``m.and_``/``m.or_``/..., the gpu index helpers when the gpu
-bindings are present) and the DSL itself: ``@m.jit``, ``@m.kernel``,
+``m.yield_``, ``m.and_``/``m.or_``/...) and the DSL itself: ``@m.jit``, ``@m.kernel``,
 ``m.compile``, ``m.MlirTestDSL``. The plugin classes themselves are imported
 from their modules (``mlir.dsl.plugins.type_ops``, ...). A sub-DSL of
 your own exports its own namespace the same way.
@@ -17,7 +16,7 @@ your own exports its own namespace the same way.
 from mlir.dsl import *  # noqa: F401,F403  the core names, re-exported
 from mlir.dsl import __all__ as _core_names
 from mlir.dsl.plugins.ast_preprocessor import DSLPreprocessor, range
-from mlir.dsl.plugins.decorators.kernels.gpu import LaunchConfig
+from mlir.dsl.plugins.decorators.kernels.gpu_plugin import LaunchConfig
 from mlir.dsl.plugins.ast_preprocessor.scf import (
     LoopUnroll,
     WhileLoopContext,
@@ -58,25 +57,3 @@ __all__ = [
     "jit",
     "kernel",
 ]
-
-# Kernel-body index helpers, present when the gpu dialect bindings import.
-try:
-    from mlir.dsl.plugins.decorators.kernels.gpu import (
-        GridConstant,
-        block_dim,
-        block_idx,
-        grid_constant,
-        grid_dim,
-        thread_idx,
-    )
-except ImportError:
-    pass
-else:
-    __all__ += [
-        "GridConstant",
-        "block_dim",
-        "block_idx",
-        "grid_constant",
-        "grid_dim",
-        "thread_idx",
-    ]

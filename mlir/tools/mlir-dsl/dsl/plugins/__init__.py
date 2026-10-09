@@ -11,15 +11,14 @@ the fields of the ``Plugins`` record a DSL names on its class:
   modules), ``ast_preprocessor/`` (``scf.ASTPreprocessor``), ``compiler/``
   (``execution_engine.Compiler``);
 * families, any number each: ``decorators/`` (``jit/func.Jit`` adds ``@jit``
-  over a ``func.func`` entry, ``kernels/gpu.Kernels`` adds ``@kernel`` and its
-  launcher), ``adapters/`` (the host boundary: ``dlpack`` turns anything
+  over a ``func.func`` entry, ``kernels/gpu_plugin.Kernels`` adds ``@kernel``
+  and its launch), ``adapters/`` (the host boundary: ``dlpack`` turns anything
   speaking DLPack, numpy arrays and torch tensors included, into arguments,
   ``tvm_ffi`` exposes the compiled entry through another ABI).
 
 Each folder also ships the op modules its plugin emits through (``type_ops/``:
 ``arith``, ``vector``, ``llvm``; ``ast_preprocessor/scf/``: the
-``scf`` builders and executors; ``decorators/kernels/gpu/``: the kernel-body
-index ops). Those are modules, not plugins: a plugin folder owns the ops it
+``scf`` builders and executors). Those are modules, not plugins: a plugin folder owns the ops it
 emits and never imports another folder's ops. A dialect a DSL only emits ops
 from needs no plugin at all. Importing this package imports no
 concrete plugin; it re-exports the bases of ``mlir.dsl.core.plugin``.
@@ -30,6 +29,7 @@ from ..core.plugin import (
     AdapterPlugin,
     CompilerPlugin,
     DecoratorPlugin,
+    DeferredDecoratorCall,
     Plugin,
     Plugins,
     TypeOpsPlugin,
@@ -40,6 +40,7 @@ __all__ = [
     "AdapterPlugin",
     "CompilerPlugin",
     "DecoratorPlugin",
+    "DeferredDecoratorCall",
     "Plugin",
     "Plugins",
     "TypeOpsPlugin",

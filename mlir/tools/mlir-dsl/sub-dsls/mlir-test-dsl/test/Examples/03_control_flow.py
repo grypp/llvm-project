@@ -1,3 +1,5 @@
+# RUN: env MLIR_DSL_DRYRUN=1 %PYTHON %s
+# RUN: %if host-supports-jit %{ %PYTHON %s %}
 # Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception

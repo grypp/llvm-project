@@ -8,7 +8,7 @@
 # RUN: rm -rf %t.keep && env MLIR_DSL_DRYRUN=1 MLIR_DSL_KEEP_IR=1 MLIR_DSL_DEBUGINFO=1 MLIR_DSL_CACHE_DIR=%t.keep %PYTHON %s 2>&1 | FileCheck %s --check-prefix=KEEP
 # RUN: rm -rf %t.after && env MLIR_DSL_DRYRUN=1 MLIR_DSL_KEEPIR_AFTER_PASSES="builtin.module(convert-scf-to-cf)" MLIR_DSL_CACHE_DIR=%t.after %PYTHON %s 2>&1 | FileCheck %s --check-prefix=AFTER
 # RUN: env MLIR_DSL_DRYRUN=1 MLIR_DSL_PRINT_IR_AFTER_PASSES=convert-scf-to-cf %PYTHON %s 2>&1 | FileCheck %s --check-prefix=PRINT
-# RUN: env MLIR_DSL_DRYRUN=1 MLIR_DSL_PIPELINE="builtin.module(canonicalize{top-down=true})" MLIR_DSL_ARCH=sm_90 %PYTHON %s 2>&1 | FileCheck %s --check-prefix=ENVPIPE
+# RUN: env MLIR_DSL_DRYRUN=1 MLIR_DSL_PIPELINE="builtin.module(canonicalize{top-down=true})" MLIR_DSL_ARCH=chip-a %PYTHON %s 2>&1 | FileCheck %s --check-prefix=ENVPIPE
 # REQUIRES: host-supports-jit
 # The runtime and the compiler: the jit argument
 # adapters (registry, numpy/torch/sequence/dataclass adapters, the `Pointer[T]`
@@ -422,11 +422,11 @@ print(f"HITS: {hits} MISSES: {misses} ENTRIES: {len(dsl.jit_cache)}")
 print("PIPELINE:", dsl._get_pipeline(None))
 print("EXPLICIT:", dsl._get_pipeline("builtin.module(cse)"), end=" ")
 NVVM = "builtin.module(gpu-lower-to-nvvm-pipeline)"
-print(dsl.preprocess_pipeline(NVVM, {"cubin-chip": "sm_90"}), end=" ")
+print(dsl.preprocess_pipeline(NVVM, {"cubin-chip": "chip-a"}), end=" ")
 print(dsl.preprocess_pipeline("builtin.module(canonicalize)", {}))
 # CHECK:        PIPELINE: builtin.module({{.*}}convert-scf-to-cf,convert-cf-to-llvm,convert-vector-to-llvm,convert-arith-to-llvm,convert-math-to-llvm,convert-func-to-llvm,reconcile-unrealized-casts)
-# CHECK-NEXT:   EXPLICIT: builtin.module(cse) builtin.module(gpu-lower-to-nvvm-pipeline{cubin-chip=sm_90 }) builtin.module(canonicalize)
-# ENVPIPE:      PIPELINE: builtin.module(canonicalize{top-down=true cubin-chip=sm_90 })
+# CHECK-NEXT:   EXPLICIT: builtin.module(cse) builtin.module(gpu-lower-to-nvvm-pipeline{cubin-chip=chip-a }) builtin.module(canonicalize)
+# ENVPIPE:      PIPELINE: builtin.module(canonicalize{top-down=true cubin-chip=chip-a })
 # ENVPIPE-NEXT: EXPLICIT: builtin.module(cse)
 
 

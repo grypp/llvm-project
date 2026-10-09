@@ -1,3 +1,5 @@
+# RUN: env MLIR_DSL_DRYRUN=1 %PYTHON %s
+# RUN: %if host-supports-jit %{ %PYTHON %s %}
 # Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -129,7 +131,7 @@ def main():
     print("JitOnlyDSL roles:", roles(jit_only), "families:", families(jit_only))
     print("MlirTestDSL roles:", roles(base), "families:", families(base))
     print(
-        "MLIR_DSL_DRYRUN:", jit_only.envar.dryrun, "MY_DSL_DRYRUN:", mine.envar.dryrun
+        "MLIR_DSL dry run:", jit_only.envar.dryrun, "MY_DSL dry run:", mine.envar.dryrun
     )
 
     img = Image(2, 3)

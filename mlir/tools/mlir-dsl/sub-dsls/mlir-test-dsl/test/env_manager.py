@@ -172,7 +172,7 @@ PARSE = """JIT_TIME_PROFILING=1 LOG_TO_CONSOLE=1 LOG_TO_FILE=1 LOG_LEVEL=40 DEBU
 PRINT_IR=on SHOW_STACKTRACE=0 ENABLE_PASS_PROFILING=yes AST_PREPROCESSOR=false
 DEBUGINFO=no VERIFY_TRACE=True NO_CACHE=ON CACHE_DIR=/some/cache/dir KEEP_IR=1
 KEEPIR_AFTER_PASSES=canonicalize,cse PRINT_IR_AFTER_PASSES=cse REMARKS=llvm-.*
-REMARKS_POLICY=final REMARKS_OUTPUT=/some/remarks.yaml DRYRUN=1 ARCH=sm_90a
+REMARKS_POLICY=final REMARKS_OUTPUT=/some/remarks.yaml DRYRUN=1 ARCH=chip-a
 WARNINGS_IGNORE=1 DISABLE_FILE_CACHING=1 JIT_CACHE_MAX_ELEMS=16 ENABLE_TVM_FFI=1
 PIPELINE=canonicalize LIBS=/a.so:/b.so LOC_TRACEBACKS=3"""
 env = manager("T_PARSE", **parse(PARSE))
@@ -183,7 +183,7 @@ show(env)
 # CHECK-NEXT: no_cache=True cache_dir='/some/cache/dir' disable_file_caching=True jit_cache_max_elems=16
 # CHECK-NEXT: keep_ir=True keep_ir_after_passes='canonicalize,cse' print_ir_after_passes='cse' loc_tracebacks=3
 # CHECK-NEXT: remarks='llvm-.*' remarks_policy='final' remarks_output='/some/remarks.yaml'
-# CHECK-NEXT: arch='sm_90a' pipeline='canonicalize' shared_libs='/a.so:/b.so' enable_tvm_ffi=True
+# CHECK-NEXT: arch='chip-a' pipeline='canonicalize' shared_libs='/a.so:/b.so' enable_tvm_ffi=True
 # Values are read once, at construction: a later change to the process
 # environment is seen by a fresh manager only.
 os.environ["T_PARSE_DRYRUN"] = "0"
@@ -297,7 +297,7 @@ print("unchanged by non-compile settings:", key("T_KEY", **parse(NON_COMPILE)) =
 # CHECK: unchanged by non-compile settings: True
 # Each compile setting changes the key; together they sit at their sorted
 # positions, `arch`, `pipeline` and `shared_libs` present only when set.
-COMPILE = """ARCH=sm_90a AST_PREPROCESSOR=0 DEBUGINFO=1 DRYRUN=1
+COMPILE = """ARCH=chip-a AST_PREPROCESSOR=0 DEBUGINFO=1 DRYRUN=1
 ENABLE_TVM_FFI=1 KEEPIR_AFTER_PASSES=cse LOC_TRACEBACKS=2 PIPELINE=cse REMARKS=llvm-.*
 REMARKS_OUTPUT=/r.yaml REMARKS_POLICY=final LIBS=/l.so"""
 for suffix, value in parse(COMPILE).items():
@@ -305,7 +305,7 @@ for suffix, value in parse(COMPILE).items():
     print(
         f"{suffix} ->", k != base, [item for item in k.split(";") if item not in base]
     )
-# CHECK: ARCH -> True ["arch='sm_90a'"]
+# CHECK: ARCH -> True ["arch='chip-a'"]
 # CHECK: AST_PREPROCESSOR -> True ['ast_preprocessor=False']
 # CHECK: DEBUGINFO -> True ['debuginfo=True']
 # CHECK: DRYRUN -> True ['dryrun=True']
@@ -318,7 +318,7 @@ for suffix, value in parse(COMPILE).items():
 # CHECK: REMARKS_POLICY -> True ["remarks_policy='final'"]
 # CHECK: LIBS -> True ["shared_libs='/l.so'"]
 print("all:", key("T_KEY", **parse(COMPILE)))
-# CHECK: all: arch='sm_90a';ast_preprocessor=False;debug=False;debuginfo=True;dryrun=True;enable_tvm_ffi=True;keep_ir_after_passes='cse';loc_tracebacks=2;pipeline='cse';remarks='llvm-.*';remarks_output='/r.yaml';remarks_policy='final';shared_libs='/l.so';
+# CHECK: all: arch='chip-a';ast_preprocessor=False;debug=False;debuginfo=True;dryrun=True;enable_tvm_ffi=True;keep_ir_after_passes='cse';loc_tracebacks=2;pipeline='cse';remarks='llvm-.*';remarks_output='/r.yaml';remarks_policy='final';shared_libs='/l.so';
 # DEBUG enters the key itself and through the default it raises.
 print("debug:", key("T_KEY", DEBUG="1"))
 # CHECK: debug: ast_preprocessor=True;debug=True;debuginfo=True;dryrun=False;
@@ -350,33 +350,33 @@ print("alone:", debug(DEBUGINFO="1"), debug(SHOW_STACKTRACE="1"))
 env = manager("T_ARCH")
 print("unset:", env.arch, "arch=" in env.cache_key_str())
 # CHECK: unset: None False
-env.arch = "sm_80"
+env.arch = "chip-b"
 print("set:", env.arch, env.cache_key_str().split(";")[0])
-# CHECK: set: sm_80 arch='sm_80'
+# CHECK: set: chip-b arch='chip-b'
 del env.arch
 print("deleted:", env.arch)
 # CHECK: deleted: None
-env = manager("T_ARCH", ARCH="sm_90a")
-with mock.patch.object(env, "arch", "sm_120"):
+env = manager("T_ARCH", ARCH="chip-a")
+with mock.patch.object(env, "arch", "chip-c"):
     print("patched:", env.arch, env.cache_key_str().split(";")[0])
-# CHECK: patched: sm_120 arch='sm_120'
-os.environ["T_ARCH_ARCH"] = "sm_75"
+# CHECK: patched: chip-c arch='chip-c'
+os.environ["T_ARCH_ARCH"] = "chip-d"
 print("after patch:", env.arch, "| fresh:", EnvironmentVarManager("T_ARCH").arch)
-# CHECK: after patch: sm_90a | fresh: sm_75
+# CHECK: after patch: chip-a | fresh: chip-d
 
 # --- Prefix isolation -------------------------------------------------------
 # A manager reads only `{prefix}_*`: another prefix, a prefix of it and the
 # DSL's own MLIR_DSL see none of its variables; messages quote the prefix;
 # variables are case-sensitive.
-a = manager("A_DSL", DRYRUN="1", ARCH="sm_80", PIPELINE="cse", LOC_TRACEBACKS="5")
+a = manager("A_DSL", DRYRUN="1", ARCH="chip-b", PIPELINE="cse", LOC_TRACEBACKS="5")
 b, short = EnvironmentVarManager("B_DSL"), EnvironmentVarManager("A")
 for env in (a, b, short):
     print(env.prefix, env.dryrun, env.arch, env.pipeline, env.loc_tracebacks)
-# CHECK:      A_DSL True sm_80 cse 5
+# CHECK:      A_DSL True chip-b cse 5
 # CHECK-NEXT: B_DSL False None None 0
 # CHECK-NEXT: A False None None 0
 print("a key:", a.cache_key_str())
-# CHECK: a key: arch='sm_80';ast_preprocessor=True;debug=False;debuginfo=False;dryrun=True;enable_tvm_ffi=False;keep_ir_after_passes='';loc_tracebacks=5;pipeline='cse';
+# CHECK: a key: arch='chip-b';ast_preprocessor=True;debug=False;debuginfo=False;dryrun=True;enable_tvm_ffi=False;keep_ir_after_passes='';loc_tracebacks=5;pipeline='cse';
 print("b == short == defaults:", b.cache_key_str() == short.cache_key_str() == base)
 # CHECK: b == short == defaults: True
 d = m.MlirTestDSL().envar

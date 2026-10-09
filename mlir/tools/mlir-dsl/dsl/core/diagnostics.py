@@ -1096,6 +1096,19 @@ class DiagId(DiagCatalog, enum.Enum):
             "that function.",
         ),
     )
+    CALL_NEVER_ISSUED = (
+        "`{function_name}` was called but never issued. Calling a `{decorator}` "
+        "function only prepares the call; it runs when the prepared call is issued.",
+        (
+            "Issue it, e.g. `{function_name}(...){issue}`.",
+            "If the call is not needed, remove it.",
+        ),
+    )
+    CALL_ALREADY_ISSUED = (
+        "`{function_name}` is issued twice from one prepared call; "
+        "`{function_name}(...)` runs once.",
+        ("Call `{function_name}(...)` again for a second issue, one `{issue}` each.",),
+    )
     CALL_META_VALUE_MISMATCH = (
         "Argument #{num} `{arg_name}` is a compile-time (Meta) value: this compiled "
         "`{function_name}` was specialized for {expected}, but is called with {got}.",
@@ -1310,6 +1323,8 @@ _classify(
     "CALL_MISSING_JIT_DECORATOR",
     "CALL_NOT_CALLABLE",
     "CALL_OUTSIDE_JIT",
+    "CALL_NEVER_ISSUED",
+    "CALL_ALREADY_ISSUED",
     "CALL_PLUGIN_REQUIRED",
     "TYPE_RETURN_MISMATCH",
 )

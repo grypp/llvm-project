@@ -579,6 +579,6 @@ names = list(m.__all__)
 missing = [n for n in names if not hasattr(m, n)]
 unique = len(names) == len(set(names))
 print(f"API: {unique} {missing} {m.jit == m.MlirTestDSL.jit}", end=" ")
-print(m.LaunchConfig.__module__ == "mlir.dsl.plugins.decorators.kernels.gpu")
+print(m.LaunchConfig.__module__ == "mlir.dsl.plugins.decorators.kernels.gpu_plugin")
 # CHECK:      LAUNCH: LaunchConfig(cluster=[1, 2, 3], grid=[4, 1, 1], block=[8, 8, 1], smem=1024, async_deps=[])
 # CHECK-NEXT: API: True [] True True

@@ -25,7 +25,7 @@ from mlir.dsl.plugins.ast_preprocessor import scf
 from mlir.dsl.plugins.compiler import execution_engine
 from mlir.dsl.plugins.adapters import dlpack, tvm_ffi
 from mlir.dsl.plugins.decorators.jit import func
-from mlir.dsl.plugins.decorators.kernels import gpu
+from mlir.dsl.plugins.decorators.kernels import gpu_plugin
 from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps, arith, llvm, vector
 
 __all__ = ["LOWER_TO_LLVM", "MlirTestDSL", "compile", "jit", "kernel"]
@@ -61,7 +61,7 @@ class MlirTestDSL(BaseDSL):
         ast_preprocessor=scf.ASTPreprocessor(),
         compiler=execution_engine.Compiler(),
         # @jit over a func.func host entry, then @kernel over gpu.func.
-        decorators=[func.Jit(), gpu.Kernels(chip_option="cubin-chip")],
+        decorators=[func.Jit(), gpu_plugin.Kernels(chip_option="cubin-chip")],
         # Inbound: anything speaking DLPack (numpy arrays, torch tensors on the
         # host or a device) through the nanobind extension. Outbound: the
         # compiled entry as a tvm_ffi.Function when enabled.
@@ -70,7 +70,8 @@ class MlirTestDSL(BaseDSL):
 
     def pipeline(self) -> list[str]:
         """The gpu lowering first, when an architecture is set (a launch without
-        one is a ``gpu:CONFIG_UNSUPPORTED_ARCH`` diagnostic), then the lowering
+        one that is compiled is a ``gpu:CONFIG_MISSING_ARCH`` diagnostic; a dry run
+        needs none), then the lowering
         of the upstream dialects the builtin types and the ``scf`` control flow
         emit."""
         passes: list[str] = []

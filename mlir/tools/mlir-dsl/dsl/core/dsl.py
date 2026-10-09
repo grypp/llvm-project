@@ -33,7 +33,7 @@ from typing import Annotated, Any, ClassVar, Union, get_args, get_origin
 
 from ... import ir
 from ..core.common import DSLBaseError, DSLRuntimeError, DSLUserCodeError, active_dsl
-from ..core.diagnostics import DiagId
+from ..core.diagnostics import DiagId, find_user_source_location
 from ..core.env_manager import EnvironmentVarManager
 from .plugin import DecoratorPlugin, Plugins, _NoRemarkSession
 from .remarks import REMARK_POLICIES
@@ -357,6 +357,9 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         self.cache_hits: int = 0
         self.cache_misses: int = 0
         self.file_cache_hits: int = 0
+        # The prepared calls (``DeferredDecoratorCall``) of the open top-level trace,
+        # checked when the trace ends; None outside a trace.
+        self._deferred_calls: list[Any] | None = None
         # The structured remarks of the last compile (``RemarkSession.remarks``).
         self.collected_remarks: list[dict[str, Any]] = []
 
@@ -1061,7 +1064,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                     )
 
             if jit_arg_type is not None:
-                # Merge attributes from annotated markers (e.g. grid_constant)
+                # Merge attributes from annotated markers (`__extract_mlir_attributes__`)
                 # into every element of jit_arg_attr for this argument.
                 if annotation_markers and jit_arg_attr:
                     extra = {
@@ -1430,7 +1433,17 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             loc = self.get_ir_location(location)
             module = ir.Module.create(loc=loc)
 
-            with ir.InsertionPoint(module.body):
+            self._deferred_calls = []
+            try:
+                with ir.InsertionPoint(module.body):
+                    return build_in_module(module, loc)
+            finally:
+                self._deferred_calls = None
+
+        def build_in_module(
+            module: ir.Module, loc: Any
+        ) -> tuple[ir.Module, Any, _ResultSpec | None]:
+            if True:  # the body of the trace, inside the module's insertion point
                 # A plugin with per-trace state (a kernel container, the
                 # launches it expects) sets it up before the entry is built.
                 for plugin in self.plugins.decorators:
@@ -1455,6 +1468,8 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                         entry, result, sig, loc
                     )
                     entry.generate_return(func_op, ret_values, loc=loc)
+                # A prepared call the body never issued is the user's mistake.
+                self._check_deferred_calls()
                 for plugin in self.plugins.decorators:
                     plugin.after_trace(self, module)
 
@@ -2126,6 +2141,31 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 },
             )
         return signature, canonical_args, canonical_kwargs, jit_args
+
+    def _register_deferred_call(self, call: Any) -> None:
+        """Remember a prepared call (``DeferredDecoratorCall``) made inside the open
+        trace, with the user's call site for its diagnostic; outside a trace
+        nothing is remembered (issuing it there is ``CALL_OUTSIDE_JIT``)."""
+        if self._deferred_calls is not None:
+            call.creation_loc = find_user_source_location()
+            self._deferred_calls.append(call)
+
+    def _check_deferred_calls(self) -> None:
+        """Report the first prepared call of the open trace that was never
+        issued (``CALL_NEVER_ISSUED``), at the line that prepared it."""
+        for call in self._deferred_calls or ():
+            if not call.issued:
+                filename, lineno, col, end_col = call.creation_loc
+                raise DSLUserCodeError(
+                    DiagId.CALL_NEVER_ISSUED,
+                    filename=filename,
+                    lineno=lineno,
+                    col_offset=col,
+                    end_col_offset=end_col,
+                    function_name=call.name,
+                    decorator=f"@{call.plugin.decorator_name}",
+                    issue=call.plugin.issue_example,
+                )
 
     def trace_body(
         self,

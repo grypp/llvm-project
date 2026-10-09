@@ -4,7 +4,7 @@
 # spelling, width, ctypes/NumPy names, lookups, the open metaclass), the
 # literal and mixed-type promotion rules, the operator-to-op selection for
 # signed/unsigned/float operands (arithmetic, comparisons, bitwise, shifts),
-# the cast table, Boolean semantics, Meta and `GridConstant` parameters,
+# the cast table, Boolean semantics, Meta and `Annotated` parameters,
 # scalar marshalling and the `TYPE_*`/`ARG_*` error and warning paths. The
 # semantics of the emitted ops are MLIR's business and are not checked here.
 import ctypes
@@ -16,7 +16,6 @@ import numpy as np
 import mlir.mlir_dsl as m
 from mlir.dsl.core.common import active_dsl
 from mlir import ir
-from mlir.dsl.plugins.decorators.kernels.gpu import GridConstant as GC
 
 I8, I16, I32, I64 = m.Int8, m.Int16, m.Int32, m.Int64
 U8, U32, U64 = m.Uint8, m.Uint32, m.Uint64
@@ -423,18 +422,27 @@ print("RESULT:", meta(5, 3, "double", 2))  # (5*2 + 0 + 1 + 2) * 2
 print("RESULT:", meta(5, 1, "single", 2))
 
 
-# `GridConstant[T]` is `Annotated[T, grid_constant]` and tags the argument
-# `{cuda.grid_constant}`; other `Annotated` metadata contributes nothing.
+# An `Annotated[T, marker]` whose marker has `__extract_mlir_attributes__` tags
+# the argument with the attributes it returns (a sub-DSL's way to put e.g. a
+# target-specific attribute on a parameter); other metadata contributes nothing.
+class _Tag:
+    def __extract_mlir_attributes__(self):
+        return [ir.DictAttr.get({"test.tag": ir.UnitAttr.get()})]
+
+
+tag = _Tag()
+
+
 @m.jit
-def grid(a: GC[I32], b: A[F32, m.grid_constant], c: A[I32, "doc"]) -> F32:
+def marked(a: A[I32, tag], b: A[F32, tag], c: A[I32, "doc"]) -> F32:
     return F32(a + c) + b
 
 
-# CHECK-LABEL: func.func @grid(
-# CHECK-SAME:    %[[A:[^:]+]]: i32 {cuda.grid_constant}, %[[B:[^:]+]]: f32 {cuda.grid_constant}, %[[C:[^:]+]]: i32) -> f32
+# CHECK-LABEL: func.func @marked(
+# CHECK-SAME:    %[[A:[^:]+]]: i32 {test.tag}, %[[B:[^:]+]]: f32 {test.tag}, %[[C:[^:]+]]: i32) -> f32
 # EXEC:          RESULT: 3.5
 # (Numeric arguments: a plain `int` under `Annotated[...]` is a known defect.)
-print("RESULT:", grid(I32(1), F32(0.5), I32(2)))
+print("RESULT:", marked(I32(1), F32(0.5), I32(2)))
 
 
 # --- Out-of-range literals: an explicit construction narrows with the C-cast
