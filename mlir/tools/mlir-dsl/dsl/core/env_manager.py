@@ -480,6 +480,10 @@ class EnvironmentVarManager(LogEnvironmentManager):
     warnings_ignore: bool = env_var(
         "WARNINGS_IGNORE", affects_compile=False, default=False
     )
+    # Capacity of the in-memory JIT cache; None is unlimited, 0 disables it.
+    jit_cache_max_elems: int | None = env_var(
+        "JIT_CACHE_MAX_ELEMS", affects_compile=False, default=None
+    )
     pipeline: str | None = env_var("PIPELINE", affects_compile=True, default=None)
     # MLIR runtime libraries linked by the JIT.
     shared_libs: str | None = env_var("LIBS", affects_compile=True)

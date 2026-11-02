@@ -81,9 +81,19 @@ def check(label, got, want):
 def main():
     dsl = m.MlirTestDSL()
 
+    def compiled():
+        # A specialization is compiled, or loaded from the on-disk cache of an
+        # earlier process (on by default, see 09): count both.
+        return dsl.cache_misses
+
     check("affine(3, scale=2, bias=1)", affine(3.0, Affine(m.Float32(2.0), 1)), 7.0)
+    before = compiled()
+    # A new value of the staged field reuses the compiled function ...
     check("affine(4, scale=3, bias=1)", affine(4.0, Affine(m.Float32(3.0), 1)), 13.0)
+    check("compilations after a new scale", compiled() - before, 0)
+    # ... a new value of the Meta field is another specialization.
     check("affine(3, scale=2, bias=5)", affine(3.0, Affine(m.Float32(2.0), 5)), 11.0)
+    check("compilations after a new bias", compiled() - before, 1)
 
     check("accumulate(5)", accumulate(5), Stats(total=10, count=5))
     check("norm2(3, 4)", norm2(Point(m.Float32(3.0), m.Float32(4.0))), 25.0)

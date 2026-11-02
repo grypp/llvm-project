@@ -17,7 +17,10 @@ services a decorator plugin traces with (:meth:`BaseDSL.bind_arguments`,
 :meth:`BaseDSL.trace_body`).
 """
 
+import hashlib
 import inspect
+import io
+import logging
 import os
 import re
 import threading
@@ -32,6 +35,10 @@ from typing import Annotated, Any, ClassVar, NoReturn, Union, get_args, get_orig
 from ... import ir
 from ..types import typing as t
 from ..util import tree_utils
+from ..util.cache import (
+    JitCacheDict,
+    toolchain_identity,
+)
 from ..util.logger import log
 from .arguments import JitArgAdapterRegistry, adapt_pointer_address
 from .common import (
@@ -240,6 +247,8 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     plugin's ``call`` (from Python) or ``launch`` (inside a trace).
     """
 
+    _jit_cache_class: ClassVar[type[JitCacheDict]] = JitCacheDict
+
     user_error_class: ClassVar[type[DSLUserCodeError]] = DSLUserCodeError
     diag_id_aliases: ClassVar[dict[Any, Any]] = {}
     _warning_category: ClassVar[type[Warning]] = DSLWarning
@@ -342,6 +351,13 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         # environment does not turn the rewrite off.
         self.enable_preprocessor: bool = False
         self.preprocessor: Any = None
+        # This cache uses hash of original ir and env as key. Enabled by default
+        self.jit_cache: JitCacheDict = self._jit_cache_class(
+            max_elems=0 if self.envar.no_cache else self.envar.jit_cache_max_elems
+        )
+        self.cache_hits: int = 0
+        self.cache_misses: int = 0
+        self.file_cache_hits: int = 0
         # The prepared calls (``DeferredDecoratorCall``) of the open top-level trace,
         # checked when the trace ends; None outside a trace.
         self._deferred_calls: list[Any] | None = None
@@ -1279,6 +1295,46 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         shared_libs.extend(extra_link_libs)
         return list(_normalize_shared_library_paths(shared_libs))
 
+    def get_version(self) -> "hashlib._Hash":
+        """A hash of the toolchain identity, the MLIR binaries in use."""
+        version_hash = hashlib.sha256()
+        version_hash.update(repr(toolchain_identity()).encode())
+        return version_hash
+
+    def get_module_hash(
+        self,
+        module: ir.Module,
+        function_name: str,
+        *,
+        pipeline: str = "",
+        extra_link_libs: tuple[str, ...] = (),
+    ) -> str:
+        """The compile cache key of ``module``: a hash of its bytecode, the
+        ``affects_compile`` environment settings, the DSL's own
+        :meth:`_cache_key_extra`, the pipeline, the extra link libraries and
+        the toolchain identity (:meth:`get_version`)."""
+        s = io.BytesIO()
+        module.operation.write_bytecode(s)
+        s.write(self.envar.cache_key_str().encode())
+        s.write(self._cache_key_extra())
+        s.write(b"\0pipeline\0")
+        s.write(pipeline.encode())
+        for lib in extra_link_libs:
+            s.write(b"\0extra_link_lib\0")
+            s.write(os.fsencode(lib))
+        hash_obj = self.get_version().copy()
+        hash_obj.update(s.getvalue())
+        module_hash = hash_obj.hexdigest()
+
+        # Hex-encoding the whole bytecode buffer is per-compile waste unless
+        # DEBUG logging is actually on.
+        if log().isEnabledFor(logging.DEBUG):
+            log().debug("Bytecode=[%s]", s.getvalue().hex())
+        log().info(
+            "Function=[%s] Computed module_hash=[%s]", function_name, module_hash
+        )
+        return module_hash
+
     def build_module(self, module: ir.Module, function_name: str) -> ir.Module:
         """
         Build the MLIR module, verify and return the module
@@ -1460,6 +1516,13 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                     self, module, function_name, sig, args, kwonlyargs
                 )
             module_hash = None
+            if not no_cache:
+                module_hash = self.get_module_hash(
+                    module,
+                    function_name,
+                    pipeline=pipeline,
+                    extra_link_libs=extra_link_libs,
+                )
             return (
                 self.build_module(module, function_name),
                 module_hash,
@@ -1483,6 +1546,10 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         func: Callable[..., Any] | None = None,
     ) -> Any:
         """Lower a module and bind its entry to a Python callable."""
+        self.cache_misses += 1
+        log().info(
+            "JIT cache miss function=[%s] module_hash=[%s]", function_name, module_hash
+        )
         shared_libs = self.get_shared_libs(extra_link_libs)
         engine = self.compile_and_jit(module, pipeline, shared_libs, function_name)
         jit_function = self._compiler.load(
@@ -1500,6 +1567,8 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             plugin.finish_compiled_function(self, jit_function)
         for plugin in self.plugins.adapters:
             jit_function = plugin.wrap_compiled_function(self, jit_function)
+        if not no_cache:
+            self.jit_cache.set(module_hash, jit_function, func)
         return jit_function
 
     def post_compilation_cleanup(self) -> None:
@@ -1599,17 +1668,33 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 ):
                     return result
 
-                jit_function = self.compile_and_cache(
-                    module,
-                    module_hash,
-                    function_name,
-                    pipeline,
-                    sig,
-                    no_cache,
-                    result_spec=result_spec,
-                    extra_link_libs=extra_link_libs,
-                    func=func,
-                )
+                cached_jit_func = None if no_cache else self.jit_cache.get(module_hash)
+
+                if (
+                    no_cache
+                    or cached_jit_func is None
+                    or cached_jit_func.capi_func is None
+                ):
+                    # no cache or cache miss, do ir generation/compilation/jit engine
+                    jit_function = self.compile_and_cache(
+                        module,
+                        module_hash,
+                        function_name,
+                        pipeline,
+                        sig,
+                        no_cache,
+                        result_spec=result_spec,
+                        extra_link_libs=extra_link_libs,
+                        func=func,
+                    )
+                else:
+                    self.cache_hits += 1
+                    log().info(
+                        "JIT cache hit IN-MEMORY function=[%s] module_hash=[%s]",
+                        function_name,
+                        module_hash,
+                    )
+                    jit_function = cached_jit_func
 
             finally:
                 if loc_tracebacks is not None:
@@ -2251,3 +2336,11 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             None if ast_preprocessor is None else ast_preprocessor.helpers_module
         )
         return (type(self.preprocessor), helpers_module)
+
+    def _cache_key_extra(self) -> bytes:
+        """Bytes :meth:`get_module_hash` adds to the compile cache key of
+        every module, after the environment's ``affects_compile`` settings:
+        whatever else the compiled artifact depends on in this DSL (compile
+        options of its own, the options of its pipeline). The default adds
+        nothing."""
+        return b""

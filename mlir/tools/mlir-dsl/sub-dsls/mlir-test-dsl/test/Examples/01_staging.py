@@ -56,6 +56,12 @@ def check(label, got, want):
         assert got == want, (label, got, want)
 
 
+def compiled():
+    # A specialization is compiled, or loaded from the on-disk cache of an
+    # earlier process (on by default, see 09): count both.
+    return dsl.cache_misses
+
+
 def main():
     # Outside a trace nothing is staged: a Python int is Meta.
     print(f"host: is_mlir_op={m.is_mlir_op(5)}")
@@ -64,12 +70,15 @@ def main():
     check("scaled(5, 2)", scaled(5, 2), 10)
     # Same Meta value, another runtime value: same trace, nothing compiled (a hit).
     check("scaled(7, 2)", scaled(7, 2), 14)
+    check("cache after scale=2 twice", (compiled(), dsl.cache_hits), (1, 1))
 
     # A new Meta value is a new symbol (`scaled_3`) and a new compile.
     check("scaled(5, 3)", scaled(5, 3), 15)
+    check("cache after scale=3", (compiled(), dsl.cache_hits), (2, 1))
 
     # `scale == 1` folds the multiply away entirely.
     check("scaled(5, 1)", scaled(5, 1), 5)
+    check("cache after scale=1", (compiled(), dsl.cache_hits), (3, 1))
 
     print("Staging: runtime vs Meta values: passed")
 

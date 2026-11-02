@@ -209,3 +209,23 @@ assert keyed.__wrapped__._original_code is original
 assert factory_calls == [("jit",)]
 print("PREPROCESS CONTRACT: factory and keyed rewrite from original code")
 # CHECK-NEXT: PREPROCESS CONTRACT: factory and keyed rewrite from original code
+
+from mlir.dsl.util.cache import JitCacheDict
+class Cache(JitCacheDict):
+    pass
+class CacheDSL(RuntimeDefaults):
+    _jit_cache_class = Cache
+    salt = b"first"
+    def _cache_key_extra(self):
+        return self.salt
+
+cache_dsl = CacheDSL()
+assert isinstance(cache_dsl.jit_cache, Cache)
+with ir.Context(), ir.Location.unknown():
+    module = ir.Module.create()
+    first_hash = cache_dsl.get_module_hash(module, "empty")
+    cache_dsl.salt = b"second"
+    second_hash = cache_dsl.get_module_hash(module, "empty")
+assert first_hash != second_hash
+print("CACHE CONTRACT: cache class and extra identity")
+# CHECK-NEXT: CACHE CONTRACT: cache class and extra identity

@@ -101,7 +101,7 @@ print("BOOL_FULL:", read(slots[1], ctypes.c_int32))
 # CHECK: BOOL_FULL: 1
 
 
-# The smoke user: a compiled reduction called three times before compilation caching is introduced with a Python
+# The smoke user: a compiled reduction called a thousand times with a Python
 # `int` for its `Int32` parameter.
 @m.jit
 def total(p: m.Pointer[m.Int32], n: m.Int32) -> m.Int32:
@@ -112,6 +112,6 @@ def total(p: m.Pointer[m.Int32], n: m.Int32) -> m.Int32:
 
 
 data = np.arange(1000, dtype=np.int32)
-results = {total(data, 1000) for _ in range(3)}
+results = {total(data, 1000) for _ in range(1000)}
 print("SUM:", *sorted(results))
 # CHECK: SUM: 499500
