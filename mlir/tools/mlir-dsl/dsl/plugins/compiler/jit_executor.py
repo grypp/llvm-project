@@ -54,6 +54,7 @@ from ...core.arguments import (
 from ...core.staging import is_reserved_python_func_arg
 from ...types import typing as t
 from ...util.logger import log
+from ...util.profiler import timer
 from ...util.tree_utils import (
     Leaf,
     trees_equal,
@@ -831,6 +832,7 @@ class JitExecutor:
         # ExecutionEngine is not discarded until runtime callables are
         # garbage collected.
         self.jit_module = jit_module
+        self.profiler = timer(enable=jit_time_profiling) if jit_time_profiling else None
         self._result_ctype = result_ctype
         # The pointer objects are kept so what they own stays alive.
         self.trailing_args = tuple(trailing_args)
@@ -839,8 +841,14 @@ class JitExecutor:
             1 if result_ctype is not None else 0
         )
 
-        self._get_invoke_packed_args_func = self._get_invoke_packed_args
-        self.capi_func = self.jit_module.capi_func
+        if self.profiler is not None:
+            self._get_invoke_packed_args_func = self.profiler(
+                self._get_invoke_packed_args
+            )
+            self.capi_func = self.profiler(self.jit_module.capi_func)
+        else:
+            self._get_invoke_packed_args_func = self._get_invoke_packed_args
+            self.capi_func = self.jit_module.capi_func
         self._tls = threading.local()
 
     def _get_invoke_packed_args(

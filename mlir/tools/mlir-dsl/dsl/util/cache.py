@@ -350,18 +350,25 @@ def save_ir(
     fname: str,
     output_dir: str | None = None,
     bytecode_writer: Callable[..., Any] | None = None,
+    *,
+    as_text: bool = False,
+    enable_debug_info: bool = False,
 ) -> Path:
-    """Save a module as bytecode, ``<output_dir>/<dsl_name lower>_<fname>.mlir``,
+    """Save a module as ``<output_dir>/<dsl_name lower>_<fname>.mlir``,
     atomically: the file is written in a private temporary directory next to
     its destination and moved into place with ``os.replace``, so a reader
-    never sees a partial write.
+    never sees a partial write. Bytecode by default; ``as_text`` writes the
+    textual IR instead (the ``KEEP_IR`` dumps).
 
     :param dsl_name: The DSL's name, the file name prefix
     :param module: The module to save
-    :param fname: The label of the file (a module hash)
+    :param fname: The label of the file (a module hash, or the dump's label)
     :param output_dir: The directory, defaults to :func:`get_default_generated_ir_path`
     :param bytecode_writer: Writes the open binary file itself (e.g.
         ``lambda f: write_bytecode_with_crc32(f, module)``); plain bytecode by default
+    :param as_text: Write the textual IR (``get_asm``) instead of bytecode;
+        ``bytecode_writer`` is then unused
+    :param enable_debug_info: Print the locations in the textual IR
     :return: The path of the saved file
     """
     initial_name = f"{dsl_name.lower()}_{fname}.mlir"
@@ -375,7 +382,11 @@ def save_ir(
     os.makedirs(temp_dir, exist_ok=False)
     temp_fname = os.path.join(temp_dir, initial_name)
     with open(temp_fname, "wb") as f:
-        if bytecode_writer:
+        if as_text:
+            f.write(
+                module.operation.get_asm(enable_debug_info=enable_debug_info).encode()
+            )
+        elif bytecode_writer:
             bytecode_writer(f)
         else:
             module.operation.write_bytecode(f)

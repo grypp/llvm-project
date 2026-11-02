@@ -34,7 +34,7 @@ from typing import Annotated, Any, ClassVar, NoReturn, Union, get_args, get_orig
 
 from ... import ir
 from ..types import typing as t
-from ..util import tree_utils
+from ..util import profiler, tree_utils
 from ..util.cache import (
     JitCacheDict,
     dump_cache_to_path,
@@ -42,10 +42,12 @@ from ..util.cache import (
     get_default_generated_ir_path,
     load_cache_from_path,
     read_bytecode_and_check_crc32,
+    save_ir,
     toolchain_identity,
     write_bytecode_with_crc32,
 )
 from ..util.logger import log
+from ..util.profiler import timer
 from .arguments import JitArgAdapterRegistry, adapt_pointer_address
 from .common import (
     DSLBaseError,
@@ -374,6 +376,8 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
         # Path of the dumped MLIR file; set by build_module when KEEP_IR is active.
         self.dump_mlir_path: Any = None
+        self.dump_mlir_raw_path: Any = None
+        self.dump_mlir_paths: dict[str, str] = {}
         # The function being traced; set on every path that reaches the
         # argument boundary (``_prepare_compilation``, ``bind_arguments``).
         self.traced_function: Callable[..., Any] | None = None
@@ -381,6 +385,9 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         # preprocessor plugin's ``executors`` once the plugins are installed.
         self.executor: Executor = Executor()
         log().info("Initializing %s DSL", name)
+
+        if self.envar.jit_time_profiling:
+            self.profiler: Any = timer(enable=True)
 
         # Resolve the class's plugin record for this instance: a copy of every
         # available plugin, installed in record order (roles, then families), so
@@ -1257,11 +1264,13 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         # This method is also a direct entry point (not only reached through
         # generate_mlir), so it owns a compile boundary of its own; when
         # nested inside generate_mlir the depth counter folds it away.
+        profiler.begin_compile()
         try:
             return self._compiler.compile_and_jit(
                 module,
                 pipeline,
                 shared_libs=shared_libs,
+                enable_pass_profiling=self.envar.enable_pass_profiling,
                 enable_debug_info=self.envar.debuginfo,
                 after_lowering=partial(
                     self._after_lowering, function_name=function_name
@@ -1273,6 +1282,8 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             raise DSLRuntimeError(
                 "compilation failed", context={"function": function_name}, cause=e
             ) from e
+        finally:
+            profiler.finish_compile()
 
     def _after_lowering(self, module: ir.Module, function_name: str) -> None:
         """Run every adapter's ``after_lowering`` on the lowered ``module`` of
@@ -1285,6 +1296,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     ) -> Any:
         """Build the ``ExecutionEngine`` of an already lowered ``module`` (a file
         cache hit): the pass pipeline is skipped."""
+        profiler.begin_compile()
         try:
             return self._compiler.jit(module, shared_libs=shared_libs)
         except DSLBaseError:
@@ -1293,6 +1305,8 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             raise DSLRuntimeError(
                 "compilation failed", context={"function": function_name}, cause=e
             ) from e
+        finally:
+            profiler.finish_compile()
 
     def get_shared_libs(self, extra_link_libs: tuple[str, ...] = ()) -> list[str]:
         """The runtime libraries handed to the ``ExecutionEngine``: the
@@ -1359,22 +1373,87 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         )
         return module_hash
 
+    def _inspection_pipeline(self, passes: str) -> str:
+        """Frame ``passes`` for IR-inspection dumps."""
+        passes = passes.strip()
+        if passes.startswith("builtin.module("):
+            return passes
+        return f"builtin.module({passes})"
+
+    def _save_ir(self, module: ir.Module, label: str) -> str:
+        """Write ``module`` as text under ``<PREFIX>_CACHE_DIR`` (atomically,
+        through :func:`save_ir`) and return the path."""
+        output_dir = get_default_generated_ir_path(self.name)
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            path = save_ir(
+                self.name,
+                module,
+                label,
+                output_dir,
+                as_text=True,
+                enable_debug_info=self.envar.debuginfo,
+            )
+        except OSError as e:
+            raise DSLRuntimeError(
+                "failed to save the generated IR", context={"dir": output_dir}, cause=e
+            ) from e
+        log().info("Saved IR [%s] to [%s]", label, path)
+        return str(path)
+
     def build_module(self, module: ir.Module, function_name: str) -> ir.Module:
         """
-        Build the MLIR module, verify and return the module
+        Build the MLIR module: write the IR dumps the settings ask for, print
+        the IR, verify the module (:meth:`_verify_module`, last) and return it
         """
+
+        # The KEEP_IR dumps, one file per stage; the raw module (before any
+        # pass) under the function's own name, the other stages on clones.
+        self.dump_mlir_paths = {}
+        for stage in self._keep_ir_stages():
+            if stage == "raw":
+                path = self._save_ir(module, function_name)
+                self.dump_mlir_path = self.dump_mlir_raw_path = path
+            elif stage == "clean":
+                path = self._compile_clone_and_save(
+                    module,
+                    self._inspection_pipeline("canonicalize,cse"),
+                    f"{function_name}_clean",
+                )
+            elif stage == "after-passes":
+                path = self._compile_clone_and_save(
+                    module, self._get_pipeline(None), f"{function_name}_after_passes"
+                )
+            else:
+                pass_name = stage[len("after-") :]
+                safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", pass_name).strip("_")
+                path = self._compile_clone_and_save(
+                    module,
+                    self._inspection_pipeline(pass_name),
+                    f"{function_name}_after_{safe_name}",
+                )
+            self.dump_mlir_paths[stage] = path
 
         if self.envar.print_ir:
             print("\n//===--- ------ Generated IR ------ ---====\n")
             module.operation.print(enable_debug_info=self.envar.debuginfo)
             print("\n//===--- --- End of Generated IR -- ---====\n")
 
-        # Verify the module
-        try:
-            module.operation.verify()
-        except Exception as e:
-            raise DSLRuntimeError("IR verification failed", cause=e) from e
+        # Print IR after applying the passes, on a clone
+        if self.envar.print_ir_after_passes:
+            self._compiler.print_ir_after_passes(
+                module,
+                self.envar.print_ir_after_passes,
+                enable_debug_info=self.envar.debuginfo,
+            )
 
+        # Save IR after applying the passes
+        if self.envar.keep_ir_after_passes:
+            pipeline = self._inspection_pipeline(self.envar.keep_ir_after_passes)
+            self._compiler.compile(module, pipeline)
+            self._save_ir(module, f"{function_name}_after_pass")
+
+        self._verify_module(module)
         return module
 
     # ===------------------------------------------------------------------===
@@ -1532,7 +1611,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         def build_and_finalize() -> (
             tuple[ir.Module, str | None, Any, _ResultSpec | None]
         ):
-            module, result, result_spec = build_ir_module()
+            module, result, result_spec = self._maybe_profile(build_ir_module)()
             # Plugins add to the module before the hash, so what they add is
             # part of the cached artifact.
             for plugin in self.plugins.adapters:
@@ -1554,7 +1633,16 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 result_spec,
             )
 
+        build_and_finalize = profiler.profile_build(build_and_finalize)
         return build_and_finalize()
+
+    def _maybe_profile(self, fn: Callable[..., Any]) -> Callable[..., Any]:
+        """Wrap ``fn`` with the JIT timer when profiling is enabled.
+
+        ``self.profiler`` only exists when ``jit_time_profiling`` is set (see
+        ``__init__``), so it is referenced only on that branch.
+        """
+        return self.profiler(fn) if self.envar.jit_time_profiling else fn
 
     def compile_and_cache(
         self,
@@ -1610,17 +1698,22 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             )
         shared_libs = self.get_shared_libs(extra_link_libs)
         if load_from_file_cache:
-            engine = self.jit_lowered_module(module, shared_libs, function_name)
+            engine = self._maybe_profile(self.jit_lowered_module)(
+                module, shared_libs, function_name
+            )
         else:
-            engine = self.compile_and_jit(module, pipeline, shared_libs, function_name)
+            engine = self._maybe_profile(self.compile_and_jit)(
+                module, pipeline, shared_libs, function_name
+            )
         # Binding the entry materializes the JIT'd code (ORC compiles lazily),
         # so it belongs to the jit phase together with engine construction.
-        load = self._compiler.load
+        load = profiler.timed("jit")(self._maybe_profile(self._compiler.load))
         jit_function = load(
             module,
             engine,
             function_name,
             sig,
+            jit_time_profiling=self.envar.jit_time_profiling,
             result_ctype=result_spec.slot if result_spec is not None else None,
         )
         jit_function.result_spec = result_spec  # type: ignore[attr-defined]
@@ -1690,6 +1783,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             # Optional: capture full Python call stacks on every MLIR op.
             loc_tracebacks = self._enter_loc_tracebacks()
 
+            profiler.begin_compile()
             try:
                 # Convert input arguments to MLIR arguments
                 mlir_func_args = self.generate_mlir_function_types(
@@ -1781,6 +1875,8 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                     except Exception:
                         pass
                 self.post_compilation_cleanup()
+                # Diagnostics last: a profiler failure must not skip the cleanup.
+                profiler.finish_compile()
 
         # If compile_only is set, bypass execution return the jit_executor directly
         if compile_only:
@@ -2422,3 +2518,59 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         options of its own, the options of its pipeline). The default adds
         nothing."""
         return b""
+
+    def _keep_ir_stages(self) -> tuple[str, ...]:
+        """The IR dumps ``<PREFIX>_KEEP_IR`` asks :meth:`build_module` for:
+        ``1``/``true`` is the raw module alone (``("raw",)``), otherwise the
+        comma-separated stages ``raw``, ``clean`` (canonicalize and cse),
+        ``after-<pass>`` and ``after-passes`` (the DSL's pipeline), every
+        stage but the raw one taken on a clone. Empty when the setting is
+        unset; an unknown stage is ``CONFIG_INVALID``."""
+        raw = (self.envar.keep_ir or "").strip()
+        lowered = raw.lower()
+        if not lowered or lowered in ("0", "false", "no", "off"):
+            return ()
+        if lowered in ("1", "true", "yes", "on"):
+            return ("raw",)
+        stages = tuple(token.strip() for token in raw.split(",") if token.strip())
+        for stage in stages:
+            if stage not in ("raw", "clean", "after-passes") and not (
+                stage.startswith("after-") and len(stage) > len("after-")
+            ):
+                raise DSLUserCodeValueError(
+                    DiagId.CONFIG_INVALID,
+                    var=f"{self.name}_KEEP_IR",
+                    detail=f"`{stage}` is not a stage; expected `1`, or a "
+                    "comma-separated list of `raw`, `clean`, `after-<pass>` and "
+                    "`after-passes`",
+                )
+        return stages
+
+    def _compile_clone_and_save(
+        self,
+        module: ir.Module,
+        pipeline: str,
+        label: str,
+        *,
+        enable_verifier: bool = True,
+    ) -> str:
+        """Run ``pipeline`` on a clone of ``module`` (a bytecode round trip, so
+        the module itself, and what is cached under its hash, stays untouched)
+        through the compiler plugin and save the result as the dump ``label``
+        (:meth:`_save_ir`); returns the path."""
+        buffer = io.BytesIO()
+        module.operation.write_bytecode(buffer)
+        clone = ir.Module.parse(buffer.getvalue(), context=module.context)
+        self._compiler.compile(clone, pipeline, enable_verifier=enable_verifier)
+        return self._save_ir(clone, label)
+
+    def _verify_module(self, module: ir.Module) -> None:
+        """Verify the finished ``module``, last in :meth:`build_module`: the
+        MLIR verifier, a failure being an ``IR verification failed``
+        ``DSLRuntimeError``. A DSL with invariants of its own on the traced
+        module (an attribute it forbids, an op its lowering cannot take)
+        checks them here, around ``super()``'s."""
+        try:
+            module.operation.verify()
+        except Exception as e:
+            raise DSLRuntimeError("IR verification failed", cause=e) from e

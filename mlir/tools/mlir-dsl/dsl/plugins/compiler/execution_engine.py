@@ -31,6 +31,7 @@ from .... import ir
 from ...core.common import DSLBaseError, DSLRuntimeError, DSLUserCodeValueError
 from ...core.diagnostics import DiagId
 from ...core.plugin import CompilerPlugin
+from ...util import profiler
 from ...util.logger import log
 
 __all__ = [
@@ -180,7 +181,7 @@ class Compiler(CompilerPlugin):
         )
         try:
             pm = self.passmanager.PassManager.parse(pipeline, context=context)
-            if enable_pass_profiling:
+            if enable_pass_profiling or profiler.deep():
                 pm.enable_timing()
             if print_ir_tree_dir:
                 os.makedirs(print_ir_tree_dir, exist_ok=True)
@@ -190,7 +191,12 @@ class Compiler(CompilerPlugin):
                 )
             elif enable_ir_printing:
                 pm.enable_ir_printing(enable_debug_info=enable_debug_info)
-            if enable_ir_printing or enable_pass_profiling or print_ir_tree_dir:
+            if (
+                enable_ir_printing
+                or enable_pass_profiling
+                or print_ir_tree_dir
+                or profiler.deep()
+            ):
                 context.enable_multithreading(False)
             pm.enable_verifier(enable_verifier)
 
@@ -198,11 +204,13 @@ class Compiler(CompilerPlugin):
             # keeps the handler attached across the run and flushes
             # ``policy="final"`` remarks on exit, handler still attached.
             with session:
+                profiler.begin_mlir_phase()
                 pm.run(module.operation)
                 # MLIR prints the enable_timing report when the pass manager is
                 # destroyed; drop the last reference here so it lands inside the
                 # profiler's capture window, then close the phase.
                 del pm
+                profiler.end_mlir_phase()
         except ValueError as exc:
             raise DSLRuntimeError(
                 "failed to parse the pass pipeline",
@@ -217,11 +225,17 @@ class Compiler(CompilerPlugin):
                 },
                 cause=exc,
             ) from exc
+        finally:
+            # Restore the captured fd / emit the report even if the pipeline
+            # raised before end_mlir_phase ran above (idempotent when already
+            # closed or when the profiler is off).
+            profiler.end_mlir_phase()
 
         return module
 
 
 
+    @profiler.timed("jit")
     def jit(
         self,
         module: ir.Module,
@@ -347,6 +361,35 @@ class Compiler(CompilerPlugin):
             return engine, compiled_module
         return engine
 
+    def print_ir_after_passes(
+        self,
+        module: ir.Module,
+        passes: str,
+        *,
+        enable_debug_info: bool = False,
+        enable_verifier: bool = True,
+    ) -> None:
+        """Run ``passes`` on a clone of ``module`` and print the result to stderr.
+
+        Backs ``<PREFIX>_PRINT_IR_AFTER_PASSES``: the module itself is left
+        untouched, so what is cached under its hash is the unlowered IR.
+
+        :param passes: A comma-separated pass list, or a full
+            ``builtin.module(...)`` pipeline
+        """
+        module_clone = ir.Module.parse(
+            module.operation.get_asm(enable_debug_info=True), context=module.context
+        )
+        pipeline = passes.strip()
+        if not pipeline.startswith("builtin.module("):
+            pipeline = f"builtin.module({pipeline})"
+        self.compile(module_clone, pipeline, enable_verifier=enable_verifier)
+        print(f"\n//===--- IR after passes: {passes} ---===\n", file=sys.stderr)
+        print(
+            module_clone.operation.get_asm(enable_debug_info=enable_debug_info),
+            file=sys.stderr,
+        )
+        print("\n//===--- End of IR after passes ---===\n", file=sys.stderr)
 
 
 # =============================================================================

@@ -15,7 +15,7 @@ from mlir.dsl.core.dsl import BaseDSL
 from mlir.dsl.core.plugin import Plugins
 from mlir.dsl.types import vector
 from mlir.dsl.types.typing import Float32, Int32, Pointer
-from mlir.dsl.util import logger, tree_utils
+from mlir.dsl.util import logger, profiler, tree_utils
 
 for name in (
     "mlir.mlir_dsl",

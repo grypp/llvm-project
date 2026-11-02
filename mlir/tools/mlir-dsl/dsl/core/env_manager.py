@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from typing import Any, Callable, ClassVar, Union, get_args, get_origin
 
+from ..util import profiler
 from ..util.logger import setup_log
 from .common import DSLRuntimeError, DSLUserCodeValueError, DSLWarning
 from .diagnostics import DiagId
@@ -340,8 +341,11 @@ class LogEnvironmentManager(EnvVarSpec):
     Reads ``{prefix}_LOG_TO_CONSOLE``, ``{prefix}_LOG_TO_FILE`` (written to
     ``{prefix}.log``), ``{prefix}_LOG_LEVEL`` and ``{prefix}_JIT_TIME_PROFILING``,
     then calls :func:`setup_log`. Profiling needs a console to report to, so
-    it opens one at INFO level when the user enabled none. A ``LOG_LEVEL`` with
-    no sink enabled is reported as a warning, since it would have no effect.
+    it opens one at INFO level when the user enabled none; the computed
+    ``console_for_profiling`` records that it did, for a sub-DSL's manager to
+    shape that console (a filter on its handler, say) after
+    ``super().__init__(prefix)``. A ``LOG_LEVEL`` with no sink enabled is
+    reported as a warning, since it would have no effect.
     """
 
     jit_time_profiling: bool = env_var(
@@ -352,6 +356,12 @@ class LogEnvironmentManager(EnvVarSpec):
     )
     log_to_file: bool = env_var("LOG_TO_FILE", affects_compile=False, default=False)
     log_level: int = env_var("LOG_LEVEL", affects_compile=False, default=1)
+    # Whether profiling opens the console on its own: computed from the two
+    # settings above as they were read, before __init__ flips log_to_console.
+    console_for_profiling: bool = env_var(
+        lambda mgr: mgr.jit_time_profiling and not mgr.log_to_console,
+        affects_compile=False,
+    )
 
     def __init__(self, prefix: str = "DSL") -> None:
         self.prefix = prefix
@@ -359,8 +369,7 @@ class LogEnvironmentManager(EnvVarSpec):
         self._apply_env_var_spec(prefix)
 
         # Profiling opens the console on its own only when the user did not.
-        console_for_profiling = not self.log_to_console and self.jit_time_profiling
-        if console_for_profiling:
+        if self.console_for_profiling:
             self.log_to_console = True
             self.log_level = 20  # info level
 
@@ -473,6 +482,20 @@ class EnvironmentVarManager(LogEnvironmentManager):
     no_cache: bool = env_var("NO_CACHE", affects_compile=False, default=False)
     # Root for IR dumps and the file cache.
     cache_dir: str | None = env_var("CACHE_DIR", affects_compile=False, default=None)
+    # Saves the raw IR before any passes; dumped from build_module, which runs
+    # before the cache is consulted, so it cannot be served stale.
+    keep_ir: str = env_var("KEEP_IR", affects_compile=False, default="")
+
+    # The one dump that is not free of the artifact: it runs its pipeline on the
+    # module itself rather than a clone, and does so after the hash is taken, so
+    # what gets cached under that hash is the mutated module.
+    keep_ir_after_passes: str = env_var(
+        "KEEPIR_AFTER_PASSES", affects_compile=True, default=""
+    )
+    # Runs its pipeline on a clone, leaving the module untouched.
+    print_ir_after_passes: str = env_var(
+        "PRINT_IR_AFTER_PASSES", affects_compile=False, default=""
+    )
     dryrun: bool = env_var("DRYRUN", affects_compile=True, default=False)
     # Stored under _arch because the public spelling belongs to the arch property;
     # read_as sends the key through that property.
@@ -497,6 +520,10 @@ class EnvironmentVarManager(LogEnvironmentManager):
 
     def __init__(self, prefix: str = "DSL") -> None:
         super().__init__(prefix)
+
+        profiler.configure(
+            f"{prefix}_PROFILE_COMPILER", get_str_env_var(f"{prefix}_PROFILE_COMPILER")
+        )
 
     @property
     def arch(self) -> str | None:
