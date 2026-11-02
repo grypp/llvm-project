@@ -41,7 +41,7 @@ from .common import (
 from .diagnostics import DiagId
 from .env_manager import EnvironmentVarManager
 from .plugin import DecoratorPlugin, Plugins, _NoRemarkSession
-from .staging import is_argument_meta
+from .staging import _is_mlir_op_leaf, is_argument_meta
 
 __all__ = [
     "BaseDSL",
@@ -554,6 +554,18 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             else:
                 pipeline = pipeline.rstrip(")") + f"{{{opt_str}}})"
         return pipeline
+
+    # ===------------------------------------------------------------------===
+    # Staging
+    # ===------------------------------------------------------------------===
+
+    def is_mlir_op(self, value: Any) -> bool:
+        """Whether one value is an MLIR op rather than a Python value, for this
+        DSL. ``mlir.dsl.is_mlir_op`` calls it for each leaf of a tuple, list or
+        frozen record (the containers are walked for you). The default: a raw
+        SSA value or a registered leaf whose payload is one. A sub-DSL with its
+        own value model overrides it."""
+        return _is_mlir_op_leaf(value)
 
     # ===------------------------------------------------------------------===
     # Name mangling

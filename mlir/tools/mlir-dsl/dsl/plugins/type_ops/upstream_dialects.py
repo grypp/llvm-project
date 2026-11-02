@@ -171,3 +171,6 @@ class UpstreamDialectTypeOps(TypeOpsPlugin):
 
     def int_to_int(self, *args: Any, **kwargs: Any) -> Any:
         return self._part("scalars", "int_to_int").int_to_int(*args, **kwargs)
+
+    def minmax(self, *args: Any, **kwargs: Any) -> Any:
+        return self._part("scalars", "max/min").minmax(*args, **kwargs)

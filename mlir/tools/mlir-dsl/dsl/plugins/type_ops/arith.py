@@ -55,6 +55,25 @@ def element_type(ty: ir.Type) -> ir.Type:
     return ty
 
 
+def is_narrow_precision(ty: ir.Type) -> bool:
+    """True for the sub-byte and 8-bit float types (FP8, FP6, FP4 families)."""
+    narrow_types = {
+        T.f8E3M4(),
+        T.f8E8M0FNU(),
+        T.f8E4M3FN(),
+        T.f8E4M3(),
+        T.f8E5M2(),
+        T.f8E4M3B11FNUZ(),
+        T.f8E5M3FNU(),
+        ir.Float8E5M2FNUZType.get(),
+        ir.Float8E4M3FNUZType.get(),
+        T.f4E2M1FN(),
+        T.f6E3M2FN(),
+        T.f6E2M3FN(),
+    }
+    return ty in narrow_types
+
+
 def is_float_type(ty: ir.Type) -> bool:
     """True for any MLIR float type."""
     return isinstance(ty, ir.FloatType)
@@ -348,6 +367,37 @@ def const(
         value = _python_int_for_integer_attr(value, ty.width, signed=False)
 
     return arith.constant(ty, value, loc=loc, ip=ip)
+
+
+def minmax(
+    lhs: Union[int, float, ir.Value],
+    rhs: Union[int, float, ir.Value],
+    *,
+    is_min: bool,
+    signed: Optional[bool] = None,
+    loc: Optional[ir.Location] = None,
+    ip: Optional[ir.InsertionPoint] = None,
+) -> Union[int, float, ir.Value]:
+    """Build arith min/max, assuming the operands have the same type.
+
+    Two Python scalars fold in Python; one scalar is materialized as a constant
+    of the other operand's type.
+    """
+    if not isinstance(lhs, ir.Value):
+        if not isinstance(rhs, ir.Value):
+            return min(lhs, rhs) if is_min else max(lhs, rhs)
+        lhs = const(lhs, rhs.type, signed=signed, loc=loc, ip=ip)
+    elif not isinstance(rhs, ir.Value):
+        rhs = const(rhs, lhs.type, signed=signed, loc=loc, ip=ip)
+
+    if is_integer_like_type(element_type(lhs.type)):
+        if _reads_as_signed(signed):
+            op = arith.minsi if is_min else arith.maxsi
+        else:
+            op = arith.minui if is_min else arith.maxui
+    else:
+        op = arith.minimumf if is_min else arith.maximumf
+    return op(lhs, rhs, loc=loc, ip=ip)
 
 
 # =============================================================================

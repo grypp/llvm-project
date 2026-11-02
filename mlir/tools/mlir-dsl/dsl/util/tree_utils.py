@@ -28,7 +28,7 @@ from typing import Any, NamedTuple, Optional
 from ... import ir
 from ..core.common import DSLRuntimeError, DSLUserCodeError
 from ..core.diagnostics import DiagId
-from ..types.typing import Numeric
+from ..types.typing import Numeric, _lookup_mlir_type
 
 __all__ = [
     "Leaf",
@@ -41,7 +41,23 @@ __all__ = [
     "leaf_ir_types",
     "tree_flatten",
     "tree_leaves",
+    "wrap_ir_value",
 ]
+
+
+def is_frozen_dataclass(obj_or_cls: Any) -> bool:
+    """Check if an object or class is a dataclass declared with ``frozen=True``."""
+    cls = obj_or_cls if isinstance(obj_or_cls, type) else obj_or_cls.__class__
+    return (
+        dataclasses.is_dataclass(cls)
+        and getattr(cls, "__dataclass_params__", None) is not None
+        and cls.__dataclass_params__.frozen  # type: ignore[attr-defined]
+    )
+
+
+# =============================================================================
+# Leaf registry
+# =============================================================================
 
 
 class LeafEntry(NamedTuple):
@@ -147,6 +163,32 @@ def contains_leaf(value: Any) -> bool:
         raise DSLUserCodeError(
             DiagId.CONTAINER_TOO_DEEP, var="value", type=type(value).__name__
         ) from None
+
+
+def wrap_ir_value(value: ir.Value) -> Any:
+    """Wrap a raw ``ir.Value`` in the DSL leaf that claims its type.
+
+    A scalar type of a registered dtype becomes that ``Numeric``; then
+    the registered leaves are asked in registration order, through their
+    ``wrap`` hook (the built-ins) or through ``ir_types`` when it needs no
+    prototype. No claimant raises ``TYPE_UNSUPPORTED_MLIR_TYPE``.
+    """
+    dt = _lookup_mlir_type(value.type)
+    if dt is not None:
+        return dt(value)
+    for entry in _leaf_registry.values():
+        if entry.wrap is not None:
+            wrapped = entry.wrap(value)
+            if wrapped is not None:
+                return wrapped
+            continue
+        try:
+            types = list(entry.ir_types(None))
+        except Exception:
+            continue
+        if types == [value.type]:
+            return entry.from_ir_values(None, [value])
+    raise DSLUserCodeError(DiagId.TYPE_UNSUPPORTED_MLIR_TYPE, mlir_type=str(value.type))
 
 
 # =============================================================================
@@ -288,6 +330,14 @@ def _tree_flatten(
             DiagId.CONTAINER_UNSUPPORTED, var=path or "value", type=type(x).__name__
         )
     return [], [], Leaf(meta=x)
+    if isinstance(x, ir.Value):
+        wrapped = wrap_ir_value(x)
+        entry = leaf_entry(type(wrapped))
+        if entry is None:
+            raise DSLRuntimeError(
+                f"wrap_ir_value returned an unregistered {type(wrapped).__qualname__}"
+            )
+        return _flatten_leaf(wrapped, entry, return_ir_values)
 
 
 def tree_leaves(treedef: PyTreeDef | Leaf) -> list[tuple[str, Leaf]]:

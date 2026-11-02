@@ -321,6 +321,15 @@ class DiagId(DiagCatalog, enum.Enum):
             "Convert the value to a supported type before it enters the DSL.",
         ),
     )
+    TYPE_UNKNOWN_DTYPE_NAME = (
+        "`{name}` is not the name of a DSL data type.",
+        (
+            "Use one of the DSL's type names, e.g. `Int32`, `Float32`, `Boolean`, or "
+            "the numpy spelling `float32`.",
+            "For a numpy array, use a dtype the DSL maps, e.g. `np.float32` or "
+            "`np.int32`.",
+        ),
+    )
     TYPE_INT_POW_UNSUPPORTED = (
         "`**` between two runtime integers is not supported: compiled code has no "
         "integer power operation.",
