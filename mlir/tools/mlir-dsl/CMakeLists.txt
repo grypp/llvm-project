@@ -44,6 +44,15 @@ declare_mlir_python_sources(MLIRPythonSources.DSL.astpreprocessor.scf
     dsl/plugins/ast_preprocessor/scf/executors.py
 )
 
+declare_mlir_python_sources(MLIRPythonSources.DSL.compiler
+  ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
+  ADD_TO_PARENT MLIRPythonSources.DSL.Python
+  SOURCES
+    dsl/plugins/compiler/__init__.py
+    dsl/plugins/compiler/execution_engine.py
+    dsl/plugins/compiler/jit_executor.py
+)
+
 declare_mlir_python_sources(MLIRPythonSources.DSL.decorators
   ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
   ADD_TO_PARENT MLIRPythonSources.DSL.Python

@@ -274,11 +274,15 @@ class LogEnvironmentManager(EnvVarSpec):
     """The logging settings, applied to the DSL logger at construction.
 
     Reads ``{prefix}_LOG_TO_CONSOLE``, ``{prefix}_LOG_TO_FILE`` (written to
-    ``{prefix}.log``) and ``{prefix}_LOG_LEVEL``, then calls :func:`setup_log`.
-    A ``LOG_LEVEL`` with no sink enabled is reported as a warning, since it
-    would have no effect.
+    ``{prefix}.log``), ``{prefix}_LOG_LEVEL`` and ``{prefix}_JIT_TIME_PROFILING``,
+    then calls :func:`setup_log`. Profiling needs a console to report to, so
+    it opens one at INFO level when the user enabled none. A ``LOG_LEVEL`` with
+    no sink enabled is reported as a warning, since it would have no effect.
     """
 
+    jit_time_profiling: bool = env_var(
+        "JIT_TIME_PROFILING", affects_compile=False, default=False
+    )
     log_to_console: bool = env_var(
         "LOG_TO_CONSOLE", affects_compile=False, default=False
     )
@@ -289,6 +293,12 @@ class LogEnvironmentManager(EnvVarSpec):
         self.prefix = prefix
 
         self._apply_env_var_spec(prefix)
+
+        # Profiling opens the console on its own only when the user did not.
+        console_for_profiling = not self.log_to_console and self.jit_time_profiling
+        if console_for_profiling:
+            self.log_to_console = True
+            self.log_level = 20  # info level
 
         setup_log(
             prefix,
@@ -354,9 +364,11 @@ class EnvironmentVarManager(LogEnvironmentManager):
         a cProfile drill-down of the build phase and per-pass MLIR timing (inflates the
         phase times). Any other non-switch value is a file path for the report
         (default: off)
+    - [DSL_NAME]_NO_CACHE: Disable JIT cache (default: False)
     - [DSL_NAME]_JIT_CACHE_MAX_ELEMS: Capacity of the in-memory JIT cache, LRU eviction (default: unlimited)
     - [DSL_NAME]_LIBS: Path to dependent shared libraries (default: None)
     - [DSL_NAME]_LOC_TRACEBACKS: Maximum depth of location tracebacks (default: 0)
+    - [DSL_NAME]_PIPELINE: MLIR pipeline, replacing the composed default (default: None)
     - [DSL_NAME]_REMARKS: Regular expression over remark categories to emit (default: "", remarks off)
     - [DSL_NAME]_REMARKS_POLICY: Remark policy, "all" or "final" (default: "all")
     - [DSL_NAME]_REMARKS_OUTPUT: File the remarks stream to; ".yaml" or ".bitstream" picks the format (default: "")
@@ -373,6 +385,9 @@ class EnvironmentVarManager(LogEnvironmentManager):
     show_stacktrace: bool = env_var(
         "SHOW_STACKTRACE", affects_compile=False, default=lambda mgr: mgr.debug
     )
+    enable_pass_profiling: bool = env_var(
+        "ENABLE_PASS_PROFILING", affects_compile=False, default=False
+    )
     filter_stacktrace: bool = env_var(
         "FILTER_STACKTRACE",
         affects_compile=False,
@@ -386,10 +401,15 @@ class EnvironmentVarManager(LogEnvironmentManager):
     # Verifies each op as dsl_user_op builds it, so a malformed op is reported
     # at the Python line that built it rather than by the pass manager.
     verify_trace: bool = env_var("VERIFY_TRACE", affects_compile=False, default=False)
+    # Governs whether results are cached, not what is compiled.
+    no_cache: bool = env_var("NO_CACHE", affects_compile=False, default=False)
     dryrun: bool = env_var("DRYRUN", affects_compile=True, default=False)
     warnings_ignore: bool = env_var(
         "WARNINGS_IGNORE", affects_compile=False, default=False
     )
+    pipeline: str | None = env_var("PIPELINE", affects_compile=True, default=None)
+    # MLIR runtime libraries linked by the JIT.
+    shared_libs: str | None = env_var("LIBS", affects_compile=True)
     loc_tracebacks: int = env_var("LOC_TRACEBACKS", affects_compile=True, default=0)
 
     def __init__(self, prefix: str = "DSL") -> None:

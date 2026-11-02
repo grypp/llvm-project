@@ -1295,6 +1295,11 @@ class DiagId(DiagCatalog, enum.Enum):
             "`range(n, unroll=2)`.",
         ),
     )
+    CALL_MISSING_JIT_DECORATOR = (
+        "The function passed to `compile()` is a plain Python function (not "
+        "decorated with the DSL's `@jit`).",
+        ("Add `@jit` above the definition of the function you pass to `compile()`.",),
+    )
     CALL_NOT_CALLABLE = (
         "`{decorator}` was applied to {got}, which is not a plain Python function.",
         (
@@ -1309,6 +1314,15 @@ class DiagId(DiagCatalog, enum.Enum):
         (
             "Move this call into a function decorated with `{decorator}`, then call "
             "that function.",
+        ),
+    )
+    CALL_META_VALUE_MISMATCH = (
+        "Argument #{num} `{arg_name}` is a compile-time (Meta) value: this compiled "
+        "`{function_name}` was specialized for {expected}, but is called with {got}.",
+        (
+            "Call the `@jit` function itself; it compiles one specialization per Meta "
+            "value and picks the right one.",
+            "Or `compile(...)` the function again with this value.",
         ),
     )
     CALL_PLUGIN_REQUIRED = (
@@ -1504,11 +1518,13 @@ _classify_error(
     "ARG_BUFFER_INVALID",
     "ARG_REJECTED_BY_OP",
     "CALL_ARGUMENTS",
+    "CALL_META_VALUE_MISMATCH",
     "TYPE_LOOP_BOUND_NOT_INT",
 )
 _classify_error(
     USAGE,
     "compiling and reusing functions",
+    "CALL_MISSING_JIT_DECORATOR",
     "CALL_NOT_CALLABLE",
     "CALL_OUTSIDE_JIT",
     "CALL_PLUGIN_REQUIRED",

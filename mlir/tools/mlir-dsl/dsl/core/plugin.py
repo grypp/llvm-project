@@ -106,6 +106,17 @@ class Plugin:
         runs once per DSL instance)."""
         self.dsl = dsl
 
+    def shared_libs(self) -> list[str]:
+        """Library paths handed to the ``ExecutionEngine``; never bound here."""
+        return []
+
+    def pipeline_options(self) -> dict[str, str]:
+        """Pass options merged into a ``<PREFIX>_PIPELINE`` override, option
+        name to value (the gpu kernels plugin: its ``chip_option`` set to the
+        architecture). A DSL's own ``pipeline()`` spells its options itself,
+        so the default has none."""
+        return {}
+
     def register_dialects(self, context: ir.Context) -> None:
         """Register the plugin's dialects on the trace ``context``.
 
@@ -141,6 +152,19 @@ class TypeOpsPlugin(Plugin, OpEmitter):
     role: ClassVar[str] = "type_ops"
 
 
+class _NoRemarkSession:
+    """The remark session of a DSL without a compiler plugin: collects nothing."""
+
+    def __init__(self) -> None:
+        self.remarks: list[dict[str, Any]] = []
+
+    def __enter__(self) -> "_NoRemarkSession":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+
 class CompilerPlugin(Plugin):
     """The ``compiler`` role: lowering and invocation of a traced module.
 
@@ -153,6 +177,47 @@ class CompilerPlugin(Plugin):
     """
 
     role: ClassVar[str] = "compiler"
+
+    def remark_session(
+        self,
+        context: ir.Context,
+        *,
+        remark_filter: str = "",
+        remark_policy: str = "all",
+        remark_output: str = "",
+    ) -> Any:
+        """A remark session for ``context``; ``with session:`` owns the engine
+        and the diagnostic handler, ``session.remarks`` holds the records."""
+        return _NoRemarkSession()
+
+    def compile(self, module: ir.Module, pipeline: str, **options: Any) -> None:
+        """Run ``pipeline`` on ``module`` in place."""
+        self._unsupported("compile")
+
+    def jit(self, module: ir.Module, **options: Any) -> Any:
+        """Build the engine of an already lowered ``module``."""
+        return self._unsupported("jit")
+
+    def compile_and_jit(self, module: ir.Module, pipeline: str, **options: Any) -> Any:
+        """Lower ``module`` and build its engine."""
+        return self._unsupported("compile_and_jit")
+
+    def load(
+        self,
+        module: ir.Module,
+        engine: Any,
+        function_name: str,
+        signature: Any,
+        **options: Any,
+    ) -> Any:
+        """Bind the compiled entry ``function_name`` into a callable."""
+        return self._unsupported("load")
+
+    def print_ir_after_passes(
+        self, module: ir.Module, pipeline: str, **options: Any
+    ) -> None:
+        """Print the IR after each pass of ``pipeline`` on a clone of ``module``."""
+        self._unsupported("print_ir_after_passes")
 
 
 # ===----------------------------------------------------------------------===
@@ -245,6 +310,12 @@ class DecoratorPlugin(Plugin):
         """The Python value of each result leaf from the filled slot ``raw``."""
         return self._unsupported("unpack_result")
 
+    # -- hooks around every top-level trace -------------------------------------
+
+    def finish_compiled_function(self, dsl: BaseDSL, jit_function: Any) -> None:
+        """Record on the compiled function what the trace did (the kernels it
+        launched), before any adapter wraps it."""
+
     def decorate(self, func: Any, **options: Any) -> Any:
         """Process decorator options and return the function to wrap.
 
@@ -300,9 +371,11 @@ class AdapterPlugin(Plugin):
         is built, given the Python signature and the trace arguments (Meta
         values, or the adapted leaves) it was built for."""
 
-    def after_lowering(self, dsl: BaseDSL, module: ir.Module) -> None:
-        """Edit the lowered ``module`` after the pass pipeline, before the
-        engine is built."""
+    def after_lowering(
+        self, dsl: BaseDSL, module: ir.Module, function_name: str
+    ) -> None:
+        """Edit the lowered ``module`` of the entry ``function_name`` after the
+        pass pipeline, before the engine is built."""
 
     def wrap_compiled_function(self, dsl: BaseDSL, jit_function: Any) -> Any:
         """Replace or decorate the compiled function before it is cached; the

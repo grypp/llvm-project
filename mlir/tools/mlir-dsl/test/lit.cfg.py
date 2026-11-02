@@ -1,8 +1,10 @@
 # -*- Python -*-
 
 import os
+import subprocess
 
 import lit.formats
+import lit.util
 
 from lit.llvm import llvm_config
 
@@ -47,3 +49,25 @@ llvm_config.with_environment(
 
 # ASan does not play well with the Python interpreter.
 config.environment["ASAN_OPTIONS"] = "detect_leaks=0"
+
+
+def have_host_jit_feature_support(feature_name):
+    """Whether the host can run the ExecutionEngine (asked of mlir-runner)."""
+    mlir_runner_exe = lit.util.which("mlir-runner", config.llvm_tools_dir)
+    if not mlir_runner_exe:
+        return False
+    try:
+        mlir_runner_cmd = subprocess.Popen(
+            [mlir_runner_exe, "--host-supports-" + feature_name],
+            stdout=subprocess.PIPE,
+        )
+    except OSError:
+        print("could not exec mlir-runner")
+        return False
+    mlir_runner_out = mlir_runner_cmd.stdout.read().decode("ascii")
+    mlir_runner_cmd.wait()
+    return "true" in mlir_runner_out
+
+
+if config.enable_execution_engine and have_host_jit_feature_support("jit"):
+    config.available_features.add("host-supports-jit")

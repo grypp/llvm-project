@@ -76,6 +76,10 @@ class EmitCTestDSL(BaseDSL):
         decorators=[func.Jit()],
     )
 
+    def pipeline(self) -> list[str]:
+        """No lowering: the traced module is handed on as it is."""
+        return []
+
     def __init__(self) -> None:
         super().__init__(name="EMITC_DSL")
 

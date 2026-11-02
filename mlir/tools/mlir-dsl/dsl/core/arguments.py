@@ -36,6 +36,8 @@ from typing import (
     Any,
     Callable,
     Optional,
+    ParamSpec,
+    TypeVar,
     Union,
 )
 
@@ -62,6 +64,10 @@ __all__ = [
     "check_pointer_annotation",
     "pointer_address",
 ]
+
+
+_ScopeArgs = ParamSpec("_ScopeArgs")
+_ScopeResult = TypeVar("_ScopeResult")
 
 
 class JitArgAdapterRegistry:
@@ -259,6 +265,25 @@ class JitArgAdapterRegistry:
         token = cls._active_scope.set(scope)
         try:
             yield
+        finally:
+            cls._active_scope.reset(token)
+
+    @classmethod
+    def call_with_scope(
+        cls,
+        scope: str | None,
+        callback: Callable[_ScopeArgs, _ScopeResult],
+        *args: _ScopeArgs.args,
+        **kwargs: _ScopeArgs.kwargs,
+    ) -> _ScopeResult:
+        """Call ``callback`` with an adapter scope and restore the prior scope.
+
+        This avoids the generator-based context-manager overhead on the compiled
+        launch path while preserving the scope for nested adapter lookups.
+        """
+        token = cls._active_scope.set(scope)
+        try:
+            return callback(*args, **kwargs)
         finally:
             cls._active_scope.reset(token)
 

@@ -18,13 +18,14 @@ services a decorator plugin traces with (:meth:`BaseDSL.bind_arguments`,
 """
 
 import inspect
+import os
 import re
 import threading
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
-from functools import wraps
+from functools import partial, wraps
 from types import UnionType
 from typing import Annotated, Any, ClassVar, NoReturn, Union, get_args, get_origin
 
@@ -51,6 +52,7 @@ from .user_op import enter_traceback_locations
 
 __all__ = [
     "BaseDSL",
+    "normalize_shared_library_paths",
     "DSLLocation",
     "DSLSingletonMeta",
     "JitFuncArgs",
@@ -65,9 +67,30 @@ __all__ = [
 _MANGLE_UNWANTED_CHARS = r"'-![]#,.<>()\":{}=%?@;"
 _MANGLE_TRANSLATION_TABLE = str.maketrans("", "", _MANGLE_UNWANTED_CHARS)
 
+
+def _normalize_shared_library_paths(paths: Iterable[str]) -> tuple[str, ...]:
+    """Return existing, canonical shared-library paths without duplicates."""
+    normalized_paths: list[str] = []
+    for path in paths:
+        if not path:
+            raise DSLRuntimeError("an empty shared library path was given")
+        normalized_path = os.path.realpath(os.path.abspath(path))
+        if not os.path.exists(normalized_path):
+            raise DSLRuntimeError(
+                f"shared library not found: {normalized_path}",
+                suggestion="Check the paths in `<PREFIX>_LIBS` and `extra_link_libs`.",
+            )
+        if normalized_path not in normalized_paths:
+            normalized_paths.append(normalized_path)
+    return tuple(normalized_paths)
+
+
 # ===----------------------------------------------------------------------===
 # DSL Class Construction
 # ===----------------------------------------------------------------------===
+
+
+normalize_shared_library_paths = _normalize_shared_library_paths
 
 
 class DSLSingletonMeta(type):
@@ -350,6 +373,12 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         default does nothing; a sub-DSL on an out-of-tree dialect registers it
         here (``mynewdialect.register_dialect(context)``)."""
 
+    def shared_libs(self) -> list[str]:
+        """Library paths the DSL hands to the engine besides ``<PREFIX>_LIBS``
+        and the plugins' (``MlirTestDSL``: the CUDA runtime library when gpu
+        kernels can be built)."""
+        return []
+
     # ===------------------------------------------------------------------===
     # Decorator Lifecycle
     # ===------------------------------------------------------------------===
@@ -490,6 +519,55 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         share the outer call's scope.
         """
         return nullcontext()
+
+    # ===------------------------------------------------------------------===
+    # Pipeline
+    # ===------------------------------------------------------------------===
+
+    def pipeline(self) -> list[str]:
+        """The pass list of this DSL, in order: what lowers the ops its plugins
+        emit. The base lists nothing (the core emits no dialect); a sub-DSL
+        returns its own, spelled against the dialects its plugins emit. Wrapped
+        as ``builtin.module(...)`` by :meth:`_get_pipeline`; a ``pipeline=``
+        call keyword or ``<PREFIX>_PIPELINE`` replaces it."""
+        return []
+
+    def _get_pipeline(self, pipeline: str | None) -> str:
+        """The pipeline string of a compile: an explicit ``pipeline`` (a call
+        keyword) as given, else the ``<PREFIX>_PIPELINE`` environment variable
+        with the plugins' ``pipeline_options()`` appended, else
+        :meth:`pipeline` wrapped as ``builtin.module(...)``."""
+        if pipeline is not None:
+            return pipeline
+        if self.envar.pipeline is not None:
+            options: dict[str, str] = {}
+            for plugin in self.plugins:
+                options.update(plugin.pipeline_options())
+            return self.preprocess_pipeline(self.envar.pipeline, options)
+        return "builtin.module(" + ",".join(self.pipeline()) + ")"
+
+    def preprocess_pipeline(self, pipeline: str, options: dict[str, str]) -> str:
+        """Append ``options`` (``name=value`` pairs, the plugins'
+        ``pipeline_options()``) to the ``<PREFIX>_PIPELINE`` string, merging
+        into an existing ``{...}`` option block when the pipeline has one; no
+        options leave it as given."""
+        opt_str = ""
+        for k, v in options.items():
+            if v:
+                opt_str += f"{k}={v} "
+
+        if opt_str:
+            # Automatically append the pipeline options if any is specified through env var
+            match = re.compile(r"{(.+)}").search(pipeline)
+            if match:
+                opt_str = f"{{{match[1]} {opt_str}}}"
+                # A callable replacement substitutes opt_str verbatim: a string
+                # replacement is a template, so backslashes in option values
+                # (e.g. a Windows path C:\...) would be parsed as escapes.
+                pipeline = re.sub(r"{.+}", lambda _: opt_str, pipeline)
+            else:
+                pipeline = pipeline.rstrip(")") + f"{{{opt_str}}})"
+        return pipeline
 
     # ===------------------------------------------------------------------===
     # Staging
@@ -752,10 +830,16 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         is_host: bool,
         jit_arg_type: list[Any],
         jit_exec_arg: list[Any],
+        **boundary_options: Any,
     ) -> None:
         """Raise when an argument produced no usable JIT signature: neither a
-        known type nor an adapter yielded MLIR types and execution values."""
-        if jit_arg_type and (jit_exec_arg or not is_host):
+        known type nor an adapter yielded MLIR types and execution values. The
+        ``boundary_options`` are the call's: under ``compile_only`` a type
+        with no execution value (``compile()``'s type-only placeholder, a
+        dtype class) passes."""
+        if jit_arg_type and (
+            jit_exec_arg or not is_host or boundary_options.get("compile_only")
+        ):
             return
 
         raise self.user_error(
@@ -838,8 +922,13 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         sig: inspect.Signature,
         *,
         is_host: bool = True,
+        **boundary_options: Any,
     ) -> JitFuncArgs:
-        """Generate JIT function arguments."""
+        """Generate JIT function arguments: the SSA types, attribute dicts and
+        execution values of every argument, through :meth:`_is_meta_at_boundary`,
+        :meth:`_flatten_jit_arg` and :meth:`_check_unsupported_jit_arg`. The
+        ``boundary_options`` are the call's (the core's: ``compile_only``) and
+        reach the check."""
         positional_names = []
         kwonly_names = []
         for name, param in sig.parameters.items():
@@ -873,8 +962,17 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             cast_ty = (
                 get_args(spec_ty)[0] if get_origin(spec_ty) is Annotated else spec_ty
             )
+            # ``compile()``'s type-only placeholder: a dtype class for a staged
+            # numeric parameter is neither cast nor adapted.
+            placeholder = bool(
+                boundary_options.get("compile_only")
+            ) and self._is_type_placeholder(arg, spec_ty)
             # Implicitly convert into Numeric type if possible
-            if isinstance(cast_ty, t.NumericMeta) and not isinstance(arg, cast_ty):
+            if (
+                not placeholder
+                and isinstance(cast_ty, t.NumericMeta)
+                and not isinstance(arg, cast_ty)
+            ):
                 try:
                     arg = t.cast(arg, cast_ty)  # type: ignore[arg-type]
                 except DSLBaseError as exc:
@@ -917,16 +1015,21 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 jit_exec_arg: list[Any] | None = []
                 jit_arg_type: list[Any] | None = []
                 jit_arg_attr: list[Any] | None = []
-                if self._is_meta_at_boundary(arg, spec_ty, arg_name, i, func):
+                if placeholder:
+                    # The type alone, no execution value.
+                    jit_arg_type.append(arg.mlir_type)
+                    jit_arg_attr.append(ir.DictAttr.get({}))
+                elif self._is_meta_at_boundary(arg, spec_ty, arg_name, i, func):
                     jit_exec_arg = jit_arg_type = jit_arg_attr = None
 
-                if jit_arg_type is not None and len(jit_arg_type) == 0:
-                    exec_args, arg_types, arg_attrs = self._flatten_jit_arg(
-                        arg, arg_name, i, function_name, is_host=is_host
-                    )
-                    jit_exec_arg.extend(exec_args)  # type: ignore[union-attr]
-                    jit_arg_type.extend(arg_types)
-                    jit_arg_attr.extend(arg_attrs)  # type: ignore[union-attr]
+                if jit_arg_type is not None:
+                    if not placeholder:
+                        exec_args, arg_types, arg_attrs = self._flatten_jit_arg(
+                            arg, arg_name, i, function_name, is_host=is_host
+                        )
+                        jit_exec_arg.extend(exec_args)  # type: ignore[union-attr]
+                        jit_arg_type.extend(arg_types)
+                        jit_arg_attr.extend(arg_attrs)  # type: ignore[union-attr]
 
                     self._check_unsupported_jit_arg(
                         arg=arg,
@@ -936,6 +1039,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                         is_host=is_host,
                         jit_arg_type=jit_arg_type,
                         jit_exec_arg=jit_exec_arg,  # type: ignore[arg-type]
+                        **boundary_options,
                     )
 
             if jit_arg_type is not None:
@@ -969,15 +1073,21 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         args: tuple[Any, ...] | list[Any],
         kwonlyargs: dict[str, Any],
         sig: inspect.Signature,
+        **boundary_options: Any,
     ) -> JitFuncArgs:
         """Convert input arguments to the MLIR function signature and the
-        marshalled execution arguments."""
+        marshalled execution arguments. The ``boundary_options`` reach
+        :meth:`_generate_jit_func_args` and :meth:`_check_unsupported_jit_arg`
+        (the core's: ``compile_only``, under which a type-only placeholder has
+        a type and no execution value; a DSL adds its own)."""
 
         result = self._generate_jit_func_args(
-            func, function_name, args, kwonlyargs, sig, is_host=True
+            func, function_name, args, kwonlyargs, sig, is_host=True, **boundary_options
         )
 
-        if len(result.values) != len(result.types):
+        if not boundary_options.get("compile_only") and len(result.values) != len(
+            result.types
+        ):
             raise DSLRuntimeError(
                 "expects the same number of arguments and function parameters",
                 context={"values": len(result.values), "types": len(result.types)},
@@ -1022,6 +1132,71 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             depth, include_dsl_frames=bool(self.envar.debug)
         )
 
+    # ===------------------------------------------------------------------===
+    # Compile, hash, dump
+    # ===------------------------------------------------------------------===
+
+    def compile_and_jit(
+        self,
+        module: ir.Module,
+        pipeline: str,
+        shared_libs: list[str],
+        function_name: str = "",
+    ) -> Any:
+        """
+        Compile and JIT an MLIR module through the compiler plugin.
+
+        :return: The ``ExecutionEngine`` holding the compiled module.
+        """
+        # This method is also a direct entry point (not only reached through
+        # generate_mlir), so it owns a compile boundary of its own; when
+        # nested inside generate_mlir the depth counter folds it away.
+        try:
+            return self._compiler.compile_and_jit(
+                module,
+                pipeline,
+                shared_libs=shared_libs,
+                enable_debug_info=self.envar.debuginfo,
+                after_lowering=partial(
+                    self._after_lowering, function_name=function_name
+                ),
+            )
+        except DSLBaseError:
+            raise
+        except Exception as e:
+            raise DSLRuntimeError(
+                "compilation failed", context={"function": function_name}, cause=e
+            ) from e
+
+    def _after_lowering(self, module: ir.Module, function_name: str) -> None:
+        """Run every adapter's ``after_lowering`` on the lowered ``module`` of
+        the entry ``function_name``."""
+        for plugin in self.plugins.adapters:
+            plugin.after_lowering(self, module, function_name)
+
+    def get_shared_libs(self, extra_link_libs: tuple[str, ...] = ()) -> list[str]:
+        """The runtime libraries handed to the ``ExecutionEngine``: the
+        ``<PREFIX>_LIBS`` paths, every plugin's ``shared_libs()`` and
+        ``extra_link_libs``, canonical and without duplicates."""
+        shared_libs: list[str] = []
+        support_libs = self.envar.shared_libs
+        if support_libs is not None:
+            if os.name == "nt":
+                # Accept POSIX-style ':' separators too (lit RUN lines share
+                # them across platforms), but a ':' followed by a path
+                # separator is a drive colon, not a separator.
+                shared_libs.extend(
+                    p for p in re.split(r";|:(?![\\/])", support_libs) if p
+                )
+            else:
+                shared_libs.extend(support_libs.split(os.pathsep))
+
+        shared_libs.extend(self.shared_libs())
+        for plugin in self.plugins:
+            shared_libs.extend(plugin.shared_libs())
+        shared_libs.extend(extra_link_libs)
+        return list(_normalize_shared_library_paths(shared_libs))
+
     def build_module(self, module: ir.Module, function_name: str) -> ir.Module:
         """
         Build the MLIR module, verify and return the module
@@ -1045,12 +1220,20 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     # ===------------------------------------------------------------------===
 
     def _return_values(
-        self, entry: DecoratorPlugin, result: Any, sig: inspect.Signature, loc: Any
+        self,
+        entry: DecoratorPlugin,
+        result: Any,
+        sig: inspect.Signature,
+        loc: Any,
+        *,
+        func: Callable[..., Any],
     ) -> tuple[list[ir.Value], _ResultSpec | None]:
         """Turn the traced return value into what the entry returns.
         Numeric leaves and frozen records/tuples/``@struct``s of them are
         accepted; the decorator plugin's ``pack_results`` decides how the
         leaves travel (the shipped ``func.Jit`` packs several into one struct).
+        ``func`` is the traced function, for a DSL's own return policy or
+        diagnostics (the core reads only the return annotation of ``sig``).
         """
         if result is None:
             if sig.return_annotation not in (inspect.Signature.empty, None):
@@ -1091,6 +1274,20 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         )
         return ret_values, _ResultSpec(treedef, slot, entry)
 
+    def _result_from_ctypes(self, spec: _ResultSpec, raw: Any) -> Any:
+        """Rebuild the Python return value from the filled result slot."""
+        leaves = [
+            leaf
+            for _, leaf in tree_utils.tree_leaves(spec.treedef)
+            if not leaf.is_none and not leaf.is_meta
+        ]
+        values = iter(
+            spec.entry.unpack_result(
+                spec.slot, raw, [leaf.prototype for leaf in leaves]
+            )
+        )
+        return self._restore_tree(spec.treedef, lambda leaf: next(values))
+
     # ===------------------------------------------------------------------===
     # IR Tracing
     # ===------------------------------------------------------------------===
@@ -1102,17 +1299,22 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         function_name: str,
         func_types: list[Any],
         arg_attrs: list[Any],
+        container_attrs: dict[str, Any],
         args: tuple[Any, ...],
         kwonlyargs: dict[str, Any],
         sig: inspect.Signature,
         location: DSLLocation | None = None,
+        *,
+        no_cache: bool = False,
+        pipeline: str = "",
+        extra_link_libs: tuple[str, ...] = (),
     ) -> tuple[ir.Module, str | None, Any, _ResultSpec | None]:
         """Trace ``func`` into the op the decorator plugin ``entry`` builds, in
         a fresh module. This runs with the DSL active (``run``), so a decorated
         function called inside the body is launched into this trace, not
         called.
 
-        :return: The verified module, its hash, the
+        :return: The verified module, its hash (None under ``no_cache``), the
             trace's Python result and the result slot description
         """
 
@@ -1143,7 +1345,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 )
                 with ir.InsertionPoint(entry_block):
                     ret_values, result_spec = self._return_values(
-                        entry, result, sig, loc
+                        entry, result, sig, loc, func=func
                     )
                     entry.generate_return(func_op, ret_values, loc=loc)
 
@@ -1172,6 +1374,39 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
         return build_and_finalize()
 
+    def compile_and_cache(
+        self,
+        module: ir.Module,
+        module_hash: str | None,
+        function_name: str,
+        pipeline: str,
+        sig: inspect.Signature,
+        no_cache: bool,
+        *,
+        result_spec: _ResultSpec | None = None,
+        extra_link_libs: tuple[str, ...] = (),
+        func: Callable[..., Any] | None = None,
+    ) -> Any:
+        """Lower a module and bind its entry to a Python callable."""
+        shared_libs = self.get_shared_libs(extra_link_libs)
+        engine = self.compile_and_jit(module, pipeline, shared_libs, function_name)
+        jit_function = self._compiler.load(
+            module,
+            engine,
+            function_name,
+            sig,
+            result_ctype=result_spec.slot if result_spec is not None else None,
+        )
+        jit_function.result_spec = result_spec
+        execution_args = getattr(jit_function, "execution_args", None)
+        if execution_args is not None:
+            execution_args.set_adapter_scope(self._jit_arg_adapter_scope)
+        for plugin in self.plugins.decorators:
+            plugin.finish_compiled_function(self, jit_function)
+        for plugin in self.plugins.adapters:
+            jit_function = plugin.wrap_compiled_function(self, jit_function)
+        return jit_function
+
     def post_compilation_cleanup(self) -> None:
         """Clean up some internal state after one compilation is completed."""
         self.decorator_location = None
@@ -1181,11 +1416,15 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         entry: DecoratorPlugin,
         func: Callable[..., Any],
         function_name: str,
+        container_attrs: dict[str, Any],
         args: tuple[Any, ...],
         kwonlyargs: dict[str, Any],
         sig: inspect.Signature,
+        pipeline: str | None,
+        no_cache: bool,
         compile_only: bool,
         location: DSLLocation | None = None,
+        extra_link_libs: tuple[str, ...] = (),
     ) -> Any:
         """Trace ``func`` into the op the decorator plugin ``entry`` builds in
         an MLIR module, compile it through the compiler plugin (or take the
@@ -1208,8 +1447,14 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             try:
                 # Convert input arguments to MLIR arguments
                 mlir_func_args = self.generate_mlir_function_types(
-                    func, function_name, args, kwonlyargs, sig
+                    func,
+                    function_name,
+                    args,
+                    kwonlyargs,
+                    sig,
+                    compile_only=compile_only,
                 )
+                exe_args = mlir_func_args.values
                 adapted_args = mlir_func_args.adapted_python_args
                 # The body is traced with the adapted values, so an adapter runs once.
                 n_positional = len(args)
@@ -1223,6 +1468,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                         kwonlyargs.items(), adapted_args[n_positional:]
                     )
                 }
+                pipeline = self._get_pipeline(pipeline)
 
                 # Generate original ir module and its hash value.
                 module, module_hash, result, result_spec = self.generate_original_ir(
@@ -1231,10 +1477,14 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                     function_name,
                     mlir_func_args.types,
                     mlir_func_args.attributes,
+                    container_attrs,
                     trace_args,
                     trace_kwargs,
                     sig,
                     location=location,
+                    no_cache=no_cache,
+                    pipeline=pipeline,
+                    extra_link_libs=extra_link_libs,
                 )
 
                 # A dry run generates the IR and stops; so does a call on a DSL
@@ -1246,7 +1496,18 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 ):
                     return result
 
-                self._compiler
+                jit_function = self.compile_and_cache(
+                    module,
+                    module_hash,
+                    function_name,
+                    pipeline,
+                    sig,
+                    no_cache,
+                    result_spec=result_spec,
+                    extra_link_libs=extra_link_libs,
+                    func=func,
+                )
+
             finally:
                 if loc_tracebacks is not None:
                     try:
@@ -1254,6 +1515,39 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                     except Exception:
                         pass
                 self.post_compilation_cleanup()
+
+        # If compile_only is set, bypass execution return the jit_executor directly
+        if compile_only:
+            # The returned function is specialized on this call's Meta values;
+            # a later call with other ones is a diagnostic, not a silent reuse.
+            execution_args = getattr(jit_function, "execution_args", None)
+            if execution_args is not None:
+                execution_args.set_meta_values(
+                    {
+                        param.name: arg
+                        for param, arg in zip(sig.parameters.values(), args)
+                        if self._is_meta_argument(arg, param.annotation)
+                    }
+                )
+                # The host shape of every argument, adapted as the trace saw it.
+                execution_args.set_shapes(
+                    {
+                        param.name: self._compiled_argument_shape(arg, param.annotation)
+                        for param, arg in zip(sig.parameters.values(), trace_args)
+                    }
+                )
+            return jit_function
+
+        # Run the compiled program. A function that prefers the Python
+        # arguments is called with them; the packed entry takes the marshalled
+        # ``exe_args``.
+        if getattr(jit_function, "prefers_python_args", False):
+            return jit_function(*args, **kwonlyargs)
+        raw = jit_function.run_compiled_program(exe_args)
+        result_spec = getattr(jit_function, "result_spec", None)
+        if result_spec is None:
+            return None
+        return self._result_from_ctypes(result_spec, raw)
 
     # ===------------------------------------------------------------------===
     # Argument Binding
@@ -1378,6 +1672,10 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         """Shared pre-IR-generation state of a host compilation."""
 
         function_name: str
+        pipeline: str | None
+        container_attrs: dict[str, Any]
+        no_cache: bool
+        extra_link_libs: tuple[str, ...]
         compile_only: bool
         canonicalized_args: tuple[Any, ...]
         canonicalized_kwargs: dict[str, Any]
@@ -1387,11 +1685,29 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     def _prepare_compilation(
         self, func: Callable[..., Any], *args: Any, **kwargs: Any
     ) -> "_CompilationSetup":
-        """Extract kwargs, canonicalize args and mangle the name."""
+        """Extract kwargs, canonicalize args and mangle the name.
+
+        The call keywords ``pipeline``, ``container_attrs``, ``no_cache``,
+        ``extra_link_libs`` and ``compile_only`` are the DSL's, popped before
+        the remaining arguments bind to the function's signature.
+        """
         function_name = func.__name__
         self.traced_function = func
 
+        pipeline = kwargs.pop("pipeline", None)
+        container_attrs = kwargs.pop("container_attrs", {})
+        no_cache = kwargs.pop("no_cache", False) or self.envar.no_cache
+        extra_link_libs_arg = kwargs.pop("extra_link_libs", ())
+        if isinstance(extra_link_libs_arg, (str, bytes, os.PathLike)):
+            extra_link_libs_arg = (extra_link_libs_arg,)
+        extra_link_libs = _normalize_shared_library_paths(
+            os.fspath(lib) for lib in extra_link_libs_arg
+        )
         compile_only = kwargs.pop("compile_only", False)
+
+        if not no_cache and compile_only:
+            no_cache = True
+            log().info("Cache is disabled as user wants to compile only.")
 
         # Get signature of the function
         sig = self._get_signature(func)
@@ -1417,6 +1733,10 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
         return self._CompilationSetup(
             function_name=function_name,
+            pipeline=pipeline,
+            container_attrs=container_attrs,
+            no_cache=no_cache,
+            extra_link_libs=extra_link_libs,
             compile_only=compile_only,
             canonicalized_args=canonicalized_args,
             canonicalized_kwargs=canonicalized_kwargs,
@@ -1453,11 +1773,15 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 entry,
                 func,
                 setup.function_name,
+                setup.container_attrs,
                 setup.canonicalized_args,
                 setup.canonicalized_kwargs,
                 setup.sig,
+                setup.pipeline,
+                setup.no_cache,
                 setup.compile_only,
                 location=setup.location,
+                extra_link_libs=setup.extra_link_libs,
             )
 
     # ===------------------------------------------------------------------===
@@ -1641,3 +1965,26 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         filter_traceback(
             exc, generated_names=getattr(preprocessor, "generated_frame_names", ())
         )
+
+    @staticmethod
+    def _is_type_placeholder(arg: Any, spec: Any) -> bool:
+        """Whether ``arg`` is a concrete dtype class passed for a parameter
+        whose annotation is a numeric DSL type it belongs to: ``compile()``'s
+        type-only placeholder, a type with no execution value (the function is
+        compiled for the type and called with values later)."""
+        if get_origin(spec) is Annotated:
+            spec = get_args(spec)[0]
+        return (
+            isinstance(arg, t.NumericMeta)
+            and not arg.is_abstract
+            and isinstance(spec, t.NumericMeta)
+            and issubclass(arg, spec)
+        )
+
+    def _compiled_argument_shape(self, arg: Any, spec: Any) -> Any:
+        """The host shape a compiled function remembers for the argument
+        ``arg`` (``ExecutionArgs.set_shapes``): its flattened tree; a type-only
+        placeholder stands for a value of its dtype."""
+        if self._is_type_placeholder(arg, spec):
+            arg = arg(0)
+        return tree_utils.tree_flatten(arg, return_ir_values=False)[2]
