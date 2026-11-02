@@ -140,8 +140,8 @@ def parser_for_type(annotation: Any) -> Callable[..., Any]:
             base = members[0]
     if base is bool:
         return get_bool_env_var
-    if base is int and not optional:
-        return get_int_env_var
+    if base is int:
+        return get_int_or_none_env_var if optional else get_int_env_var
     if base is str:
         return get_str_env_var
     raise DSLRuntimeError(
@@ -181,6 +181,34 @@ class EnvVarSpec:
                 else None
             )
             setattr(self, entry.attribute, entry.resolve(self, prefix, parser))
+
+    def cache_key_str(self) -> str:
+        """Return the settings that are part of the JIT cache key.
+
+        One ``key=value;`` item per ``affects_compile`` setting whose value is
+        not ``None``, ordered by key name so the string is stable across
+        declaration order and subclassing.
+        """
+        rendered = []
+        for entry in sorted(self._ENV_VAR_SPEC, key=lambda e: e.key_name):
+            if not entry.affects_compile:
+                continue
+            value = getattr(self, entry.key_name)
+            if value is None:
+                continue
+            rendered.append(f"{entry.key_name}={_render_cache_key_value(value)};")
+        return "".join(rendered)
+
+
+def _render_cache_key_value(value: object) -> str:
+    """``repr`` of a cache-key value, deterministic for sets.
+
+    A computed setting may hold a set; its iteration order is randomized per
+    process, so it is rendered as a sorted tuple.
+    """
+    if isinstance(value, (set, frozenset)):
+        return repr(tuple(sorted(value, key=repr)))
+    return repr(value)
 
 
 # =============================================================================
@@ -260,6 +288,41 @@ def get_int_env_var(var_name: str, default_value: int = 0) -> int:
             var=var_name,
             detail=f"`{raw}` is not a base-10 integer; expected one, or empty "
             f"for the default `{default_value!r}`",
+        ) from None
+
+
+def get_int_or_none_env_var(
+    var_name: str, default_value: int | None = None
+) -> int | None:
+    """
+    Get the value of an integer-or-``None`` environment variable.
+
+    Recognized values (case-insensitive, surrounding whitespace ignored):
+      * ``"none"``                       returns ``None``
+      * any base-10 integer literal      returns that integer (negatives accepted)
+
+    An unset variable or one with an empty value returns ``default_value``.
+
+    Raises:
+        DSLUserCodeValueError: ``CONFIG_INVALID`` if the variable is set to
+            anything else.
+    """
+    raw = get_str_env_var(var_name)
+    if raw is None:
+        return default_value
+    normalized = raw.strip().lower()
+    if normalized == "":
+        return default_value
+    if normalized == "none":
+        return None
+    try:
+        return int(normalized)
+    except ValueError:
+        raise DSLUserCodeValueError(
+            DiagId.CONFIG_INVALID,
+            var=var_name,
+            detail=f"`{raw}` is not a base-10 integer or `none`; expected one of "
+            f"those, or empty for the default `{default_value!r}`",
         ) from None
 
 
@@ -414,6 +477,10 @@ class EnvironmentVarManager(LogEnvironmentManager):
     )
     warnings_ignore: bool = env_var(
         "WARNINGS_IGNORE", affects_compile=False, default=False
+    )
+    # Capacity of the in-memory JIT cache; None is unlimited, 0 disables it.
+    jit_cache_max_elems: int | None = env_var(
+        "JIT_CACHE_MAX_ELEMS", affects_compile=False, default=None
     )
     pipeline: str | None = env_var("PIPELINE", affects_compile=True, default=None)
     # MLIR runtime libraries linked by the JIT.
