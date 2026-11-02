@@ -453,6 +453,9 @@ class EnvironmentVarManager(LogEnvironmentManager):
     enable_pass_profiling: bool = env_var(
         "ENABLE_PASS_PROFILING", affects_compile=False, default=False
     )
+    ast_preprocessor: bool = env_var(
+        "AST_PREPROCESSOR", affects_compile=True, default=True
+    )
     filter_stacktrace: bool = env_var(
         "FILTER_STACKTRACE",
         affects_compile=False,

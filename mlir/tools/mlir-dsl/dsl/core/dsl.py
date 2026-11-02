@@ -22,7 +22,7 @@ import os
 import re
 import threading
 import warnings
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import partial, wraps
@@ -371,6 +371,15 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         ast_preprocessor = self.plugins.ast_preprocessor
         if ast_preprocessor is not None:
             self.executor.set_functions(**ast_preprocessor.executors(self))
+            self.preprocessor = ast_preprocessor.make_preprocessor(
+                self,
+                dsl_package_name or ast_preprocessor.helpers_package(),
+                decorator_names=[
+                    p.decorator_name for p in type(self).plugins.decorators
+                ],
+            )
+            if self.preprocessor is not None:
+                self.enable_preprocessor = bool(self.envar.ast_preprocessor)
 
     @property
     def _compiler(self) -> Any:
@@ -423,21 +432,42 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             func._dsl_object = func._dsl_cls._get_dsl()
             delattr(func, "_dsl_cls")
 
-    @staticmethod
-    def _preprocess_and_replace_code(func: Any) -> None:
+    @classmethod
+    def _preprocess_and_replace_code(cls, func: Any) -> None:
         """
-        Run ast transformation and replace the function's code object
+        Run ast transformation and replace the function's code object, once
+        per :meth:`preprocess_key`.
         """
         # Ensure the DSL instance is materialized before touching _dsl_object
-        BaseDSL._lazy_initialize_dsl(func)
+        cls._lazy_initialize_dsl(func)
+        dsl = func._dsl_object
         # Update the decorator location to the new function
-        func._dsl_object.decorator_location = func._decorator_location
+        dsl.decorator_location = func._decorator_location
 
-        if getattr(func, "_preprocessed", False) is True:
+        key = dsl.preprocess_key(func)
+        if (
+            getattr(func, "_preprocessed", False) is True
+            and getattr(func, "_preprocess_key", None) == key
+        ):
             return
-        if not func._dsl_object.enable_preprocessor:
+        # The code object the function was defined with: every rewrite starts
+        # from it, and a rewrite turned off restores it.
+        if not hasattr(func, "_original_code"):
+            func._original_code = func.__code__
+        func.__code__ = func._original_code
+        if not dsl.enable_preprocessor:
             func._preprocessed = True
+            func._preprocess_key = key
             return
+
+        fcn_ptr = dsl.run_preprocessor(func)
+        if fcn_ptr:
+            func.__code__ = (
+                fcn_ptr.__code__
+                if not isinstance(fcn_ptr, staticmethod)
+                else fcn_ptr.__func__.__code__
+            )
+        func._preprocess_key = key
 
     @staticmethod
     def jit_runner(
@@ -447,14 +477,21 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         *decorator_args: Any,
         **decorator_kwargs: Any,
     ) -> Any:
-        """Validate and wrap a function with its plugin's decorator.
+        """
+        The decorator machinery shared by every decorator a plugin adds
+        (``@jit`` included): validate the target, stamp it with the DSL class,
+        the decorator's kind and the call site, run the plugin's ``decorate``
+        with the decorator's options and wrap the function so that a call
+        materialises the DSL instance, rewrites the function (when the DSL
+        preprocesses; again when its :meth:`preprocess_key` changed) and hands
+        the call to the plugin through :meth:`_dispatch_decorated`; the
+        plugin's ``wrap`` sees the wrapper last. A call made outside any trace
+        runs inside :meth:`call_scope`. The options (``@jit(label=...)``) are
+        the plugin's to take; the default ``decorate`` takes none.
 
-        ``decorate`` processes options before wrapping; ``wrap`` sees the
-        completed wrapper. Calls resolve the DSL lazily and dispatch to its
-        installed plugin, entering ``call_scope`` for top-level calls.
-
-        Capture the decorator's source location, not its frame: the wrapper
-        outlives the decorating call.
+        ``location`` is the user's call site, already resolved to a value by
+        the caller via :meth:`get_location_from_frame`: the returned decorator
+        outlives this call, so it takes a location rather than a frame.
         """
         log().info("jit_runner")
         # The record's plugin, found on the class: the instance is still lazy.
@@ -486,12 +523,10 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 try:
                     # Resolve the instance plugin at call time; retain no bound method.
                     if in_trace():
-                        cls._lazy_initialize_dsl(func)
-                        func._dsl_object.decorator_location = func._decorator_location
+                        cls._preprocess_and_replace_code(func)
                         return cls._dispatch_decorated(func, *args, **kwargs)
                     with cls.call_scope(func):
-                        cls._lazy_initialize_dsl(func)
-                        func._dsl_object.decorator_location = func._decorator_location
+                        cls._preprocess_and_replace_code(func)
                         return cls._dispatch_decorated(func, *args, **kwargs)
                 except Exception as exc:
                     cls._filter_call_traceback(func, exc)
@@ -1618,6 +1653,84 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         return self._result_from_ctypes(result_spec, raw)
 
     # ===------------------------------------------------------------------===
+    # Preprocessor
+    # ===------------------------------------------------------------------===
+
+    @staticmethod
+    def _inject_closure_cells(
+        original_function: Any, exec_globals: dict[str, Any]
+    ) -> None:
+        """Inject closure cell values into *exec_globals*.
+
+        When a decorated function captures variables from an enclosing scope,
+        those names are absent from ``__globals__``.  The AST preprocessor
+        re-parses the source and ``exec()``s it, which requires those names
+        to be resolvable in *exec_globals*.
+        """
+        if original_function.__closure__:
+            for name, cell in zip(
+                original_function.__code__.co_freevars,
+                original_function.__closure__,
+            ):
+                try:
+                    exec_globals[name] = cell.cell_contents
+                except ValueError:
+                    # Cell may be empty if the variable was never assigned
+                    # in the enclosing scope; safe to skip.
+                    pass
+
+    def run_preprocessor(self, original_function: Any) -> Any:
+        """Rewrite ``original_function`` through the AST preprocessor.
+
+        :return: The rewritten function whose code object replaces the
+            original's, or a false value when the preprocessor left it alone
+        """
+        # Preprocessing runs before jit_wrapper enters its call-time context.
+        with active_dsl(self):
+            return self._run_preprocessor_impl(original_function)
+
+    def _run_preprocessor_impl(self, original_function: Any) -> Any:
+        function_name = original_function.__name__
+        self.traced_function = original_function
+        log().info("Started preprocessing [%s]", function_name)
+        exec_globals: dict[str, Any] = {}
+        if original_function.__globals__ is not None:
+            exec_globals.update(original_function.__globals__)
+        self._inject_closure_cells(original_function, exec_globals)
+        with self.preprocessor.get_session() as preprocessor_session:
+            transformed_ast = preprocessor_session.transform(
+                original_function, exec_globals
+            )
+            if original_function not in preprocessor_session.processed_functions:
+                # The function carries no decorator the rewrite recognises:
+                # nothing was rewritten, so no code object is swapped in.
+                log().info("[%s] left as it is: no DSL decorator", function_name)
+                original_function._preprocessed = True
+                return None
+            if self.envar.debug:
+                log().info(
+                    "# Printing unparsed AST after preprocess of func=`%s`",
+                    function_name,
+                )
+                self.preprocessor.print_ast(transformed_ast)
+            file_name = inspect.getsourcefile(original_function)
+            try:
+                code_object = compile(
+                    transformed_ast, filename=file_name or "<unknown>", mode="exec"
+                )
+            except (SyntaxError, ValueError, TypeError) as e:
+                raise DSLRuntimeError(
+                    f"the preprocessed source of `{function_name}` does not compile",
+                    cause=e,
+                ) from e
+
+            original_function._preprocessed = True
+
+            return preprocessor_session.exec(
+                original_function.__name__, original_function, code_object, exec_globals
+            )
+
+    # ===------------------------------------------------------------------===
     # Argument Binding
     # ===------------------------------------------------------------------===
 
@@ -2125,3 +2238,16 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         if self._is_type_placeholder(arg, spec):
             arg = arg(0)
         return tree_utils.tree_flatten(arg, return_ir_values=False)[2]
+
+    def preprocess_key(self, func: Any) -> Hashable:
+        """What the rewrite of ``func`` depends on: the preprocessor's class
+        and the helpers module it imports. A decorated function is rewritten
+        once per key (:meth:`_preprocess_and_replace_code`), so a DSL whose
+        rewrite has modes (another preprocessor swapped in for a block of
+        code) returns a key that changes with them, and the function is
+        rewritten again, from its original code, the next time it is called."""
+        ast_preprocessor = self.plugins.ast_preprocessor
+        helpers_module = (
+            None if ast_preprocessor is None else ast_preprocessor.helpers_module
+        )
+        return (type(self.preprocessor), helpers_module)

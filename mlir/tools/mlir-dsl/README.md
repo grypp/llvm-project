@@ -55,6 +55,8 @@ The DLPack adapter accepts supported buffers as pointer arguments and validates 
 
 The GPU decorator plugin provides `@kernel`, launch configuration and deferred launches. IR construction works without a GPU; execution requires a suitable target and runtime.
 
+An optional preprocessor preserves source locations, defaults and closure cells while recompiling decorated Python functions. Direct calls through dialect-module aliases accept DSL operands.
+
 The call keywords `pipeline`, `container_attrs`, `no_cache`, `extra_link_libs`
 and `compile_only` belong to the framework. They do not bind to user Meta
 parameters; use different names for compile-time keyword arguments.

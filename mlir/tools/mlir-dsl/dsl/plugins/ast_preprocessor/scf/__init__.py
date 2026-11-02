@@ -18,7 +18,13 @@ import functools
 from collections.abc import Callable
 from typing import Any
 
+from ....core.common import DSLUserCodeError
+from ....core.diagnostics import DiagId
+from ....core.dsl import BaseDSL
+from ....core.plugin import ASTPreprocessorPlugin
 from ....types.typing import as_ir_value, max_ as max, min_ as min
+from ....core.staging import is_mlir_op
+from ..preprocessor import DSLPreprocessor
 from .builders import WhileLoopContext, for_, if_, while_, yield_
 from .executors import (
     LoopUnroll,
@@ -36,6 +42,7 @@ from .executors import (
 )
 
 __all__ = [
+    "ASTPreprocessor",
     "LoopUnroll",
     "WhileLoopContext",
     "all_",
@@ -50,3 +57,80 @@ __all__ = [
     "while_",
     "yield_",
 ]
+
+
+def _builtin_redirector(fcn: Callable[..., Any]) -> Callable[..., Any]:
+    """Route ``max``/``min``/``any``/``all`` to the DSL's versions when an argument is staged."""
+
+    def builtin_wrapper(fcn: Any, *args: Any, **kwargs: Any) -> Any:
+        if not is_mlir_op(args):
+            return fcn(*args, **kwargs)
+        if kwargs:
+            # Redirected built-ins do not support keyword arguments
+            raise DSLUserCodeError(
+                DiagId.UNSUP_SYNTAX,
+                what=f"`{getattr(fcn, '__name__', repr(fcn))}` with keyword arguments",
+                detail=" when one of its arguments is a runtime value: pass positional arguments only",
+            )
+        if fcn is builtins.max:
+            return max(*args)
+        elif fcn is builtins.min:
+            return min(*args)
+        elif fcn is builtins.any:
+            return any_(*args)
+        elif fcn is builtins.all:
+            return all_(*args)
+        raise DSLUserCodeError(
+            DiagId.UNSUP_SYNTAX,
+            what=f"The built-in function `{getattr(fcn, '__name__', str(fcn))}`",
+            detail=" when one of its arguments is a runtime value: do that work in plain Python before the call, or compute it with runtime operations",
+        )
+
+    return functools.partial(builtin_wrapper, fcn)
+
+
+class ASTPreprocessor(ASTPreprocessorPlugin):
+    """The ``scf`` AST preprocessor plugin: ``DSLPreprocessor`` plus executors
+    that stage native control flow as ``scf.for``/``scf.if``/``scf.while`` and
+    route comparisons, ternaries and ``max``/``min``/``any``/``all`` through
+    the DSL.
+
+    :param closure_check: Reject nested functions capturing variables inside
+        staged regions (the default; see ``ASTPreprocessorPlugin.closure_check``)
+    """
+
+    name = "scf"
+    preprocessor_class = DSLPreprocessor
+
+    def __init__(
+        self, *, closure_check: bool = True, helpers_module: str | None = None
+    ) -> None:
+        self.closure_check = closure_check
+        # None keeps the class attribute: the base's None, or the module a
+        # subclass fixes there.
+        if helpers_module is not None:
+            self.helpers_module = helpers_module
+
+    def executors(self, dsl: BaseDSL) -> dict[str, Any]:
+        return dict(
+            loop_execute_range_dynamic=_loop_execute_range_dynamic,
+            if_dynamic=_if_execute_dynamic,
+            while_dynamic=_while_execute_dynamic,
+            compare_executor=_compare_executor,
+            builtin_redirector=_builtin_redirector,
+            ifexp_dynamic=_ifexp_execute_dynamic,
+        )
+
+
+    generated_frame_names = (
+        "loop_body",
+        "if_region",
+        "then_block",
+        "else_block",
+        "elif_region",
+        "while_region",
+        "while_before_block",
+        "while_after_block",
+        "ifexp_then_block",
+        "ifexp_else_block",
+    )
