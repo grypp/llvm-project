@@ -56,7 +56,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ... import ir
-from .common import DSLRuntimeError, DSLUserCodeError, in_trace
+from .common import DSLRuntimeError, in_trace
 from .diagnostics import DiagId, find_user_source_location
 from .mlir_op import OpEmitter
 
@@ -168,9 +168,6 @@ class ASTPreprocessorPlugin(Plugin):
     :meth:`helpers_package`.
     """
 
-    helpers_module: str | None = None
-    generated_frame_names: tuple[str, ...] = ()
-
     role: ClassVar[str] = "ast_preprocessor"
     #: The ``DSLPreprocessor`` (sub)class performing the rewrite; None for a
     #: plugin that only supplies executors.
@@ -179,19 +176,17 @@ class ASTPreprocessorPlugin(Plugin):
     #: staged region (``SCOPE_CLOSURE_CAPTURE``); a plugin whose executors
     #: support such captures sets this False and the preprocessor emits no check.
     closure_check: bool = True
-
-    def executors(self, dsl: BaseDSL) -> dict[str, Any]:
-        """The keyword arguments of ``Executor.set_functions``: the DSL's
-        ``loop_execute_range_dynamic``, ``if_dynamic``, ``while_dynamic``,
-        ``compare_executor``, ``builtin_redirector`` and ``ifexp_dynamic``."""
-        return {}
-
-    def helpers_package(self) -> list[str]:
-        """The package the rewrite imports as ``__module_dsl__`` (``and_``,
-        ``or_``, ``not_``, ``as_ir_value``), as path parts: the plugin's own
-        package. A DSL that re-exports those helpers under its own namespace
-        overrides it with the ``dsl_package_name`` constructor argument."""
-        return type(self).__module__.split(".")
+    #: The module the rewritten code imports its helper calls from (the
+    #: region builders, the executors' entry points); None is the shipped
+    #: helpers module. A DSL that re-exports the helpers, with helpers of its
+    #: own next to them, names its module here.
+    helpers_module: str | None = None
+    #: The names of the functions the rewrite generates in place of the user's
+    #: statements (``loop_body``, ``if_region``, ...; a frame of one is named
+    #: ``<name>_<N>``). ``filter_traceback`` collapses such a frame into the
+    #: user's frame at the same line when a decorated call fails. A plugin
+    #: whose rewrite generates functions of its own lists their names here.
+    generated_frame_names: tuple[str, ...] = ()
 
     def make_preprocessor(
         self, dsl: BaseDSL, package: list[str], *, decorator_names: Sequence[str]
@@ -215,12 +210,28 @@ class ASTPreprocessorPlugin(Plugin):
             options["helpers_module"] = self.helpers_module
         return self.preprocessor_class(package, **options)
 
+    def executors(self, dsl: BaseDSL) -> dict[str, Any]:
+        """The keyword arguments of ``Executor.set_functions``: the DSL's
+        ``loop_execute_range_dynamic``, ``if_dynamic``, ``while_dynamic``,
+        ``compare_executor``, ``builtin_redirector`` and ``ifexp_dynamic``."""
+        return {}
+
+    def helpers_package(self) -> list[str]:
+        """The package the rewrite imports as ``__module_dsl__`` (``and_``,
+        ``or_``, ``not_``, ``as_ir_value``), as path parts: the plugin's own
+        package. A DSL that re-exports those helpers under its own namespace
+        overrides it with the ``dsl_package_name`` constructor argument."""
+        return type(self).__module__.split(".")
+
 
 class _NoRemarkSession:
     """The remark session of a DSL without a compiler plugin: collects nothing."""
 
     def __init__(self) -> None:
         self.remarks: list[dict[str, Any]] = []
+        # The error diagnostics a compile recorded (none without a compiler);
+        # ``Compiler.pipeline_failed`` reads it on any session.
+        self.errors: list[str] = []
 
     def __enter__(self) -> "_NoRemarkSession":
         return self
@@ -237,7 +248,11 @@ class CompilerPlugin(Plugin):
     :meth:`remark_session` collects remarks and :meth:`print_ir_after_passes`
     prints IR on a clone. Lowering and invocation are both the plugin's, so a
     backend that does not produce an ``ExecutionEngine`` replaces the whole
-    object. A DSL without a compiler traces only.
+    object. A DSL without a compiler traces only. The session options
+    ``compile(module, pipeline, **options)`` is given (the DSL's remark
+    settings, ``BaseDSL._remark_options()``) reach :meth:`remark_session`,
+    so a plugin's session takes options of its own; ``compile`` relies only
+    on the session's ``with`` protocol, ``remarks`` and ``errors``.
     """
 
     role: ClassVar[str] = "compiler"
@@ -307,14 +322,16 @@ class DecoratorPlugin(Plugin):
     own verb for it) issues it through :meth:`emit`, and the core, not the
     plugin, keeps the bookkeeping.
 
-    ``BaseDSL.__init_subclass__`` installs :meth:`decorators` on the DSL class;
-    the core wrapper handles the lazy instance, the AST rewrite and the
-    active-DSL context and hands the call to :meth:`_dispatch`, which picks
-    ``launch`` or ``call`` by whether a trace is open. The hooks run around
-    every top-level trace, so a plugin owns its per-trace state (a kernel
-    container, the launches it expects) and its rules at the host boundary;
-    ``finish_compiled_function`` records what the trace did on the compiled
-    function.
+    ``BaseDSL.__init_subclass__`` installs :meth:`decorators` on the DSL class.
+    Decorating runs :meth:`decorate` with the decorator's options and
+    :meth:`wrap` on the wrapper the core builds; the wrapper handles the lazy
+    instance, the AST rewrite and the DSL's call scope and hands the call to
+    the plugin installed on the instance (``BaseDSL._dispatch_decorated``,
+    then :meth:`_dispatch`, which picks ``launch`` or ``call`` by whether a
+    trace is open). The hooks run around every top-level trace, so a plugin
+    owns its per-trace state (a kernel container, the launches it expects)
+    and its rules at the host boundary; ``finish_compiled_function`` records
+    what the trace did on the compiled function.
     """
 
     role: ClassVar[str] = "decorators"
@@ -333,6 +350,28 @@ class DecoratorPlugin(Plugin):
         if in_trace():
             return self.launch(dsl, func, *args, **kwargs)
         return self.call(dsl, func, *args, **kwargs)
+
+    # -- decorating ------------------------------------------------------------
+
+    def decorate(self, func: Any, **options: Any) -> Any:
+        """Process decorator options and return the function to wrap.
+
+        Runs on the class record's plugin, before the DSL is instantiated.
+        The function already carries its DSL class, decorator kind and source
+        location. The default implementation accepts no options.
+        """
+        if options:
+            unknown = sorted(options)
+            raise func._dsl_cls.user_error(
+                DiagId.CALL_ARGUMENTS,
+                function_name=f"@{func._decorator_kind}",
+                detail=f"no option is named `{unknown[0]}`",
+            )
+        return func
+
+    def wrap(self, func: Any, wrapper: Any) -> Any:
+        """Customize the decorated wrapper before it is returned to the user."""
+        return wrapper
 
     # -- what a call does ----------------------------------------------------
 
@@ -423,26 +462,6 @@ class DecoratorPlugin(Plugin):
     def finish_compiled_function(self, dsl: BaseDSL, jit_function: Any) -> None:
         """Record on the compiled function what the trace did (the kernels it
         launched), before any adapter wraps it."""
-
-    def decorate(self, func: Any, **options: Any) -> Any:
-        """Process decorator options and return the function to wrap.
-
-        Runs on the class record's plugin, before the DSL is instantiated.
-        The function already carries its DSL class, decorator kind and source
-        location. The default implementation accepts no options.
-        """
-        if options:
-            unknown = sorted(options)
-            raise func._dsl_cls.user_error(
-                DiagId.CALL_ARGUMENTS,
-                function_name=f"@{func._decorator_kind}",
-                detail=f"no option is named `{unknown[0]}`",
-            )
-        return func
-
-    def wrap(self, func: Any, wrapper: Any) -> Any:
-        """Customize the decorated wrapper before it is returned to the user."""
-        return wrapper
 
 
 class DeferredDecoratorCall:

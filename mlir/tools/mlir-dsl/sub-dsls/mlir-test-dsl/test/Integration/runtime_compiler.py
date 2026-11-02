@@ -463,16 +463,20 @@ with ir.Context() as ctx:
     try:
         compiler.compile(ir.Module.parse(BAD_SRC), "builtin.module(convert-cf-to-llvm)")
     except m.DSLRuntimeError as e:
-        quoted = "failed to legalize operation 'cf.br'" in str(e.cause)
+        quoted = "failed to legalize operation 'cf.br'" in e.context["diagnostics"]
         print("PASS_FAIL:", e.context["pipeline"], quoted)
         print(str(e))
     empty = ir.Module.parse("module {}")
     print("OPT_LEVEL:", failure(lambda: compiler.jit(empty, opt_level=5)))
+    bad_policy = dict(remark_filter=".*", remark_policy="sometimes")
+    session = compiler.remark_session(ctx, **bad_policy)
+    print("REMARK_CONFIG:", failure(session.__enter__))
 # CHECK:      PASS_FAIL: builtin.module(convert-cf-to-llvm) True
 # CHECK:      error[INTERNAL]:
 # CHECK:      error:{{.*}}MLIR pass pipeline failed
 # CHECK:      failed to legalize operation 'cf.br'
 # CHECK:      OPT_LEVEL: CONFIG_INVALID
+# CHECK-NEXT: REMARK_CONFIG: invalid remark configuration
 
 # --- the entry lookup -------------------------------------------
 # `lookup_packed_function` resolves the packed wrapper of an `llvm.func`. The

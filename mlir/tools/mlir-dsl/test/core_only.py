@@ -9,7 +9,7 @@ import sys
 
 import numpy as np
 
-from mlir.dsl.core import mlir_op, staging, user_op
+from mlir.dsl.core import mlir_op, remarks, staging, user_op
 from mlir.dsl.core import arguments, common, diagnostics, env_manager
 from mlir.dsl.core.dsl import BaseDSL
 from mlir.dsl.core.plugin import Plugins

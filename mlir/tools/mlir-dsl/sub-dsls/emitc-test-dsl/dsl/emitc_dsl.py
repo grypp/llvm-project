@@ -27,6 +27,8 @@ from ..dsl.plugins.type_ops import UpstreamDialectTypeOps, arith, llvm, vector
 __all__ = ["EmitCScalarOps", "EmitCTestDSL", "jit"]
 
 # Frames of this package are DSL-internal when a diagnostic locates user code.
+# Registered by the name it was imported under, so a copy installed next to
+# relocated bindings registers its relocated name.
 register_dsl_package(__package__)
 
 

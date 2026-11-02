@@ -61,6 +61,11 @@ __all__ = [
     # The layout primitives, for a sub-DSL's own renderers.
     "format_diagnostic_headline",
     "format_labeled_text",
+    "format_user_labeled_text",
+    "format_labeled_block",
+    "format_labeled_multiline_text",
+    "diagnostic_label_indent",
+    "format_compiler_source_frame",
 ]
 
 # The author-facing words for the two kinds of values (a Python value and an
@@ -78,6 +83,7 @@ class Colors:
     YELLOW = "\033[93m"
     BLUE = "\033[94m"
     GREEN = "\033[92m"
+    CYAN = "\033[96m"
     BOLD = "\033[1m"
     RESET = "\033[0m"
 
@@ -802,6 +808,7 @@ def _format_compiler_source_frame(filename: str, line: int, col: int) -> list[st
 _DIAGNOSTIC_LABEL_COLORS = {
     "error": Colors.RED,
     "warning": Colors.YELLOW,
+    "remark": Colors.CYAN,
     "suggestion": Colors.GREEN,
     "note": Colors.BLUE,
 }
@@ -921,6 +928,11 @@ def _format_diagnostic_headline(
 # own remarks): one headline, label and indent grammar for every diagnostic.
 format_diagnostic_headline = _format_diagnostic_headline
 format_labeled_text = _format_labeled_text
+format_user_labeled_text = _format_user_labeled_text
+format_labeled_block = _format_labeled_block
+format_labeled_multiline_text = _format_labeled_multiline_text
+diagnostic_label_indent = _diagnostic_label_indent
+format_compiler_source_frame = _format_compiler_source_frame
 
 
 # =============================================================================

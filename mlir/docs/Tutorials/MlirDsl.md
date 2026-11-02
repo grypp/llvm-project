@@ -71,6 +71,8 @@ Persistent caching is opt-in (`<NAME>_FILE_CACHING=1`). It stores lowered byteco
 
 IR dumping, pass inspection and profiling expose tracing, lowering and JIT activity.
 
+Optimization remarks can be collected, filtered and written through the compiler plugin.
+
 The call keywords `pipeline`, `container_attrs`, `no_cache`, `extra_link_libs`
 and `compile_only` belong to the framework. They do not bind to user Meta
 parameters; use different names for compile-time keyword arguments.
