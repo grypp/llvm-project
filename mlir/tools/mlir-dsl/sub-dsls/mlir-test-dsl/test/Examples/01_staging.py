@@ -59,7 +59,7 @@ def check(label, got, want):
 def compiled():
     # A specialization is compiled, or loaded from the on-disk cache of an
     # earlier process (on by default, see 09): count both.
-    return dsl.cache_misses
+    return dsl.cache_misses + dsl.file_cache_hits
 
 
 def main():

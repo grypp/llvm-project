@@ -63,7 +63,7 @@ def main():
     # `n` is staged, so every length ran the same compiled function: built once
     # (or loaded from the on-disk cache of an earlier process), then three
     # in-memory hits.
-    check("one compiled axpy", dsl.cache_misses, 1)
+    check("one compiled axpy", dsl.cache_misses + dsl.file_cache_hits, 1)
     check("reused for the other lengths", dsl.cache_hits, 3)
 
     x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)

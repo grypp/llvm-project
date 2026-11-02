@@ -37,7 +37,13 @@ from ..types import typing as t
 from ..util import tree_utils
 from ..util.cache import (
     JitCacheDict,
+    dump_cache_to_path,
+    framework_identity,
+    get_default_generated_ir_path,
+    load_cache_from_path,
+    read_bytecode_and_check_crc32,
     toolchain_identity,
+    write_bytecode_with_crc32,
 )
 from ..util.logger import log
 from .arguments import JitArgAdapterRegistry, adapt_pointer_address
@@ -366,6 +372,8 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         if self.envar.warnings_ignore:
             warnings.filterwarnings("ignore", category=self._warning_category)
 
+        # Path of the dumped MLIR file; set by build_module when KEEP_IR is active.
+        self.dump_mlir_path: Any = None
         # The function being traced; set on every path that reaches the
         # argument boundary (``_prepare_compilation``, ``bind_arguments``).
         self.traced_function: Callable[..., Any] | None = None
@@ -1272,6 +1280,20 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         for plugin in self.plugins.adapters:
             plugin.after_lowering(self, module, function_name)
 
+    def jit_lowered_module(
+        self, module: ir.Module, shared_libs: list[str], function_name: str = ""
+    ) -> Any:
+        """Build the ``ExecutionEngine`` of an already lowered ``module`` (a file
+        cache hit): the pass pipeline is skipped."""
+        try:
+            return self._compiler.jit(module, shared_libs=shared_libs)
+        except DSLBaseError:
+            raise
+        except Exception as e:
+            raise DSLRuntimeError(
+                "compilation failed", context={"function": function_name}, cause=e
+            ) from e
+
     def get_shared_libs(self, extra_link_libs: tuple[str, ...] = ()) -> list[str]:
         """The runtime libraries handed to the ``ExecutionEngine``: the
         ``<PREFIX>_LIBS`` paths, every plugin's ``shared_libs()`` and
@@ -1296,9 +1318,11 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         return list(_normalize_shared_library_paths(shared_libs))
 
     def get_version(self) -> "hashlib._Hash":
-        """A hash of the toolchain identity, the MLIR binaries in use."""
+        """A hash of the toolchain identity (the MLIR binaries in use) and the
+        framework identity (the DSL package's own sources)."""
         version_hash = hashlib.sha256()
         version_hash.update(repr(toolchain_identity()).encode())
+        version_hash.update(framework_identity().encode())
         return version_hash
 
     def get_module_hash(
@@ -1545,30 +1569,84 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         extra_link_libs: tuple[str, ...] = (),
         func: Callable[..., Any] | None = None,
     ) -> Any:
-        """Lower a module and bind its entry to a Python callable."""
-        self.cache_misses += 1
-        log().info(
-            "JIT cache miss function=[%s] module_hash=[%s]", function_name, module_hash
+        """Compile ``module`` and cache the callable the compiler plugin loads.
+
+        The lowered module goes into an ``ExecutionEngine`` over
+        ``get_shared_libs``; the entry is the packed ``_mlir_<name>`` wrapper.
+
+        With file caching on (``DISABLE_FILE_CACHING`` unset) the lowered module
+        is looked up under ``module_hash`` in the cache directory first and, on a
+        miss, dumped there after the pipeline ran (bytecode + CRC32), so a later
+        process skips the pass pipeline and only builds the engine.
+        """
+        file_cache_enabled = (
+            not no_cache
+            and module_hash is not None
+            and not self.envar.disable_file_caching
         )
+        load_from_file_cache = False
+        if file_cache_enabled:
+            cached_module = load_cache_from_path(
+                self.name,
+                module_hash,
+                path=get_default_generated_ir_path(self.name),
+                bytecode_reader=read_bytecode_and_check_crc32,
+            )
+            if cached_module is not None:
+                self.file_cache_hits += 1
+                log().info(
+                    "JIT cache hit IN-FILE function=[%s] module_hash=[%s]",
+                    function_name,
+                    module_hash,
+                )
+                module = cached_module
+                load_from_file_cache = True
+        if not load_from_file_cache:
+            self.cache_misses += 1
+            log().info(
+                "JIT cache miss function=[%s] module_hash=[%s]",
+                function_name,
+                module_hash,
+            )
         shared_libs = self.get_shared_libs(extra_link_libs)
-        engine = self.compile_and_jit(module, pipeline, shared_libs, function_name)
-        jit_function = self._compiler.load(
+        if load_from_file_cache:
+            engine = self.jit_lowered_module(module, shared_libs, function_name)
+        else:
+            engine = self.compile_and_jit(module, pipeline, shared_libs, function_name)
+        # Binding the entry materializes the JIT'd code (ORC compiles lazily),
+        # so it belongs to the jit phase together with engine construction.
+        load = self._compiler.load
+        jit_function = load(
             module,
             engine,
             function_name,
             sig,
             result_ctype=result_spec.slot if result_spec is not None else None,
         )
-        jit_function.result_spec = result_spec
+        jit_function.result_spec = result_spec  # type: ignore[attr-defined]
         execution_args = getattr(jit_function, "execution_args", None)
         if execution_args is not None:
             execution_args.set_adapter_scope(self._jit_arg_adapter_scope)
+        # Decorator plugins record what the trace did; adapters then wrap the
+        # function for another ABI (their symbols are in the engine now).
         for plugin in self.plugins.decorators:
             plugin.finish_compiled_function(self, jit_function)
         for plugin in self.plugins.adapters:
             jit_function = plugin.wrap_compiled_function(self, jit_function)
+
         if not no_cache:
+            # The entry lives as long as the decorated function does.
             self.jit_cache.set(module_hash, jit_function, func)
+        if file_cache_enabled and not load_from_file_cache:
+            dump_cache_to_path(
+                self.name,
+                jit_function,
+                module_hash,
+                path=get_default_generated_ir_path(self.name),
+                bytecode_writer=lambda f: write_bytecode_with_crc32(
+                    f, jit_function.ir_module
+                ),
+            )
         return jit_function
 
     def post_compilation_cleanup(self) -> None:
