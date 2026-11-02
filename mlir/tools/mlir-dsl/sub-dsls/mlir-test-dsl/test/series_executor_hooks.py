@@ -160,7 +160,7 @@ with ir.Context():
 # An executor holds no reference to itself: with the cyclic collector off, an
 # explicit one is released when it is dropped, and the default one, the shared
 # module and the engine when the function is.
-def released():
+def released(**options):
     gc.disable()
     with ir.Context():
         module = ir.Module.parse(SRC)
@@ -168,7 +168,7 @@ def released():
         fn = compiler.load(
             module, engine, "entry", inspect.signature(proto), func_type=StatusFunction
         )
-        run = fn.executor()
+        run = fn.executor(**options)
         run(1)
         fn(1)
         explicit = weakref.ref(run)
@@ -183,3 +183,8 @@ def released():
 
 print("RELEASED:", *released())
 # CHECK: RELEASED: True [True, True, True]
+
+# The same for an executor with the call stopwatch on, which wraps the two
+# steps of a call.
+print("TIMED:", *released(jit_time_profiling=True))
+# CHECK: TIMED: True [True, True, True]

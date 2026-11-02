@@ -229,3 +229,15 @@ with ir.Context(), ir.Location.unknown():
 assert first_hash != second_hash
 print("CACHE CONTRACT: cache class and extra identity")
 # CHECK-NEXT: CACHE CONTRACT: cache class and extra identity
+
+class UntracedInspectionDSL(Concrete):
+    pass
+class OtherInspectionDSL(Concrete):
+    pass
+inspection = UntracedInspectionDSL()
+assert inspection.dump_mlir_raw_path is None
+assert inspection.dump_mlir_paths == {}
+inspection.dump_mlir_paths["marker"] = "only this instance"
+assert OtherInspectionDSL().dump_mlir_paths == {}
+print("INSPECTION CONTRACT: empty state before the first trace")
+# CHECK-NEXT: INSPECTION CONTRACT: empty state before the first trace

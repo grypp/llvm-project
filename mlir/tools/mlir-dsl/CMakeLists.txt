@@ -26,6 +26,7 @@ declare_mlir_python_sources(MLIRPythonSources.DSL.Core
     dsl/util/__init__.py
     dsl/util/cache.py
     dsl/util/logger.py
+    dsl/util/profiler.py
     dsl/util/tree_utils.py
 )
 

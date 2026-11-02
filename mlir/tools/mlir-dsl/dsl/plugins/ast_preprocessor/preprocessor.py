@@ -43,6 +43,7 @@ from ...core.common import (
     _user_error as _dsl_user_error,
 )
 from ...core.diagnostics import DiagId
+from ...util import profiler
 from ...util.logger import log
 from .helpers import register_deferred_for_error
 
@@ -1006,6 +1007,7 @@ class DSLPreprocessor(ast.NodeTransformer):
         """
         return []
 
+    @profiler.timed("ast-build")
     def transform_function(
         self, func_name: str, function_pointer: Callable[..., Any]
     ) -> list[ast.stmt]:
@@ -1031,7 +1033,9 @@ class DSLPreprocessor(ast.NodeTransformer):
 
         # Step 1. Parse the given function
         try:
+            parse_start = profiler.start("ast-build/parse")
             tree, _ = self.parse_function_source(function_pointer)
+            profiler.stop("ast-build/parse", parse_start)
         except (OSError, TypeError) as e:
             # No retrievable source (REPL / exec())
             raise self._user_error("no_source", func=func_name, cause=e)
@@ -1068,10 +1072,12 @@ class DSLPreprocessor(ast.NodeTransformer):
         # expression in an outer decorator is never rewritten either.
         # Statements hoisted out of the definition itself (a ternary in a
         # default value) precede it in the module.
+        visit_start = profiler.start("ast-build/visit")
         func_def.decorator_list = []
         hoisted: list[ast.stmt] = []
         with Region(self.session_data, new_value=hoisted):
             visited = self.visit(func_def)
+        profiler.stop("ast-build/visit", visit_start)
         assert isinstance(visited, ast.FunctionDef)
         func_def = visited
 
