@@ -1140,9 +1140,127 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
 
     # -- Executor contract ---------------------------------------------------
 
+    def __dsl_not__(
+        self,
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> Union[bool, "Boolean"]:
+        """DSL implementation of Python's `not` operator.
 
+        Returns True if the value is equal to zero, False otherwise.
+        This matches Python's behavior where any non-zero number is considered True.
 
+        :return: The result of the logical not operation
+        :rtype: Boolean
+        """
+        if isinstance(self.value, (int, float, bool)):
+            return not self.value
+        else:
+            ty = type(self)
+            return self.__eq__(ty(ty.zero), loc=loc, ip=ip)
 
+    def __dsl_and__(
+        self,
+        other: Union[int, float, bool, "Numeric"],
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> "Numeric":
+        """DSL implementation of Python's `and` operator.
+
+        Returns the second operand if the first is truthy, otherwise returns the first operand.
+        A numeric value is considered truthy if it is non-zero.
+
+        :param other: The right-hand operand
+        :type other: Numeric
+        :return: The result of the logical and operation
+        :rtype: Numeric
+
+        Example::
+
+            5 and 3 -> 3
+            0 and 3 -> 0
+        """
+        # Fast path: Boolean & Boolean -> a single `and_` on the two i1 operands.
+        # The general path would promote to i32, select, and compare back to i1.
+        if isinstance(self, Boolean) and isinstance(other, Boolean):
+            return self.__and__(other, loc=loc, ip=ip)  # type: ignore[call-arg]
+
+        is_true = self.__dsl_bool__(loc=loc, ip=ip)
+
+        def and_op(
+            lhs: Union[bool, int, float, ir.Value],
+            rhs: Union[bool, int, float, ir.Value],
+            *,
+            signed: Optional[bool] = None,
+            loc: Optional[ir.Location] = None,
+            ip: Optional[ir.InsertionPoint] = None,
+        ) -> Union[bool, int, float, ir.Value]:
+            if not isinstance(lhs, ir.Value) and not isinstance(rhs, ir.Value):
+                return lhs and rhs
+            return _emitter().select(
+                is_true.ir_value(loc=loc, ip=ip), rhs, lhs, loc=loc, ip=ip
+            )
+
+        return self._binary_op(and_op, promote_bool=True)(self, other, loc=loc, ip=ip)
+
+    def __dsl_or__(
+        self,
+        other: Union[int, float, bool, "Numeric"],
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> "Numeric":
+        """DSL implementation of Python's `or` operator.
+
+        Returns the first operand if it is truthy, otherwise returns the second operand.
+        A numeric value is considered truthy if it is non-zero.
+
+        :param other: The right-hand operand
+        :type other: Numeric
+        :return: The result of the logical or operation
+        :rtype: Numeric
+
+        Example::
+
+            5 or 3 -> 5
+            0 or 3 -> 3
+        """
+        is_true = self.__dsl_bool__(loc=loc, ip=ip)
+
+        def or_op(
+            lhs: Union[bool, int, float, ir.Value],
+            rhs: Union[bool, int, float, ir.Value],
+            *,
+            signed: Optional[bool] = None,
+            loc: Optional[ir.Location] = None,
+            ip: Optional[ir.InsertionPoint] = None,
+        ) -> Union[bool, int, float, ir.Value]:
+            if not isinstance(lhs, ir.Value) and not isinstance(rhs, ir.Value):
+                return lhs or rhs
+            return _emitter().select(
+                is_true.ir_value(loc=loc, ip=ip), lhs, rhs, loc=loc, ip=ip
+            )
+
+        return self._binary_op(or_op, promote_bool=True)(self, other, loc=loc, ip=ip)
+
+    def __dsl_bool__(
+        self,
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> "Boolean":
+        """DSL implementation of Python's __bool__ method.
+
+        Returns a Boolean indicating whether this value is considered truthy.
+        For numeric types, returns True if the value is non-zero.
+
+        :return: True if this value is truthy (non-zero), False otherwise
+        :rtype: Boolean
+        """
+        ty = type(self)
+        return self.__ne__(ty(ty.zero), loc=loc, ip=ip)
 
     def __bool__(self) -> bool:
         if isinstance(self.value, (int, float, bool)):
@@ -2669,6 +2787,15 @@ def make_struct(name: str, **fields: Any) -> type:
 # =============================================================================
 
 
+def as_ir_value(value: Any) -> Any:
+    """Return the ``ir.Value`` of a DSL leaf, or ``value`` itself.
+
+    The preprocessor wraps the arguments of direct dialect calls with this, so
+    a ``Numeric`` or a ``Pointer`` can be passed where an op takes a raw value.
+    """
+    if isinstance(value, (Numeric, Pointer)):
+        return value.ir_value()
+    return value
 
 
 __all__ = [
@@ -2713,6 +2840,7 @@ __all__ = [
     "dtype",
     "from_numpy_dtype",
     "as_numeric",
+    "as_ir_value",
     "cast",
     "Struct",
     "struct",

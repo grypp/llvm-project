@@ -14,11 +14,37 @@ become EmitC ops, and ``mlir-translate --mlir-to-cpp`` finishes the job.
 
 from ..dsl import *  # noqa: F401,F403  the core names, re-exported
 from ..dsl import __all__ as _core_names
+from ..dsl.plugins.ast_preprocessor.scf import (
+    LoopUnroll,
+    WhileLoopContext,
+    all_,
+    and_,
+    any_,
+    for_,
+    if_,
+    in_,
+    not_,
+    or_,
+    while_,
+    yield_,
+)
 
 from .emitc_dsl import EmitCScalarOps, EmitCTestDSL, jit
 
 __all__ = [
     *_core_names,
+    "LoopUnroll",
+    "WhileLoopContext",
+    "all_",
+    "and_",
+    "any_",
+    "for_",
+    "if_",
+    "in_",
+    "not_",
+    "or_",
+    "while_",
+    "yield_",
     "EmitCScalarOps",
     "EmitCTestDSL",
     "jit",

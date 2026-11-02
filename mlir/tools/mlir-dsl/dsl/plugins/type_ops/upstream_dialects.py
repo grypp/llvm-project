@@ -161,6 +161,8 @@ class UpstreamDialectTypeOps(TypeOpsPlugin):
     def cmp(self, *args: Any, **kwargs: Any) -> Any:
         return self._part("scalars", "cmp").cmp(*args, **kwargs)
 
+    def select(self, *args: Any, **kwargs: Any) -> Any:
+        return self._part("scalars", "select").select(*args, **kwargs)
 
     def cast(self, *args: Any, **kwargs: Any) -> Any:
         return self._part("scalars", "cast").cast(*args, **kwargs)

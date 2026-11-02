@@ -164,6 +164,12 @@ class ASTPreprocessorPlugin(Plugin):
 
     role: ClassVar[str] = "ast_preprocessor"
 
+    def executors(self, dsl: BaseDSL) -> dict[str, Any]:
+        """The keyword arguments of ``Executor.set_functions``: the DSL's
+        ``loop_execute_range_dynamic``, ``if_dynamic``, ``while_dynamic``,
+        ``compare_executor``, ``builtin_redirector`` and ``ifexp_dynamic``."""
+        return {}
+
 
 class _NoRemarkSession:
     """The remark session of a DSL without a compiler plugin: collects nothing."""

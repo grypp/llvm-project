@@ -655,6 +655,18 @@ def cmp(
     return arith.cmpi(ipred, lhs, rhs, loc=loc, ip=ip)
 
 
+def select(
+    cond: ir.Value,
+    a: ir.Value,
+    b: ir.Value,
+    *,
+    loc: Optional[ir.Location] = None,
+    ip: Optional[ir.InsertionPoint] = None,
+) -> ir.Value:
+    """``a if cond else b`` on values of one type: ``arith.select``."""
+    return arith.select(cond, a, b, loc=loc, ip=ip)
+
+
 def cast(
     src: Union[ir.Value, "Numeric"],
     dst_type: Union[ir.Type, "NumericMeta"],

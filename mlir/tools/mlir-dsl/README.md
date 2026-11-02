@@ -43,6 +43,8 @@ Tuples, lists, frozen dataclasses and `@struct` records flatten at argument and 
 
 `dsl_user_op` preserves source locations around user operations. Diagnostics show source context, and per-DSL environment settings control tracing and logging.
 
+`for_`, `if_`, `while_` and `yield_` construct structured control flow explicitly. Callback executors validate loop carries and branch results.
+
 The call keywords `pipeline`, `container_attrs`, `no_cache`, `extra_link_libs`
 and `compile_only` belong to the framework. They do not bind to user Meta
 parameters; use different names for compile-time keyword arguments.

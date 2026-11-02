@@ -47,7 +47,7 @@ from .common import (
 from .diagnostics import DiagId, filter_traceback
 from .env_manager import EnvironmentVarManager
 from .plugin import DecoratorPlugin, Plugins, _NoRemarkSession
-from .staging import _is_mlir_op_leaf, is_argument_meta
+from .staging import Executor, _is_mlir_op_leaf, is_argument_meta
 from .user_op import enter_traceback_locations
 
 __all__ = [
@@ -327,6 +327,9 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         # The function being traced; set on every path that reaches the
         # argument boundary (``_prepare_compilation``, ``bind_arguments``).
         self.traced_function: Callable[..., Any] | None = None
+        # The control-flow executors of this instance, filled from the AST
+        # preprocessor plugin's ``executors`` once the plugins are installed.
+        self.executor: Executor = Executor()
         log().info("Initializing %s DSL", name)
 
         # Resolve the class's plugin record for this instance: a copy of every
@@ -337,6 +340,11 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             plugin.install(self)
         for adapter in self.plugins.adapters:
             adapter.register(self)
+        # The AST preprocessor supplies the executors and the preprocessor;
+        # naming it is what turns the rewrite on.
+        ast_preprocessor = self.plugins.ast_preprocessor
+        if ast_preprocessor is not None:
+            self.executor.set_functions(**ast_preprocessor.executors(self))
 
     @property
     def _compiler(self) -> Any:
@@ -1729,7 +1737,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         dsl = getattr(func, "_dsl_object", None)
         if dsl is None or not dsl.envar.filter_stacktrace:
             return
-        preprocessor = None
+        preprocessor = dsl.plugins.ast_preprocessor
         filter_traceback(
             exc, generated_names=getattr(preprocessor, "generated_frame_names", ())
         )
