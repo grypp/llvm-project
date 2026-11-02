@@ -10,7 +10,10 @@ the DSL's plugins bring (``m.range``, ``m.for_``/``m.if_``/``m.while_``/
 ``m.yield_``, ``m.and_``/``m.or_``/...) and the DSL itself: ``@m.jit``, ``@m.kernel``,
 ``m.compile``, ``m.MlirTestDSL``. The plugin classes themselves are imported
 from their modules (``mlir.dsl.plugins.type_ops``, ...). A sub-DSL of
-your own exports its own namespace the same way.
+your own exports its own namespace the same way. The framework is imported
+relatively (``..dsl``): this package is installed inside its bindings' package
+and relocates with it; a sub-DSL packaged on its own imports the framework
+through its bindings' name instead.
 """
 
 from ..dsl import *  # noqa: F401,F403  the core names, re-exported

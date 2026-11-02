@@ -15,7 +15,7 @@ redeclares or adds settings; ``BaseDSL`` constructs one per instance under the
 DSL's name as prefix.
 
 A malformed value is the user's mistake: the typed readers raise
-:class:`DSLUserCodeValueError` ``CONFIG_INVALID`` naming the variable. A malformed
+:class:`DSLUserCodeError` ``CONFIG_INVALID`` naming the variable. A malformed
 declaration (an annotation without a reader, a bad default) is the DSL
 author's and raises :class:`DSLRuntimeError`.
 """
@@ -242,7 +242,7 @@ def get_bool_env_var(var_name: str, default_value: bool = False) -> bool:
     returns ``default_value``.
 
     Raises:
-        DSLUserCodeValueError: ``CONFIG_INVALID`` if the variable is set to any
+        DSLUserCodeError: ``CONFIG_INVALID`` if the variable is set to any
             other value.
     """
     raw = get_str_env_var(var_name)
@@ -273,7 +273,7 @@ def get_int_env_var(var_name: str, default_value: int = 0) -> int:
     ``-5``) are accepted.
 
     Raises:
-        DSLUserCodeValueError: ``CONFIG_INVALID`` if the variable is set to a value
+        DSLUserCodeError: ``CONFIG_INVALID`` if the variable is set to a value
             that is not a valid base-10 integer.
     """
     raw = get_str_env_var(var_name)
@@ -306,7 +306,7 @@ def get_int_or_none_env_var(
     An unset variable or one with an empty value returns ``default_value``.
 
     Raises:
-        DSLUserCodeValueError: ``CONFIG_INVALID`` if the variable is set to
+        DSLUserCodeError: ``CONFIG_INVALID`` if the variable is set to
             anything else.
     """
     raw = get_str_env_var(var_name)
@@ -415,7 +415,10 @@ class EnvironmentVarManager(LogEnvironmentManager):
     - [DSL_NAME]_CACHE_DIR: Root for IR dumps and the file cache (default: unset,
       meaning $TMPDIR/<user>/<dsl_name lower>_cache)
     - [DSL_NAME]_LOG_TO_FILE: Store all logging into [DSL_NAME].log (default: False)
-    - [DSL_NAME]_KEEP_IR: Save the generated IR into a file under CACHE_DIR (default: False)
+    - [DSL_NAME]_KEEP_IR: Save the generated IR into files under CACHE_DIR: `1` saves the
+      raw module (before any pass); a comma-separated list of stages saves one file per
+      stage: `raw`, `clean` (after canonicalize and cse, on a clone), `after-<pass>` (after
+      that pass, on a clone), `after-passes` (after the DSL's pipeline, on a clone) (default: "")
     - [DSL_NAME]_KEEPIR_AFTER_PASSES: Save generated IR after applying the passes into a file (default: ""). Example: KEEPIR_AFTER_PASSES="canonicalize,cse"
 
     Other options:
@@ -423,6 +426,8 @@ class EnvironmentVarManager(LogEnvironmentManager):
       When True, raises the default of DEBUGINFO and SHOW_STACKTRACE. These
       defaults remain independently overridable by their own env vars.
     - [DSL_NAME]_SHOW_STACKTRACE: Show full stack traces on failure (default: DEBUG)
+    - [DSL_NAME]_FILTER_STACKTRACE: Drop the DSL's own frames from the traceback of an error
+      raised by a decorated call, leaving the user's frames (default: not DEBUG and not SHOW_STACKTRACE)
     - [DSL_NAME]_DEBUGINFO: Attach source locations to every op (default: DEBUG)
     - [DSL_NAME]_VERIFY_TRACE: Verify every op as it is built while tracing (default: False)
     - [DSL_NAME]_LOG_LEVEL: Logging level to set, for LOG_TO_CONSOLE or LOG_TO_FILE (default: 1).
@@ -448,6 +453,10 @@ class EnvironmentVarManager(LogEnvironmentManager):
     - [DSL_NAME]_REMARKS_OUTPUT: File the remarks stream to; ".yaml" or ".bitstream" picks the format (default: "")
     """
 
+    # The suffix of the setting that attaches source locations to the ops
+    # (DEBUGINFO below), quoted by the internal-error envelope when a verifier
+    # error would be located by it. A sub-DSL whose setting is named
+    # differently overrides it on its manager class.
     LOCATION_INFO_SETTING: ClassVar[str] = "DEBUGINFO"
 
     # Master switch for DSL developers: raises the default of a curated set of
@@ -459,18 +468,20 @@ class EnvironmentVarManager(LogEnvironmentManager):
     show_stacktrace: bool = env_var(
         "SHOW_STACKTRACE", affects_compile=False, default=lambda mgr: mgr.debug
     )
+    # Drops the DSL's frames from the traceback of an error a decorated call
+    # raises (``filter_traceback``); off when a developer asked for the full
+    # picture with DEBUG or SHOW_STACKTRACE.
+    filter_stacktrace: bool = env_var(
+        "FILTER_STACKTRACE",
+        affects_compile=False,
+        default=lambda mgr: not (mgr.debug or mgr.show_stacktrace),
+    )
     enable_pass_profiling: bool = env_var(
         "ENABLE_PASS_PROFILING", affects_compile=False, default=False
     )
     ast_preprocessor: bool = env_var(
         "AST_PREPROCESSOR", affects_compile=True, default=True
     )
-    filter_stacktrace: bool = env_var(
-        "FILTER_STACKTRACE",
-        affects_compile=False,
-        default=lambda mgr: not (mgr.debug or mgr.show_stacktrace),
-    )
-
     # Emits an ir.Location per op; keyed because it changes the module.
     debuginfo: bool = env_var(
         "DEBUGINFO", affects_compile=True, default=lambda mgr: mgr.debug
@@ -482,10 +493,11 @@ class EnvironmentVarManager(LogEnvironmentManager):
     no_cache: bool = env_var("NO_CACHE", affects_compile=False, default=False)
     # Root for IR dumps and the file cache.
     cache_dir: str | None = env_var("CACHE_DIR", affects_compile=False, default=None)
-    # Saves the raw IR before any passes; dumped from build_module, which runs
-    # before the cache is consulted, so it cannot be served stale.
+    # The IR dumps of build_module, which runs before the cache is consulted,
+    # so they cannot be served stale: ``1`` (the raw module, before any pass)
+    # or a comma-separated list of stages (``BaseDSL._keep_ir_stages``), each
+    # but the raw one taken on a clone.
     keep_ir: str = env_var("KEEP_IR", affects_compile=False, default="")
-
     # The one dump that is not free of the artifact: it runs its pipeline on the
     # module itself rather than a clone, and does so after the hash is taken, so
     # what gets cached under that hash is the mutated module.
@@ -496,6 +508,11 @@ class EnvironmentVarManager(LogEnvironmentManager):
     print_ir_after_passes: str = env_var(
         "PRINT_IR_AFTER_PASSES", affects_compile=False, default=""
     )
+    # All three reach Compiler.compile; keyed because a cache hit emits no
+    # remarks.
+    remarks: str = env_var("REMARKS", affects_compile=True, default="")
+    remarks_policy: str = env_var("REMARKS_POLICY", affects_compile=True, default="all")
+    remarks_output: str = env_var("REMARKS_OUTPUT", affects_compile=True, default="")
     dryrun: bool = env_var("DRYRUN", affects_compile=True, default=False)
     # Stored under _arch because the public spelling belongs to the arch property;
     # read_as sends the key through that property.

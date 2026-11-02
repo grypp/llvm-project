@@ -1,4 +1,9 @@
 # Python DSL infrastructure and optional feature implementations.
+#
+# MLIRPythonSources.DSL is the framework with its extension modules;
+# MLIRPythonSources.DSL.Python collects the pure Python sources alone, for a
+# consumer that installs the framework next to its own copy of the bindings
+# and builds no extension (the MLIRPythonSources.Core / .Core.Python shape).
 declare_mlir_python_sources(MLIRPythonSources.DSL
   ADD_TO_PARENT MLIRPythonSources)
 declare_mlir_python_sources(MLIRPythonSources.DSL.Python
@@ -17,6 +22,7 @@ declare_mlir_python_sources(MLIRPythonSources.DSL.Core
     dsl/core/env_manager.py
     dsl/core/mlir_op.py
     dsl/core/plugin.py
+    dsl/core/remarks.py
     dsl/core/staging.py
     dsl/core/user_op.py
     dsl/plugins/__init__.py
@@ -108,7 +114,7 @@ declare_mlir_python_sources(MLIRPythonSources.DSL.typeops
 
 declare_mlir_python_extension(MLIRPythonExtension.DSL.Dlpack
   MODULE_NAME _mlirDslDlpack
-  ADD_TO_PARENT MLIRPythonSources.DSL.Python
+  ADD_TO_PARENT MLIRPythonSources.DSL
   ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dsl/plugins/adapters/dlpack/csrc"
   SOURCES DlpackPlugin.cpp
 )

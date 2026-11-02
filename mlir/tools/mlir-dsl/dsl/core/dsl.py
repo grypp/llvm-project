@@ -62,6 +62,7 @@ from .common import (
 from .diagnostics import DiagId, filter_traceback, find_user_source_location
 from .env_manager import EnvironmentVarManager
 from .plugin import DecoratorPlugin, Plugins, _NoRemarkSession
+from .remarks import REMARK_POLICIES
 from .staging import Executor, _is_mlir_op_leaf, is_argument_meta
 from .user_op import enter_traceback_locations
 
@@ -321,7 +322,21 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         compiler = self.plugins.compiler
         if compiler is None:
             return _NoRemarkSession()
-        return _NoRemarkSession()
+        return compiler.remark_session(context, **self._remark_options())
+
+    @property
+    def _remarks_policy(self) -> str:
+        """The ``REMARKS_POLICY`` setting, checked once remarks are requested:
+        one of ``REMARK_POLICIES`` (a user's typo is ``CONFIG_INVALID``)."""
+        policy = self.envar.remarks_policy
+        if self.envar.remarks and policy not in REMARK_POLICIES:
+            raise DSLUserCodeValueError(
+                DiagId.CONFIG_INVALID,
+                var=f"{self.envar.prefix}_REMARKS_POLICY",
+                detail=f"`{policy}` is not a remark policy; expected one of "
+                + ", ".join(f"`{name}`" for name in REMARK_POLICIES),
+            )
+        return policy
 
     def __init__(
         self,
@@ -369,6 +384,8 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         # The prepared calls (``DeferredDecoratorCall``) of the open top-level trace,
         # checked when the trace ends; None outside a trace.
         self._deferred_calls: list[Any] | None = None
+        # The structured remarks of the last compile (``RemarkSession.remarks``).
+        self.collected_remarks: list[dict[str, Any]] = []
 
         # set warning
         if self.envar.warnings_ignore:
@@ -1272,6 +1289,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 shared_libs=shared_libs,
                 enable_pass_profiling=self.envar.enable_pass_profiling,
                 enable_debug_info=self.envar.debuginfo,
+                **self._remark_options(),
                 after_lowering=partial(
                     self._after_lowering, function_name=function_name
                 ),
@@ -1780,6 +1798,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             self.register_dialects(ctx)
             for plugin in self.plugins:
                 plugin.register_dialects(ctx)
+            self.collected_remarks = remark_session.remarks
             # Optional: capture full Python call stacks on every MLIR op.
             loc_tracebacks = self._enter_loc_tracebacks()
 
@@ -2574,3 +2593,14 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             module.operation.verify()
         except Exception as e:
             raise DSLRuntimeError("IR verification failed", cause=e) from e
+
+    def _remark_options(self) -> dict[str, Any]:
+        """The session options of a compile, handed to the compiler plugin's
+        ``remark_session`` (directly, and through ``compile``): the
+        ``REMARKS``, ``REMARKS_POLICY`` and ``REMARKS_OUTPUT`` settings. A DSL
+        whose compiler plugin takes other options overrides this."""
+        return {
+            "remark_filter": self.envar.remarks,
+            "remark_policy": self._remarks_policy,
+            "remark_output": self.envar.remarks_output,
+        }

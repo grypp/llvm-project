@@ -14,11 +14,11 @@ sub-DSL of your own is the same shape with another record
 (``examples/11_custom_dsl.py``).
 """
 
-from .. import ir
-from types import SimpleNamespace
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
+from .. import ir
 from ..dsl.core.common import DSLUserCodeError
 from ..dsl.core.diagnostics import DiagId, register_dsl_package
 from ..dsl.core.dsl import BaseDSL
@@ -29,7 +29,6 @@ from ..dsl.plugins.adapters import dlpack
 from ..dsl.plugins.decorators.jit import func
 from ..dsl.plugins.decorators.kernels import gpu_plugin
 from ..dsl.plugins.type_ops import UpstreamDialectTypeOps, arith, llvm, vector
-
 from ..dsl.util.tree_utils import (
     is_leaf,
     is_staged_leaf,
@@ -55,8 +54,9 @@ LOWER_TO_LLVM: tuple[str, ...] = (
 )
 
 # Frames of this package are DSL-internal when a diagnostic locates user code.
+# Registered by the name it was imported under, so a copy installed next to
+# relocated bindings registers its relocated name.
 register_dsl_package(__package__)
-
 
 # The test DSL's additions to the value model, registered once at import.
 # (a) A value protocol: a class whose ``__ir_types__()`` and ``__ir_values__()``

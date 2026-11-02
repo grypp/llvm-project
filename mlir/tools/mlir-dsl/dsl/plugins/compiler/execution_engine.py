@@ -31,6 +31,7 @@ from .... import ir
 from ...core.common import DSLBaseError, DSLRuntimeError, DSLUserCodeValueError
 from ...core.diagnostics import DiagId
 from ...core.plugin import CompilerPlugin
+from ...core.remarks import RemarkSession, error_diagnostics, remarks_available
 from ...util import profiler
 from ...util.logger import log
 
@@ -147,6 +148,29 @@ class Compiler(CompilerPlugin):
             self._execution_engine = execution_engine
         return self._execution_engine
 
+    def remark_session(
+        self,
+        context: ir.Context,
+        *,
+        remark_filter: str = "",
+        remark_policy: str = "all",
+        remark_output: str = "",
+    ) -> RemarkSession:
+        """A remark session for ``context``; ``with session:`` owns the engine
+        and the diagnostic handler, ``session.remarks`` holds the records.
+
+        :meth:`compile` builds one per compile from the session options it
+        is given and relies only on the ``with`` protocol, ``remarks`` and
+        ``errors`` (the error diagnostics it recorded, for the failure
+        report); a subclass that collects differently returns its own session
+        object and takes its own options (``**options``) here.
+        """
+        return RemarkSession(
+            context,
+            remark_filter=remark_filter,
+            remark_policy=remark_policy,
+            remark_output=remark_output,
+        )
 
     def compile(
         self,
@@ -158,13 +182,17 @@ class Compiler(CompilerPlugin):
         enable_pass_profiling: bool = False,
         enable_debug_info: bool = False,
         enable_verifier: bool = True,
+        **session_options: Any,
     ) -> ir.Module:
         """Compiles the module by invoking the pipeline and returns it.
 
         The pass manager always runs ``pipeline`` as given; composing it is
         the DSL's job. Subclasses overriding this method should return the
         compiled module so ``compile_and_jit`` callers can retain the
-        finalized IR.
+        finalized IR. Every exception out of the pipeline (the parse, the
+        run, the session around it) is raised as what
+        :meth:`pipeline_failed` makes of it; :meth:`after_pipeline` runs
+        inside the session once the passes are done.
 
         :param module: The module to lower in place
         :param pipeline: A textual pass pipeline, ``builtin.module(...)``
@@ -173,12 +201,15 @@ class Compiler(CompilerPlugin):
         :param enable_pass_profiling: Print the pass manager's timing report
         :param enable_debug_info: Print locations in the IR dumps
         :param enable_verifier: Verify the module between passes
+        :param session_options: Passed on to :meth:`remark_session`:
+            ``remark_filter`` (a regular expression over remark categories),
+            ``remark_policy`` (``"all"`` or ``"final"``) and ``remark_output``
+            (a ``.yaml``/``.bitstream`` path for the remarks) by default, a
+            subclass's own when it overrides the session
         :return: The lowered ``module``
         """
         context = module.context
-        session = self.remark_session(
-            context,
-        )
+        session = self.remark_session(context, **session_options)
         try:
             pm = self.passmanager.PassManager.parse(pipeline, context=context)
             if enable_pass_profiling or profiler.deep():
@@ -211,20 +242,13 @@ class Compiler(CompilerPlugin):
                 # profiler's capture window, then close the phase.
                 del pm
                 profiler.end_mlir_phase()
-        except ValueError as exc:
-            raise DSLRuntimeError(
-                "failed to parse the pass pipeline",
-                context={"pipeline": pipeline},
-                cause=exc,
-            ) from exc
-        except ir.MLIRError as exc:
-            raise DSLRuntimeError(
-                "MLIR pass pipeline failed",
-                context={
-                    "pipeline": pipeline,
-                },
-                cause=exc,
-            ) from exc
+                self.after_pipeline(session)
+            self.collected_remarks = session.remarks
+        except Exception as exc:
+            error = self.pipeline_failed(exc, session, pipeline)
+            if error is exc:
+                raise
+            raise error from exc
         finally:
             # Restore the captured fd / emit the report even if the pipeline
             # raised before end_mlir_phase ran above (idempotent when already
@@ -233,7 +257,46 @@ class Compiler(CompilerPlugin):
 
         return module
 
+    def pipeline_failed(self, exc: Exception, session: Any, pipeline: str) -> Exception:
+        """The error :meth:`compile` raises for an exception out of the pass
+        pipeline: a DSL error (one the session or :meth:`after_pipeline`
+        raised on purpose) as it is; a ``ValueError`` is the pipeline failing
+        to parse; anything else (an ``ir.MLIRError`` from a failing pass) is
+        the pipeline failing, with the diagnostics the pass manager captured
+        and the session recorded (``error_diagnostics``). A subclass maps a
+        failure to its own error, e.g. a user error naming the setting that
+        chose the pipeline, with the same diagnostics as the detail.
 
+        :param exc: The exception; ``compile`` chains the result to it
+        :param session: The remark session of the compile
+        :param pipeline: The textual pipeline that was run
+        :return: The exception to raise, ``exc`` itself to re-raise it
+        """
+        if isinstance(exc, DSLBaseError):
+            return exc
+        if isinstance(exc, ValueError):
+            return DSLRuntimeError(
+                "failed to parse the pass pipeline",
+                context={"pipeline": pipeline},
+                cause=exc,
+            )
+        return DSLRuntimeError(
+            "MLIR pass pipeline failed",
+            context={
+                "pipeline": pipeline,
+                "diagnostics": error_diagnostics(exc, session),
+            },
+            cause=exc,
+        )
+
+    def after_pipeline(self, session: Any) -> None:
+        """Runs inside the remark session right after the passes, before the
+        session finalizes: a subclass reports what the session collected or
+        promotes its warnings to an error here (a DSL error raised here is
+        raised as it is). No-op by default.
+
+        :param session: The remark session of the compile
+        """
 
     @profiler.timed("jit")
     def jit(
@@ -334,6 +397,7 @@ class Compiler(CompilerPlugin):
         enable_verifier: bool = True,
         return_module: bool = False,
         after_lowering: collections.abc.Callable[[ir.Module], None] | None = None,
+        **session_options: Any,
     ) -> Any:
         """Compile the module (see :meth:`compile`) and wrap it in an engine
         (see :meth:`jit`).
@@ -341,6 +405,8 @@ class Compiler(CompilerPlugin):
         :param return_module: Also return the lowered module
         :param after_lowering: Called with the lowered module before the
             engine is built (the DSL runs its plugins' ``after_lowering`` here)
+        :param session_options: Passed on to :meth:`compile`, which hands
+            them to :meth:`remark_session`
         :return: The engine, or an ``(engine, compiled module)`` pair when
             ``return_module`` is set
         """
@@ -352,6 +418,7 @@ class Compiler(CompilerPlugin):
             enable_pass_profiling=enable_pass_profiling,
             enable_debug_info=enable_debug_info,
             enable_verifier=enable_verifier,
+            **session_options,
         )
 
         if after_lowering is not None:
