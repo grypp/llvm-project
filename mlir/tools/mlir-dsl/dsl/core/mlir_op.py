@@ -71,7 +71,20 @@ class OpEmitter:
         there; a DSL value of the family is taken as it is either way."""
         return None
 
+    def vector_type(self, dtype: Any, lanes: int) -> ir.Type:
+        """The SSA type of ``lanes`` elements of ``dtype``; ``vector<N x T>`` by default."""
+        return ir.VectorType.get([lanes], dtype.scalar_mlir_type)
 
+    def vector_shape(self, mlir_type: ir.Type) -> tuple[ir.Type, int] | None:
+        """``(element type, lanes)`` of a vector SSA type of this dialect, or
+        None when it is not one; a fixed rank-1 ``vector`` by default."""
+        if (
+            isinstance(mlir_type, ir.VectorType)
+            and mlir_type.rank == 1
+            and not mlir_type.scalable
+        ):
+            return mlir_type.element_type, mlir_type.shape[0]
+        return None
 
     def pointer_type(self, dtype: Any, address_space: int) -> ir.Type:
         """The SSA type of a pointer to ``dtype`` in ``address_space``."""
@@ -166,9 +179,17 @@ class OpEmitter:
 
     # -- vector ops (``Vector``) ---------------------------------------------
 
+    def from_elements(self, *args: Any, **kwargs: Any) -> Any:
+        return self._unsupported("from_elements")
 
+    def broadcast(self, *args: Any, **kwargs: Any) -> Any:
+        return self._unsupported("broadcast")
 
+    def extract(self, *args: Any, **kwargs: Any) -> Any:
+        return self._unsupported("extract")
 
+    def reduce(self, *args: Any, **kwargs: Any) -> Any:
+        return self._unsupported("reduce")
 
     # -- memory ops (``Pointer``) --------------------------------------------
 

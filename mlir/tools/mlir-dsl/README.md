@@ -47,6 +47,8 @@ Tuples, lists, frozen dataclasses and `@struct` records flatten at argument and 
 
 Typed `Pointer` values support address arithmetic, address spaces, scalar loads and stores through the LLVM memory emitter.
 
+`Vector` supports construction, arithmetic, extraction and reduction. Pointer operations can load and store vectors, including masked accesses.
+
 The call keywords `pipeline`, `container_attrs`, `no_cache`, `extra_link_libs`
 and `compile_only` belong to the framework. They do not bind to user Meta
 parameters; use different names for compile-time keyword arguments.

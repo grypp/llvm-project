@@ -21,7 +21,7 @@ from ..dsl.core.diagnostics import DiagId, register_dsl_package
 from ..dsl.core.dsl import BaseDSL
 from ..dsl.core.plugin import Plugins
 from ..dsl.plugins.decorators.jit import func
-from ..dsl.plugins.type_ops import UpstreamDialectTypeOps, arith, llvm
+from ..dsl.plugins.type_ops import UpstreamDialectTypeOps, arith, llvm, vector
 
 from ..dsl.util.tree_utils import (
     is_leaf,
@@ -33,7 +33,7 @@ from ..dsl.util.tree_utils import (
 
 __all__ = ["LOWER_TO_LLVM", "MlirTestDSL", "jit"]
 
-#: The passes lowering what the test DSL emits (arith, math and llvm ops
+#: The passes lowering what the test DSL emits (arith, math, vector and llvm ops
 #: on builtin types, the ``scf`` control flow, the ``func.func`` entry) to the
 #: LLVM dialect, in order. The sub-DSL owns its pipeline; no plugin publishes
 #: passes. A DSL built from the same parts lists these in its ``pipeline()``.
@@ -117,7 +117,7 @@ class MlirTestDSL(BaseDSL):
     """
 
     plugins = Plugins(
-        type_ops=UpstreamDialectTypeOps(scalars=arith, memory=llvm),
+        type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),
         # @jit over a func.func host entry, then @kernel over gpu.func.
         decorators=[func.Jit()],
     )

@@ -107,7 +107,14 @@ class UpstreamDialectTypeOps(TypeOpsPlugin):
             return None
         return dtype
 
+    def vector_type(self, dtype: Any, lanes: int) -> ir.Type:
+        self._part("vectors", "Vector")
+        return super().vector_type(dtype, lanes)
 
+    def vector_shape(self, mlir_type: ir.Type) -> tuple[ir.Type, int] | None:
+        if self._vectors is None:
+            return None
+        return super().vector_shape(mlir_type)
 
     def pointer_type(self, dtype: Any, address_space: int) -> ir.Type:
         return self._part("memory", "Pointer").pointer_type(dtype, address_space)
@@ -193,9 +200,29 @@ class UpstreamDialectTypeOps(TypeOpsPlugin):
 
     # -- vector ops ----------------------------------------------------------
 
+    def from_elements(
+        self, vec_type: ir.Type, elements: list, *, loc: Any = None, ip: Any = None
+    ) -> Any:
+        return self._part("vectors", "Vector").from_elements(
+            vec_type, elements, loc=loc, ip=ip
+        )
 
+    def broadcast(
+        self, vec_type: ir.Type, scalar: ir.Value, *, loc: Any = None, ip: Any = None
+    ) -> Any:
+        return self._part("vectors", "Vector").broadcast(
+            vec_type, scalar, loc=loc, ip=ip
+        )
 
+    def extract(
+        self, vec: ir.Value, lane: int, *, loc: Any = None, ip: Any = None
+    ) -> Any:
+        return self._part("vectors", "Vector").extract(vec, lane, loc=loc, ip=ip)
 
+    def reduce(
+        self, kind: str, vec: ir.Value, *, loc: Any = None, ip: Any = None
+    ) -> Any:
+        return self._part("vectors", "Vector").reduce(kind, vec, loc=loc, ip=ip)
 
     # -- memory ops ----------------------------------------------------------
 

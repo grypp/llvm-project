@@ -2935,12 +2935,16 @@ class Pointer(ir.Value):
         )
         if count is None:
             return self._dtype(res, loc=loc, ip=ip)
-        # The registry-aware wrapper (a ``Vector`` for ``vector<N x T>``); the
-        # import is deferred because ``util/tree_utils`` imports this module.
+        return self._vector_result(res)
+
+    def _vector_result(self, value: ir.Value) -> Any:
+        """The leaf a vector load returns for its ``vector<N x T>`` value: the
+        registry's claimant (the ``Vector`` leaf) by default; a subclass
+        returns its own vector leaf."""
+        # The import is deferred because ``util/tree_utils`` imports this module.
         from ..util.tree_utils import wrap_ir_value
 
-        return wrap_ir_value(res)
-
+        return wrap_ir_value(value)
 
     @dsl_user_op
     def store(
@@ -3038,11 +3042,7 @@ class Pointer(ir.Value):
             loc=loc,
             ip=ip,
         )
-        # The registry-aware wrapper (a ``Vector`` for ``vector<N x T>``); the
-        # import is deferred because ``util/tree_utils`` imports this module.
-        from ..util.tree_utils import wrap_ir_value
-
-        return wrap_ir_value(res)
+        return self._vector_result(res)
 
     @dsl_user_op
     def masked_store(

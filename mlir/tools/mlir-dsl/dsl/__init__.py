@@ -72,6 +72,7 @@ from .types.typing import (
     IEEE_FLOAT_PROBE,
     make_owning_c_pointer,
 )
+from .types.vector import Vector
 from .types.typing import max_ as max, min_ as min
 
 # The sub-DSL authoring surface
@@ -150,6 +151,7 @@ __all__ = [
     "wrap_to_exact_range",
     "IEEE_FLOAT_PROBE",
     "make_owning_c_pointer",
+    "Vector",
     "max",
     "min",
     "BaseDSL",
