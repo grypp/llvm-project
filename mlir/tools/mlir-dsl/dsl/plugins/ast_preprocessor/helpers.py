@@ -37,10 +37,206 @@ from ...util.logger import log
 __all__ = [
     "Executor",
     "executor",
+    "loop_selector",
+    "range",
+    "is_dynamic_range",
+    "close_for_iter",
+    "materialize_for_iter",
+    "register_deferred_for_error",
+    "raise_deferred_for_error",
+    "discard_deferred_for_error",
     "is_mlir_op",
     "bool_cast",
     "redirect_builtin_function",
+    "get_locals_or_none",
+    "closure_check",
 ]
+
+# =============================================================================
+# Decorator
+# =============================================================================
+
+
+def loop_selector(
+    start: Any,
+    stop: Any,
+    step: Any,
+    *,
+    write_args: Sequence[Any] = (),
+    full_write_args_count: int = 0,
+    write_args_names: Sequence[str] = (),
+    mutated_names: tuple[str, ...] = (),
+    unroll: int = -1,
+    unroll_full: bool = False,
+    **options: Any,
+) -> Callable[..., Any]:
+    """Decorator the preprocessor puts on a staged loop body.
+
+    The decorated body function is executed immediately through
+    ``Executor.for_execute`` and the decoration evaluates to the loop's
+    results, which the generated code writes back to the ``write_args`` names.
+    """
+    log().debug(
+        "start [%s] stop [%s] step [%s] write_args [%s] full_write_args_count [%s] "
+        "write_args_names [%s] mutated_names [%s] unroll [%s] unroll_full [%s] "
+        "options [%s]",
+        start,
+        stop,
+        step,
+        write_args,
+        full_write_args_count,
+        write_args_names,
+        mutated_names,
+        unroll,
+        unroll_full,
+        options,
+    )
+
+    def ir_loop(func: Callable[..., Any]) -> Any:
+        return executor.for_execute(
+            func,
+            start,
+            stop,
+            step,
+            write_args=write_args,
+            full_write_args_count=full_write_args_count,
+            write_args_names=write_args_names,
+            mutated_names=mutated_names,
+            unroll=unroll,
+            unroll_full=unroll_full,
+            **options,
+        )
+
+    return ir_loop
+
+
+# =============================================================================
+# Range
+# =============================================================================
+
+
+class range:
+    """Trace-time representation of a DSL range: the loop over it is always staged.
+
+    Accepts ``range(stop)``, ``range(start, stop)`` and ``range(start, stop,
+    step)``; ``unroll``/``unroll_full`` become the loop annotation of the
+    ``scf.for``; any other keyword is forwarded untouched to the DSL's loop
+    executor, which consumes or rejects it (``CALL_ARGUMENTS`` in the
+    base). Iterating it directly is an error: only the preprocessor's rewrite
+    consumes it.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        unroll: int = -1,
+        unroll_full: bool = False,
+        **options: Any,
+    ) -> None:
+        if len(args) not in (1, 2, 3):
+            raise _user_error(
+                DiagId.UNSUP_SYNTAX,
+                what="`range(...)` with this number of positional arguments",
+                detail=": call it as `range(stop)`, `range(start, stop)` or `range(start, stop, step)`, with loop options such as `unroll=` by keyword",
+            )
+        self.start = 0 if len(args) == 1 else args[0]
+        self.stop = args[0] if len(args) == 1 else args[1]
+        self.step = args[2] if len(args) == 3 else 1
+        self.unroll = unroll
+        self.unroll_full = unroll_full
+        self.options: dict[str, Any] = dict(options)
+
+    def __iter__(self) -> Iterator[int]:
+        # Only reachable when the preprocessor did not rewrite the `for`.
+        raise _user_error(DiagId.PHASE_DYNAMIC_INDEX)
+
+
+def is_dynamic_range(value: object) -> bool:
+    """Return whether a trace-time iterable should lower to a staged loop.
+
+    Only the DSL :class:`range` stages; a ``builtins.range`` runs as a native
+    Python loop (``materialize_for_iter`` picks between the two).
+    """
+    return isinstance(value, range)
+
+
+class _DeferredForErrors:
+    """Errors from the speculative dynamic arm of a preprocessed ``for``.
+
+    The preprocessor registers the error at rewrite time and bakes the id into
+    the generated code, which raises or discards it once trace-time dispatch
+    has selected an arm. One registry serves the whole process: a preprocessed
+    function can be traced more than once and under any DSL instance, and every
+    dynamic selection must report the same preprocessor diagnostic.
+    """
+
+    def __init__(self) -> None:
+        self._errors: dict[int, BaseException] = {}
+        self._ids = itertools.count()
+
+    def register(self, error: BaseException) -> int:
+        error_id = next(self._ids)
+        # The error may be parked for the life of the process; its traceback
+        # would keep every frame of the rewrite alive with it. The diagnostic
+        # carries its own location, so the traceback is dropped.
+        error.__traceback__ = None
+        self._errors[error_id] = error
+        return error_id
+
+    def raise_(self, error_id: int) -> None:
+        raise self._errors[error_id]
+
+    def discard(self, error_id: int) -> None:
+        self._errors.pop(error_id, None)
+
+
+_deferred_for_errors = _DeferredForErrors()
+
+
+def register_deferred_for_error(error: BaseException) -> int:
+    """Retain a speculative dynamic-loop error until trace-time dispatch."""
+    return _deferred_for_errors.register(error)
+
+
+def raise_deferred_for_error(error_id: int) -> None:
+    """Raise an error selected by dynamic dispatch."""
+    _deferred_for_errors.raise_(error_id)
+
+
+def discard_deferred_for_error(error_id: int) -> None:
+    """Release an error from an unselected dynamic branch."""
+    _deferred_for_errors.discard(error_id)
+
+
+def materialize_for_iter(factory: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Build the iterable of a dispatched ``for``.
+
+    A ``builtins.range`` stages (becomes the DSL :class:`range`) only when one
+    of its bounds is a staged value of the active DSL; otherwise, and outside
+    a trace, it is a native Python loop and the loop options (``unroll=`` and
+    the like, which only describe a staged loop) are dropped: ``builtins.range``
+    takes no keywords. The DSL :class:`range` stages unconditionally; any other
+    factory is called as written.
+    """
+    if factory is builtins.range:
+        if is_mlir_op(args):
+            return range(*args, **kwargs)
+        return builtins.range(*args)
+    if factory is range:
+        return range(*args, **kwargs)
+
+    return factory(*args, **kwargs)
+
+
+def close_for_iter(iterable: Any) -> None:
+    """Close the iterable of a dispatched ``for`` when the loop statement is
+    left, normally or by an exception. A builder generator such as ``for_``
+    holds an insertion point across its ``yield``; closing it here, before
+    the enclosing contexts unwind, keeps the insertion-point stack balanced
+    instead of leaving the generator to be finalised later, out of order.
+    Anything but a suspended generator is left alone."""
+    if inspect.isgenerator(iterable):
+        iterable.close()
 
 
 def bool_cast(value: Any) -> bool:
@@ -77,3 +273,48 @@ def redirect_builtin_function(fcn: Any) -> Any:
         if redirector is not None:
             return redirector(fcn)
     return fcn
+
+
+def get_locals_or_none(locals: dict[str, Any], symbols: list[str]) -> list[Any]:
+    """The values of ``symbols`` in a ``locals()`` dict, ``None`` for an unbound one.
+
+    This seeds the ``write_args`` of a generated region: a name
+    first bound inside the region enters as ``None``.
+    """
+    return [locals.get(symbol) for symbol in symbols]
+
+
+def closure_check(
+    closures: list[Any], _visited: set[tuple[str, int]] | None = None
+) -> None:
+    """Reject a nested function called from a staged region that captures a variable.
+
+    Captured modules are fine and captured functions are checked recursively;
+    any other captured name raises ``SCOPE_CLOSURE_CAPTURE``. The preprocessor
+    emits ``closure_check([...])`` before a region that calls nested
+    definitions; with ``closure_check=False`` on the AST preprocessor plugin the
+    preprocessor emits no such call.
+    """
+    if _visited is None:
+        _visited = set()
+
+    for closure in closures:
+        # Use (function name, id) as identity to skip already-processed closures
+        # and prevent infinite recursion with mutually-recursive captured functions
+        closure_identity = (closure.__name__, id(closure))
+        if closure_identity in _visited:
+            continue
+        _visited.add(closure_identity)
+
+        closure_vars = inspect.getclosurevars(closure)
+        for name, value in closure_vars.nonlocals.items():
+            if inspect.ismodule(value):
+                continue
+            if inspect.isfunction(value) or inspect.ismethod(value):
+                closure_check([value], _visited)
+                continue
+            raise _user_error(
+                DiagId.SCOPE_CLOSURE_CAPTURE,
+                func_name=closure.__name__,
+                var_name=name,
+            )

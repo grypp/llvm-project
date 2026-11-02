@@ -57,6 +57,8 @@ The GPU decorator plugin provides `@kernel`, launch configuration and deferred l
 
 An optional preprocessor preserves source locations, defaults and closure cells while recompiling decorated Python functions. Direct calls through dialect-module aliases accept DSL operands.
 
+Python `for` loops with staged bounds lower to structured loops. Loops over Python values execute during tracing.
+
 The call keywords `pipeline`, `container_attrs`, `no_cache`, `extra_link_libs`
 and `compile_only` belong to the framework. They do not bind to user Meta
 parameters; use different names for compile-time keyword arguments.

@@ -40,6 +40,7 @@ from .... import ir
 from ...core.common import DSLRuntimeError, DSLUserCodeError, _user_error as _dsl_user_error
 from ...core.diagnostics import DiagId
 from ...util.logger import log
+from .helpers import register_deferred_for_error
 
 __all__ = [
     "create_module_attribute",
@@ -68,6 +69,183 @@ class ControlFlowPolicy(Enum):
 
     TRACE = auto()
     NATIVE = auto()
+
+
+def _deepcopy_ast_root(node: _AstNode) -> _AstNode:
+    """Copy an AST subtree for a speculative dispatch arm."""
+    return deepcopy(node)
+
+
+class _NativeForLocalCollector(ast.NodeVisitor):
+    """Collect plain names bound by a native candidate loop.
+
+    Runtime-dispatched loops place a speculative native arm in the same
+    generated Python function as the staged arm. CPython determines locals
+    for the whole function, so a store that exists only in that native arm
+    must not make the corresponding user name local on the staged path.
+    """
+
+    def __init__(self) -> None:
+        self.bound_names: set[str] = set()
+        self.declared_names: set[str] = set()
+        self.protected_names: set[str] = set()
+        self.all_names: set[str] = set()
+
+    def visit_Name(self, node: ast.Name) -> None:
+        self.all_names.add(node.id)
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.bound_names.add(node.id)
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self.declared_names.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self.declared_names.update(node.names)
+
+    def _protect_nested_scope(self, node: ast.AST) -> None:
+        self.protected_names.update(
+            child.id for child in ast.walk(node) if isinstance(child, ast.Name)
+        )
+
+    def visit_For(self, node: ast.For) -> None:
+        """Keep loop-target bindings visible after a selected native arm.
+
+        Python publishes a ``for`` target in the enclosing function scope.
+        This is also how generator-based DSL APIs such as ``for_`` return
+        their generated operation results. Body-only definitions remain
+        private so a speculative native arm cannot shadow staged-path names.
+        """
+        self._protect_nested_scope(node.target)
+        self.generic_visit(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self._protect_nested_scope(node.target)
+        self.generic_visit(node)
+
+    # Nested scopes own their names; keep every name they mention as it is.
+    visit_FunctionDef = visit_AsyncFunctionDef = visit_Lambda = _protect_nested_scope
+    visit_ClassDef = visit_ListComp = visit_SetComp = _protect_nested_scope
+    visit_DictComp = visit_GeneratorExp = _protect_nested_scope
+
+
+class _NativeForLocalRenamer(ast.NodeTransformer):
+    """Give isolated native-loop locals branch-private Python names."""
+
+    def __init__(self, renamed_names: dict[str, str]) -> None:
+        self.renamed_names = renamed_names
+
+    def visit_Name(self, node: ast.Name) -> ast.Name:
+        replacement = self.renamed_names.get(node.id)
+        if replacement is None:
+            return node
+        node.id = replacement
+        return node
+
+
+# Loop options transform_for_loop understands; any other range keyword keeps the
+# trace-time dispatch (see DSLPreprocessor._literal_for_iter_kind), where the
+# DSL ``range`` collects it into its ``options`` and the staged arm forwards it.
+_STAGED_RANGE_KEYWORDS = frozenset({"unroll", "unroll_full"})
+
+
+def _native_for_local_renames(
+    node: ast.For, active_symbols: list[set[str]], suffix: int
+) -> dict[str, str]:
+    """Plan private names for locals of a speculative native loop arm.
+
+    Only names absent from the enclosing DSL scope are private. Existing
+    variables retain their spelling so the native arm can update them using
+    the normal control-flow writeback protocol.
+    """
+    collector = _NativeForLocalCollector()
+    collector.visit(node)
+    active_names = set().union(*active_symbols) if active_symbols else set()
+    local_names = (
+        collector.bound_names
+        - collector.declared_names
+        - collector.protected_names
+        - active_names
+        - {"_"}
+    )
+    renamed_names: dict[str, str] = {}
+    reserved_names = collector.all_names | active_names
+    for name in sorted(local_names):
+        replacement = f"_dsl_native_for_{suffix}_{name}"
+        collision_suffix = 0
+        while replacement in reserved_names:
+            replacement = f"_dsl_native_for_{suffix}_{collision_suffix}_{name}"
+            collision_suffix += 1
+        renamed_names[name] = replacement
+        reserved_names.add(replacement)
+    return renamed_names
+
+
+class _RegionLocalCollector(ast.NodeVisitor):
+    """Collect the names a control-flow region binds at its own scope level.
+
+    Records the first binding site of every name so a diagnostic can point at
+    the birth of a region-local value. Nested functions, classes, lambdas and
+    comprehensions own their bindings and are not entered; their own names are
+    bindings of the region.
+    """
+
+    def __init__(self) -> None:
+        self.bound: dict[str, ast.AST] = {}
+
+    def _bind(self, name: str, node: ast.AST) -> None:
+        if name != "_" and name not in self.bound:
+            self.bound[name] = node
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Store):
+            self._bind(node.id, node)
+
+    def _bind_definition(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+    ) -> None:
+        self._bind(node.name, node)
+
+    def _skip_nested_scope(self, node: ast.AST) -> None:
+        return
+
+    visit_FunctionDef = visit_AsyncFunctionDef = visit_ClassDef = _bind_definition
+    visit_Lambda = visit_ListComp = visit_SetComp = _skip_nested_scope
+    visit_DictComp = visit_GeneratorExp = _skip_nested_scope
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name is not None:
+            self._bind(node.name, node)
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self._bind(alias.asname or alias.name.partition(".")[0], node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            self._bind(alias.asname or alias.name, node)
+
+
+class _RegionReadFinder(ast.NodeVisitor):
+    """Find the first read of each given name outside one control-flow node."""
+
+    def __init__(self, names: Iterable[str], skip: ast.AST) -> None:
+        self.names = set(names)
+        self.skip = skip
+        self.reads: dict[str, ast.Name] = {}
+
+    def visit(self, node: ast.AST) -> Any:
+        if node is self.skip:
+            return None
+        return super().visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if (
+            isinstance(node.ctx, ast.Load)
+            and node.id in self.names
+            and node.id not in self.reads
+        ):
+            self.reads[node.id] = node
 
 
 class OrderedSet:
@@ -716,6 +894,71 @@ class DSLPreprocessor(ast.NodeTransformer):
         ast.fix_missing_locations(transformed_tree)
         return transformed_tree.body
 
+    def _find_early_exit(self, tree: ast.AST, kind: str) -> tuple[ast.AST, str] | None:
+        """Find an early exit owned by the given control-flow region.
+
+        ``return`` and ``raise`` anywhere in the region (outside nested
+        functions) are early exits; ``break``/``continue`` only when they
+        belong to this loop (``kind`` is ``"for"``/``"while"``) and not to a
+        loop nested inside it. An ``if`` region owns no ``break``/``continue``.
+
+        :return: ``(node, "return" | "raise" | "break" | "continue")`` of the
+            last early exit found, or ``None``
+        """
+
+        class EarlyExitChecker(ast.NodeVisitor):
+            def __init__(self, kind: str) -> None:
+                self.early_exit: tuple[ast.AST, str] | None = None
+                self.kind = kind
+                self.loop_nest_level = 0
+
+            def _record(self, node: ast.AST, exit_type: str) -> None:
+                self.early_exit = (node, exit_type)
+
+            def visit_Return(self, node: ast.Return) -> None:
+                self._record(node, "return")
+
+            def visit_Raise(self, node: ast.Raise) -> None:
+                self._record(node, "raise")
+
+            def visit_Break(self, node: ast.Break) -> None:
+                if self.loop_nest_level == 0 and self.kind != "if":
+                    self._record(node, "break")
+
+            def visit_Continue(self, node: ast.Continue) -> None:
+                if self.loop_nest_level == 0 and self.kind != "if":
+                    self._record(node, "continue")
+
+            def visit_For(self, node: ast.For) -> None:
+                self.loop_nest_level += 1
+                self.generic_visit(node)
+                self.loop_nest_level -= 1
+
+            def visit_While(self, node: ast.While) -> None:
+                self.loop_nest_level += 1
+                self.generic_visit(node)
+                self.loop_nest_level -= 1
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                return
+
+        checker = EarlyExitChecker(kind)
+        checker.generic_visit(tree)
+        return checker.early_exit
+
+    def check_early_exit(self, tree: ast.AST, kind: str) -> None:
+        """Reject an early exit owned by the given control-flow region."""
+        early_exit = self._find_early_exit(tree, kind)
+        if early_exit is None:
+            return
+        offender, exit_type = early_exit
+        where = f"`{self.session_data.function_name}`" + (
+            f" in `{self.session_data.class_name}`"
+            if self.session_data.class_name
+            else ""
+        )
+        raise self._user_error("early_exit", offender, kind=exit_type, where=where)
+
     def transform(
         self,
         original_function: Callable[..., Any],
@@ -738,6 +981,817 @@ class DSLPreprocessor(ast.NodeTransformer):
         self.session_data.function_globals = None
         unified_tree = ast.Module(body=transformed_tree, type_ignores=[])
         return ast.fix_missing_locations(unified_tree)
+
+    def analyze_region_variables(
+        self,
+        node: ast.For | ast.If | ast.While,
+        active_symbols: list[set[str]],
+        active_callables: list[set[str]],
+    ) -> tuple[list[str], int, list[str], list[str]]:
+        """
+        Analyze loop-carried and closure variables in a control-flow region.
+
+        :return: ``(write_args, full_write_args_count, called_functions,
+            mutated_names)``: the names stored in the region (in first-store
+            order) followed by the receivers of method calls that are not also
+            stored, both restricted to *active_symbols*; the length of the
+            stored group; the called functions defined in an enclosing scope;
+            and the write_args that are only ever the base of an attribute or
+            subscript store (mutated in place, never rebound).
+        """
+        # we need orderedset to keep the insertion order the same. otherwise generated IR is different each time
+        write_args = OrderedSet()
+        invoked_args = OrderedSet()
+        called_functions = OrderedSet()
+        rebound_names: set[str] = set()
+        store_base_names: set[str] = set()
+
+        class RegionAnalyzer(ast.NodeVisitor):
+            force_store = False
+
+            def visit_Name(self, node: ast.Name) -> None:
+                """
+                Mark every store as write; a store through an attribute or
+                subscript marks its base as mutated.
+                """
+                if isinstance(node.ctx, ast.Store):
+                    write_args.add(node.id)
+                    rebound_names.add(node.id)
+                elif self.force_store:
+                    write_args.add(node.id)
+                    store_base_names.add(node.id)
+
+            def visit_Subscript(self, node: ast.Subscript) -> None:
+                saved_force_store = self.force_store
+                if isinstance(node.ctx, ast.Store):
+                    self.force_store = True
+                self.visit(node.value)
+                self.force_store = False
+                self.visit(node.slice)
+                self.force_store = saved_force_store
+
+            def visit_Assign(self, node: ast.Assign) -> None:
+                self.force_store = True
+                for target in node.targets:
+                    self.visit(target)
+                self.force_store = False
+                self.visit(node.value)
+
+            def visit_AugAssign(self, node: ast.AugAssign) -> None:
+                self.force_store = True
+                self.visit(node.target)
+                self.force_store = False
+                self.visit(node.value)
+
+            @staticmethod
+            def get_call_base(func_node: ast.expr) -> str | None:
+                """The receiver name of a method call ``name.attr(...).attr(...)``, if any."""
+                while isinstance(func_node, ast.Attribute):
+                    if isinstance(func_node.value, ast.Name):
+                        return func_node.value.id
+                    func_node = func_node.value
+                return None
+
+            def visit_Call(self, node: ast.Call) -> None:
+                base_name = RegionAnalyzer.get_call_base(node.func)
+
+                if isinstance(node.func, ast.Name):
+                    func_name = node.func.id
+                    called_functions.add(func_name)
+
+                # Classes are mutable by default. Mark them as write. If they are
+                # dataclass(frozen=True), treat them as read in runtime.
+                if base_name is not None and base_name not in ("self",):
+                    invoked_args.add(base_name)
+
+                self.generic_visit(node)
+
+        analyzer = RegionAnalyzer()
+        analyzer.visit(ast.Module(body=node.body, type_ignores=[]))
+        if node.orelse:
+            analyzer.visit(ast.Module(body=node.orelse, type_ignores=[]))
+
+        # While's loop condition is executed n times, as loop body
+        # So collect the variables used in the loop condition
+        if isinstance(node, ast.While):
+            analyzer.visit(ast.Module(body=node.test, type_ignores=[]))  # type: ignore[arg-type]
+
+        # If arg is both write and invoke, remove from invoked_args
+        invoked_args = invoked_args - write_args
+
+        write_args_list: list[str] = list(write_args.intersections(active_symbols))
+        invoked_args_list: list[str] = list(invoked_args.intersections(active_symbols))
+        mutated_names: list[str] = [
+            name
+            for name in write_args_list
+            if name in store_base_names and name not in rebound_names
+        ]
+        # The current function is tracked as callable so recursive references
+        # resolve inside its body, but it is not an enclosing closure. Checking
+        # the decorated runtime wrapper would inspect the decorator's captures
+        # instead of the user's function.
+        current_function_name = (
+            self._session_data.function_name if self._session_data is not None else None
+        )
+        called_functions_list: list[str] = [
+            name
+            for name in called_functions.intersections(active_callables)
+            if name != current_function_name
+        ]
+        return (
+            write_args_list + invoked_args_list,
+            len(write_args_list),
+            called_functions_list,
+            mutated_names,
+        )
+
+    # =============================================================================
+    # Region-local names
+    # =============================================================================
+
+    @staticmethod
+    def _region_bound_names(
+        stmts: Sequence[ast.AST],
+        active_symbols: list[set[str]],
+        *,
+        exclude: Iterable[str] = (),
+    ) -> dict[str, ast.AST]:
+        """Names first bound inside a region, with the node that binds each.
+
+        A name already bound before the region (an *active symbol*) is not
+        region-born: the region rebinds it and the write_args protocol carries
+        it. The result keeps the region's first-store order.
+        """
+        collector = _RegionLocalCollector()
+        for stmt in stmts:
+            collector.visit(stmt)
+        active_names = set().union(*active_symbols) if active_symbols else set()
+        excluded = active_names | set(exclude)
+        return {
+            name: birth
+            for name, birth in collector.bound.items()
+            if name not in excluded
+        }
+
+    def _reads_outside_region(
+        self, node: ast.AST, names: Iterable[str]
+    ) -> dict[str, ast.Name]:
+        """First read of each region-born name outside *node*.
+
+        The search is bounded by the innermost enclosing body (the user's
+        function, or the speculative loop arm being transformed); anything
+        beyond it is the enclosing region's own concern.
+        """
+        if not self.session_data.enclosing_bodies:
+            return {}
+        finder = _RegionReadFinder(names, skip=node)
+        finder.visit(self.session_data.enclosing_bodies[-1])
+        return finder.reads
+
+    def _raise_region_local_escapes(
+        self, var: str, region: str, birth: ast.AST, read: ast.Name
+    ) -> None:
+        raise self._user_error(
+            "region_local_escapes",
+            read,
+            var=var,
+            region=region,
+            birth_file=self.session_data.file_name,
+            birth_line=getattr(birth, "lineno", None),
+        )
+
+    def _check_region_locals_escape(
+        self, node: ast.For | ast.While, region: str
+    ) -> None:
+        """Reject a read, after a loop, of a name first bound in its body.
+
+        The body of a staged loop is compiled once and the native arm of a
+        dispatched loop privatizes its body-born locals, so under both a
+        body-born name never escapes the loop.
+        """
+        target_names: set[str] = set()
+        if isinstance(node, ast.For):
+            target_names = {
+                child.id
+                for child in ast.walk(node.target)
+                if isinstance(child, ast.Name)
+            }
+        born = self._region_bound_names(
+            [*node.body, *node.orelse],
+            self.session_data.scope_manager.get_active_symbols(),
+            exclude=target_names,
+        )
+        if not born:
+            return
+        reads = self._reads_outside_region(node, born)
+        for name, read in reads.items():
+            self._raise_region_local_escapes(name, region, born[name], read)
+
+    # =============================================================================
+    # For loops
+    # =============================================================================
+
+    def extract_range_args(
+        self, iter_node: ast.Call
+    ) -> tuple[ast.expr, ast.expr, ast.expr]:
+        """The visited ``(start, stop, step)`` of a range call, defaults filled in."""
+        args = iter_node.args
+        if not 1 <= len(args) <= 3:
+            raise self._user_error("range_args", iter_node)
+        start = args[0] if len(args) >= 2 else ast.Constant(value=0)
+        stop = args[1] if len(args) >= 2 else args[0]
+        step = args[2] if len(args) == 3 else ast.Constant(value=1)
+        return self.visit(start), self.visit(stop), self.visit(step)
+
+    @staticmethod
+    def _keyword_map(iter_node: ast.Call) -> dict[str | None, ast.expr]:
+        """Map a call's keyword arguments by name to their value AST nodes."""
+        return {kw.arg: kw.value for kw in iter_node.keywords}
+
+    def extract_unroll_args(self, iter_node: ast.Call) -> tuple[ast.expr, ast.expr]:
+        keywords = self._keyword_map(iter_node)
+        return (
+            keywords.get("unroll", ast.Constant(value=-1)),
+            keywords.get("unroll_full", ast.Constant(value=False)),
+        )
+
+    def extract_loop_options(self, iter_node: ast.Call) -> list[ast.keyword]:
+        """Keywords of a range call forwarded to ``loop_selector`` unchanged.
+
+        These are the ``**options`` of the DSL ``range``: every keyword but
+        ``unroll``/``unroll_full`` (the loop annotation, extracted by
+        :meth:`extract_unroll_args`), including a ``**mapping`` splat and the
+        options a subclass added to :attr:`STAGED_RANGE_KEYWORDS`.
+        """
+        return [
+            keyword
+            for keyword in iter_node.keywords
+            if keyword.arg not in ("unroll", "unroll_full")
+        ]
+
+    def _visit_stmts_into(self, stmts: list[ast.stmt], out: list[ast.stmt]) -> None:
+        """Visit each statement and append its result to ``out``, flattening lists.
+
+        Shared inner loop for the control-flow body builders (loop / if-then /
+        if-else / while-after); call inside the appropriate Region/scope context.
+        """
+        for stmt in stmts:
+            transformed_stmt = self.visit(stmt)  # Recursively visit inner statements
+            if isinstance(transformed_stmt, list):
+                out.extend(transformed_stmt)
+            else:
+                out.append(transformed_stmt)
+
+    @staticmethod
+    def _names_constant_list(names: Sequence[str]) -> ast.List:
+        return ast.List(
+            elts=[ast.Constant(value=name) for name in names], ctx=ast.Load()
+        )
+
+    @staticmethod
+    def _names_constant_tuple(names: Sequence[str]) -> ast.Tuple:
+        return ast.Tuple(
+            elts=[ast.Constant(value=name) for name in names], ctx=ast.Load()
+        )
+
+    def create_loop_function(
+        self,
+        func_name: str,
+        node: ast.For,
+        start: ast.expr,
+        stop: ast.expr,
+        step: ast.expr,
+        unroll: ast.expr,
+        unroll_full: ast.expr,
+        write_args: list[str],
+        full_write_args_count: int,
+        mutated_names: Sequence[str] = (),
+        options: Sequence[ast.keyword] = (),
+    ) -> ast.FunctionDef:
+        """
+        Creates a loop body function with the `loop_selector` decorator.
+        """
+
+        assert isinstance(node.target, ast.Name)
+        func_args = [ast.arg(arg=node.target.id, annotation=None)]
+        func_args += [ast.arg(arg=var, annotation=None) for var in write_args]
+
+        # Create the loop body
+        transformed_body: list[ast.stmt] = []
+        with Region(self.session_data, new_value=transformed_body):
+            self._visit_stmts_into(node.body, transformed_body)
+
+        # Handle the return for a single iterated argument correctly
+        if len(write_args) == 0:
+            transformed_body.append(ast.Return())
+        else:
+            transformed_body.append(
+                ast.Return(
+                    value=ast.List(
+                        elts=[ast.Name(id=var, ctx=ast.Load()) for var in write_args],
+                        ctx=ast.Load(),
+                    )
+                )
+            )
+
+        # Define the decorator with parameters
+        decorator = ast.copy_location(
+            ast.Call(
+                func=create_module_attribute(
+                    self.DECORATOR_FOR_STATEMENT,
+                    lineno=node.lineno,
+                    col_offset=node.col_offset,
+                ),
+                args=[start, stop, step],
+                keywords=[
+                    ast.keyword(
+                        arg="write_args",
+                        value=self.generate_get_locals_or_none_call(write_args),
+                    ),
+                    ast.keyword(
+                        arg="full_write_args_count",
+                        value=ast.Constant(value=full_write_args_count),
+                    ),
+                    ast.keyword(
+                        arg="write_args_names",
+                        value=self._names_constant_list(write_args),
+                    ),
+                    ast.keyword(
+                        arg="mutated_names",
+                        value=self._names_constant_tuple(mutated_names),
+                    ),
+                    ast.keyword(arg="unroll", value=unroll),
+                    ast.keyword(arg="unroll_full", value=unroll_full),
+                    *options,
+                ],
+            ),
+            node,
+        )
+
+        return ast.copy_location(
+            ast.FunctionDef(
+                name=func_name,
+                args=ast.arguments(
+                    posonlyargs=[],
+                    args=func_args,
+                    kwonlyargs=[],
+                    kw_defaults=[],
+                    defaults=[],
+                ),
+                body=transformed_body,
+                decorator_list=[decorator],
+            ),
+            node,
+        )
+
+    def _handle_native_for(self, node: ast.For) -> ast.For | list[ast.stmt]:
+        """Visit the body of a loop that runs in Python (the native arm of a
+        dispatched loop, a list/tuple display).
+
+        Under the NATIVE policy a nested ``if``/``for``/``while`` that owns an
+        early exit of this loop stays native Python, so the ``break`` still
+        reaches the loop; nested regions without one are staged as usual. A
+        sub-DSL may override this for its own Python-loop handling.
+        """
+        with self.session_data.control_flow_policy(ControlFlowPolicy.NATIVE):
+            self.generic_visit(node)
+        return node
+
+    def _transform_runtime_dispatched_for(self, node: ast.For) -> list[ast.stmt]:
+        """Select staged or native loop handling from the trace-time iterable."""
+        suffix = self.session_data.counter
+        self.session_data.counter += 1
+        iter_name = f"_dsl_for_iter_{suffix}"
+
+        visited_iter = self.visit(node.iter)
+        assert isinstance(visited_iter, ast.expr)
+        if isinstance(visited_iter, ast.Call):
+            factory = visited_iter.func
+            if isinstance(factory, ast.Attribute) and factory.attr == "range":
+                factory = create_module_attribute(
+                    "range",
+                    lineno=factory.lineno,
+                    col_offset=factory.col_offset,
+                )
+            visited_iter = ast.copy_location(
+                ast.Call(
+                    func=create_module_attribute(
+                        "materialize_for_iter",
+                        lineno=visited_iter.lineno,
+                        col_offset=visited_iter.col_offset,
+                    ),
+                    args=[factory, *visited_iter.args],
+                    keywords=visited_iter.keywords,
+                ),
+                visited_iter,
+            )
+        iter_assign = ast.copy_location(
+            ast.Assign(
+                targets=[ast.Name(id=iter_name, ctx=ast.Store())],
+                value=visited_iter,
+            ),
+            node.iter,
+        )
+
+        def iter_attr(name: str) -> ast.Attribute:
+            return ast.Attribute(
+                value=ast.Name(id=iter_name, ctx=ast.Load()),
+                attr=name,
+                ctx=ast.Load(),
+            )
+
+        def iter_option(name: str, default: ast.expr) -> ast.Call:
+            return ast.Call(
+                func=ast.Name(id="getattr", ctx=ast.Load()),
+                args=[
+                    ast.Name(id=iter_name, ctx=ast.Load()),
+                    ast.Constant(value=name),
+                    default,
+                ],
+                keywords=[],
+            )
+
+        dynamic_for = _deepcopy_ast_root(node)
+        dynamic_for.iter = ast.copy_location(
+            ast.Call(
+                func=ast.Name(id="range", ctx=ast.Load()),
+                args=[iter_attr("start"), iter_attr("stop"), iter_attr("step")],
+                keywords=[
+                    ast.keyword(
+                        arg="unroll",
+                        value=iter_option("unroll", ast.Constant(value=-1)),
+                    ),
+                    ast.keyword(
+                        arg="unroll_full",
+                        value=iter_option("unroll_full", ast.Constant(value=False)),
+                    ),
+                    ast.keyword(
+                        arg=None,
+                        value=iter_option("options", ast.Dict(keys=[], values=[])),
+                    ),
+                ],
+            ),
+            node.iter,
+        )
+
+        python_for = _deepcopy_ast_root(node)
+        python_for.iter = ast.copy_location(
+            ast.Name(id=iter_name, ctx=ast.Load()), node.iter
+        )
+        active_symbols = self.session_data.scope_manager.get_active_symbols()
+        native_local_renames = _native_for_local_renames(
+            python_for, active_symbols, suffix
+        )
+        if native_local_renames:
+            # Rename the source arm before transforming nested control flow.
+            # Delaying this until the whole tree is built changes ast.Name
+            # nodes but leaves generated function parameters and writeback
+            # name lists spelled with the old name.
+            _NativeForLocalRenamer(native_local_renames).visit(python_for)
+        with self.session_data.scope_manager.enter_control_flow_scope(
+            isolate_callables=True
+        ):
+            # Keep the selected arm as a native ``for``. Nested regions decide
+            # locally whether an early exit requires native ownership or they
+            # can return to TRACE, avoiding a pre-scan of the whole loop body.
+            with self.session_data.control_flow_policy(ControlFlowPolicy.NATIVE):
+                with self.session_data.enclosing_body(python_for):
+                    visited_python_for = self._handle_native_for(python_for)
+        assert isinstance(visited_python_for, ast.For)
+        python_for = visited_python_for
+
+        active_callables = self.session_data.scope_manager.get_active_callables()
+        counter_snapshot = self.session_data.counter
+        scope_manager_snapshot = deepcopy(self.session_data.scope_manager)
+        python_preamble: list[ast.stmt] = []
+        try:
+            with self.session_data.scope_manager.enter_control_flow_scope():
+                if isinstance(dynamic_for.target, ast.Name):
+                    self.session_data.scope_manager.add_to_scope(dynamic_for.target.id)
+                with self.session_data.enclosing_body(dynamic_for):
+                    dynamic_body = self.transform_for_loop(
+                        dynamic_for, active_symbols, active_callables
+                    )
+        except Exception as error:
+            # The dynamic arm is speculative until trace-time dispatch. Keep an
+            # error from that dead arm from rejecting a native Python loop, but
+            # preserve the exact exception if the iterable is actually dynamic.
+            self.session_data.counter = counter_snapshot
+            self.session_data.scope_manager.restore_from(scope_manager_snapshot)
+            error_id = register_deferred_for_error(error)
+
+            def deferred_error_call(helper_name: str) -> ast.Expr:
+                return ast.copy_location(
+                    ast.Expr(
+                        ast.Call(
+                            func=create_module_attribute(
+                                helper_name,
+                                lineno=node.lineno,
+                                col_offset=node.col_offset,
+                            ),
+                            args=[ast.Constant(value=error_id)],
+                            keywords=[],
+                        )
+                    ),
+                    node,
+                )
+
+            dynamic_body = [deferred_error_call("raise_deferred_for_error")]
+            python_preamble = [deferred_error_call("discard_deferred_for_error")]
+
+        dispatch = ast.copy_location(
+            ast.If(
+                test=ast.Call(
+                    func=create_module_attribute(
+                        "is_dynamic_range",
+                        lineno=node.iter.lineno,
+                        col_offset=node.iter.col_offset,
+                    ),
+                    args=[ast.Name(id=iter_name, ctx=ast.Load())],
+                    keywords=[],
+                ),
+                body=dynamic_body,
+                orelse=[*python_preamble, python_for],
+            ),
+            node,
+        )
+        self._visit_runtime_dispatch(dispatch)
+        # Leaving the loop statement closes a generator iterable at once (the
+        # builders hold an insertion point across their ``yield``), so an
+        # exception raised in the body unwinds in order.
+        close_iter = ast.copy_location(
+            ast.Try(
+                body=[dispatch],
+                handlers=[],
+                orelse=[],
+                finalbody=[
+                    ast.Expr(
+                        ast.Call(
+                            func=create_module_attribute(
+                                "close_for_iter",
+                                lineno=node.iter.lineno,
+                                col_offset=node.iter.col_offset,
+                            ),
+                            args=[ast.Name(id=iter_name, ctx=ast.Load())],
+                            keywords=[],
+                        )
+                    )
+                ],
+            ),
+            node,
+        )
+        return [iter_assign, close_iter]
+
+    @classmethod
+    def _literal_for_iter_kind(cls, iter_node: ast.expr) -> str | None:
+        """Classify an iterable whose loop kind is already known before tracing.
+
+        "range" is a ``<module>.range(...)`` call, the DSL range that stages
+        unconditionally, with plain positional arguments and only the loop
+        options the staged lowering knows (:attr:`STAGED_RANGE_KEYWORDS`);
+        "python" is a list or tuple display; None is anything else (name,
+        attribute, subscript, other call) and the loop is dispatched at trace
+        time. A bare ``range(...)`` is None unless :attr:`BARE_RANGE_STAGES`:
+        it is ``builtins.range`` unless the user rebound the name, and
+        ``materialize_for_iter`` stages it only when one of its bounds is a
+        staged value, so a loop over a Meta bound runs as a Python loop.
+        Star-unpacking and any other keyword (``**kw``, a sub-DSL option) keep
+        the dispatch, so the range object built at trace time still does their
+        argument check and unexpected-keyword error. A classmethod: the
+        classification depends on the class's rules alone, so a sub-DSL may
+        consult it before it has a preprocessor instance.
+        """
+        if isinstance(iter_node, (ast.List, ast.Tuple)):
+            return "python"
+        if not isinstance(iter_node, ast.Call):
+            return None
+        func = iter_node.func
+        is_range = (isinstance(func, ast.Attribute) and func.attr == "range") or (
+            cls.BARE_RANGE_STAGES and isinstance(func, ast.Name) and func.id == "range"
+        )
+        if not is_range:
+            return None
+        if any(isinstance(arg, ast.Starred) for arg in iter_node.args) or any(
+            keyword.arg not in cls.STAGED_RANGE_KEYWORDS
+            for keyword in iter_node.keywords
+        ):
+            return None
+        return "range"
+
+    def _transform_staged_for(self, node: ast.For) -> list[ast.stmt]:
+        """Lower a ``for`` over a literal range call straight to a staged loop."""
+        assert isinstance(node.iter, ast.Call)
+        # The positional bounds are visited by transform_for_loop; the loop
+        # options are copied into the loop_selector call as they are, so visit
+        # them here like the dispatch visits the whole iterable expression.
+        for keyword in node.iter.keywords:
+            visited_value = self.visit(keyword.value)
+            assert isinstance(visited_value, ast.expr)
+            keyword.value = visited_value
+        active_symbols = self.session_data.scope_manager.get_active_symbols()
+        active_callables = self.session_data.scope_manager.get_active_callables()
+        with self.session_data.scope_manager.enter_control_flow_scope():
+            if isinstance(node.target, ast.Name):
+                self.session_data.scope_manager.add_to_scope(node.target.id)
+            with self.session_data.enclosing_body(node):
+                statements = self.transform_for_loop(
+                    node, active_symbols, active_callables
+                )
+        return statements
+
+    def _transform_native_for(self, node: ast.For) -> list[ast.stmt]:
+        """Keep a ``for`` over a list or tuple display as the Python loop.
+
+        Same shape as the Python candidate of a dispatched loop, minus the
+        dispatch: the iterable is bound once, body-only names get private
+        spellings and stay out of the enclosing scope.
+        """
+        suffix = self.session_data.counter
+        self.session_data.counter += 1
+        iter_name = f"_dsl_for_iter_{suffix}"
+        visited_iter = self.visit(node.iter)
+        assert isinstance(visited_iter, ast.expr)
+        iter_assign = ast.copy_location(
+            ast.Assign(
+                targets=[ast.Name(id=iter_name, ctx=ast.Store())],
+                value=visited_iter,
+            ),
+            node.iter,
+        )
+        node.iter = ast.copy_location(ast.Name(id=iter_name, ctx=ast.Load()), node.iter)
+        active_symbols = self.session_data.scope_manager.get_active_symbols()
+        renames = _native_for_local_renames(node, active_symbols, suffix)
+        if renames:
+            _NativeForLocalRenamer(renames).visit(node)
+        with self.session_data.scope_manager.enter_control_flow_scope(
+            isolate_callables=True
+        ):
+            with self.session_data.control_flow_policy(ControlFlowPolicy.NATIVE):
+                with self.session_data.enclosing_body(node):
+                    visited = self._handle_native_for(node)
+        assert isinstance(visited, ast.For)
+        return [iter_assign, visited]
+
+    def visit_For(self, node: ast.For) -> ast.For | list[ast.stmt]:
+        """Dispatch a ``for`` to its loop form.
+
+        Under the NATIVE policy a loop owning an early exit stays native; a ``<module>.range(...)`` call
+        is staged; a list/tuple display is a native loop; anything else (a
+        bare ``range(...)``, a name, ...) is dispatched at trace time.
+        """
+        if self.session_data.current_control_flow_policy is ControlFlowPolicy.NATIVE:
+            if self._find_early_exit(node, "for") is not None:
+                return self._handle_native_for(node)
+            with self.session_data.control_flow_policy(ControlFlowPolicy.TRACE):
+                return self.visit_For(node)
+
+        # Under every loop form below a body-born name stays inside the body.
+        self._check_region_locals_escape(node, "for")
+
+        # A literal iterable settles the loop kind here, so its body is
+        # transformed once. An iterable the rewrite cannot classify, including
+        # a bare ``range(...)`` whose bounds may be Meta or staged, pays for
+        # the trace-time dispatch and its two candidate bodies.
+        literal_kind = self._literal_for_iter_kind(node.iter)
+        if literal_kind == "range":
+            return self._transform_staged_for(node)
+        if literal_kind == "python":
+            return self._transform_native_for(node)
+        return self._transform_runtime_dispatched_for(node)
+
+    def _create_closure_check_call(
+        self, called_closures: list[str], node: ast.stmt
+    ) -> ast.stmt:
+        """``closure_check([f, g])`` for the nested functions a region calls; a
+        ``pass`` when the DSL disabled the check (``closure_check=False``)."""
+        if not self.closure_check:
+            return ast.copy_location(ast.Pass(), node)
+        return ast.Expr(
+            ast.Call(
+                func=create_module_attribute(
+                    "closure_check",
+                    lineno=node.lineno,
+                    col_offset=node.col_offset,
+                ),
+                args=[
+                    ast.List(
+                        elts=[ast.Name(id=c, ctx=ast.Load()) for c in called_closures],
+                        ctx=ast.Load(),
+                    )
+                ],
+                keywords=[],
+            )
+        )
+
+    def transform_for_loop(
+        self,
+        node: ast.For,
+        active_symbols: list[set[str]],
+        active_callables: list[set[str]],
+    ) -> list[ast.stmt]:
+        """Rewrite a ``for`` over a range call into a ``@loop_selector`` body.
+
+        Rejects early exits and a loop ``else``; a loop target that is live
+        before the loop is carried through ``loop_carried_var_N`` and restored
+        after it.
+
+        :return: the statements replacing the loop: optional carry setup and
+            ``closure_check``, the decorated body and the write-back
+        """
+        self.check_early_exit(node, "for")
+        if node.orelse:
+            raise self._user_error(
+                "loop_else",
+                node,
+                end_col_offset=getattr(node.iter, "end_col_offset", None),
+            )
+
+        # Get loop target variable name
+        target_var_name: str | None = None
+        target_var_is_active_before_loop = False
+        if isinstance(node.target, ast.Name):
+            target_var_name = node.target.id
+            for idx, active_symbol in enumerate(active_symbols):
+                if target_var_name in active_symbol:
+                    target_var_is_active_before_loop = True
+                    active_symbols[idx] = active_symbol - {target_var_name}
+                    break
+
+        # Add necessary exprs to handle this
+        exprs: list[ast.stmt] = []
+        if target_var_is_active_before_loop:
+            assert target_var_name is not None
+            loop_carried_var_name = f"loop_carried_var_{self.session_data.counter}"
+            exprs.append(
+                ast.copy_location(
+                    ast.Assign(
+                        targets=[ast.Name(id=loop_carried_var_name, ctx=ast.Store())],
+                        value=ast.Name(id=target_var_name, ctx=ast.Load()),
+                    ),
+                    node,
+                )
+            )
+            # append an extra assignment to the loop carried variable
+            node.body.append(
+                ast.copy_location(
+                    ast.Assign(
+                        targets=[ast.Name(id=loop_carried_var_name, ctx=ast.Store())],
+                        value=ast.Name(id=target_var_name, ctx=ast.Load()),
+                    ),
+                    node,
+                )
+            )
+            active_symbols.append({loop_carried_var_name})
+
+        assert isinstance(node.iter, ast.Call)
+        start, stop, step = self.extract_range_args(node.iter)
+        unroll, unroll_full = self.extract_unroll_args(node.iter)
+        options = self.extract_loop_options(node.iter)
+        (
+            write_args,
+            full_write_args_count,
+            called_closures,
+            mutated_names,
+        ) = self.analyze_region_variables(node, active_symbols, active_callables)
+
+        if called_closures:
+            exprs.append(self._create_closure_check_call(called_closures, node))
+
+        func_name = f"loop_body_{self.session_data.counter}"
+        self.session_data.counter += 1
+
+        func_def = self.create_loop_function(
+            func_name,
+            node,
+            start,
+            stop,
+            step,
+            unroll,
+            unroll_full,
+            write_args,
+            full_write_args_count,
+            mutated_names,
+            options,
+        )
+
+        assign = self.create_cf_call(func_name, write_args, node)
+
+        # This should work fine as it modifies the AST structure
+        exprs = exprs + [func_def] + assign
+
+        if target_var_is_active_before_loop:
+            assert target_var_name is not None
+            exprs.append(
+                ast.copy_location(
+                    ast.Assign(
+                        targets=[ast.Name(id=target_var_name, ctx=ast.Store())],
+                        value=ast.Name(id=loop_carried_var_name, ctx=ast.Load()),
+                    ),
+                    node,
+                )
+            )
+
+        return exprs
 
     @staticmethod
     def _is_mlir_dialect_module(module: object) -> bool:
@@ -1049,6 +2103,66 @@ class DSLPreprocessor(ast.NodeTransformer):
                 self.session_data.scope_manager.add_to_scope(item.optional_vars.id)
         return self.generic_visit(node)
 
+    def create_cf_call(
+        self, func_name: str, yield_args: list[str], node: ast.stmt
+    ) -> list[ast.stmt]:
+        """Create result writeback for a rewritten control-flow region."""
+        if not yield_args:
+            return [
+                ast.copy_location(
+                    ast.Expr(value=ast.Name(id=func_name, ctx=ast.Load())), node
+                )
+            ]
+        for name in yield_args:
+            scopes = self.session_data.scope_manager
+            if not scopes.current_function_owns(
+                name
+            ) and scopes.enclosing_function_owns(name):
+                self.session_data.record_captured_control_flow_writeback(name)
+        if len(yield_args) == 1:
+            assign = ast.Assign(
+                targets=[ast.Name(id=yield_args[0], ctx=ast.Store())],
+                value=ast.Name(id=func_name, ctx=ast.Load()),
+            )
+        else:
+            assign = ast.Assign(
+                targets=[
+                    ast.Tuple(
+                        elts=[ast.Name(id=var, ctx=ast.Store()) for var in yield_args],
+                        ctx=ast.Store(),
+                    )
+                ],
+                value=ast.Name(id=func_name, ctx=ast.Load()),
+            )
+        return [ast.copy_location(assign, node)]
+
+    def _visit_runtime_dispatch(
+        self,
+        node: ast.If,
+    ) -> None:
+        """Visit the dispatch test without leaking for-local definitions.
+
+        A staged for only carries names that were bound before the loop. Names
+        first assigned in either dispatch arm remain internal to that arm and
+        are intentionally unavailable to later staged control flow.
+        """
+        visited_test = self.visit(node.test)
+        assert isinstance(visited_test, ast.expr)
+        node.test = visited_test
+
+    def generate_get_locals_or_none_call(self, write_args: list[str]) -> ast.Call:
+        """``get_locals_or_none(locals(), [...names])``: the region's seed values."""
+        return ast.Call(
+            func=create_module_attribute("get_locals_or_none"),
+            args=[
+                ast.Call(
+                    func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]
+                ),
+                self._names_constant_list(write_args),
+            ],
+            keywords=[],
+        )
+
 
     DIAGNOSTICS: ClassVar[dict[str, tuple[Any, dict[str, Any]]]] = {
         "no_source": (DiagId.UNSUP_NO_SOURCE, {}),
@@ -1192,6 +2306,14 @@ class DSLPreprocessor(ast.NodeTransformer):
         inspects the rewritten body here without touching the visitors.
         """
         return []
+
+
+    STAGED_RANGE_KEYWORDS: ClassVar[frozenset[str]] = frozenset(
+        {"unroll", "unroll_full"}
+    )
+
+
+    BARE_RANGE_STAGES: ClassVar[bool] = False
 
 
 

@@ -40,3 +40,23 @@ def show(label, fn, *args):
 # FILTERED-NOT:   {{[\\/]}}mlir{{[\\/]}}dsl{{[\\/]}}
 # CHECK:        TypeError: int() argument must be
 show("PLAIN", plain, 1)
+
+@m.jit
+def staged_for(n: m.Int32) -> m.Int32:
+    acc = m.Int32(0)
+    for i in range(n):
+        acc += int(None)
+    return acc
+
+# CHECK-LABEL:  --- FOR
+# CHECK:          File "{{.*}}stacktrace.py", line {{[0-9]+}}, in show
+# UNFILTERED:     in jit_wrapper
+# FILTERED-NOT:   {{[\\/]}}mlir{{[\\/]}}dsl{{[\\/]}}
+# CHECK:          File "{{.*}}stacktrace.py", line {{[0-9]+}}, in staged_for
+# CHECK-NEXT:       for i in range(n):
+# UNFILTERED:     File "{{.*}}{{[\\/]}}mlir{{[\\/]}}dsl{{[\\/]}}plugins{{[\\/]}}ast_preprocessor{{[\\/]}}scf{{[\\/]}}executors.py", line {{[0-9]+}}, in _loop_execute_range_dynamic
+# FILTERED-NOT:   {{[\\/]}}mlir{{[\\/]}}dsl{{[\\/]}}
+# CHECK:          File "{{.*}}stacktrace.py", line {{[0-9]+}}, in loop_body_{{[0-9]+}}
+# CHECK-NEXT:       acc += int(None)
+# CHECK:        TypeError: int() argument must be
+show("FOR", staged_for, 3)

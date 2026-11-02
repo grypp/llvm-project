@@ -98,7 +98,7 @@ print("POINTER:", p.dtype.__name__, p._kind, p._keepalive is t)
 def axpy(
     n: m.Int32, alpha: m.Float32, x: m.Pointer[m.Float32], y: m.Pointer[m.Float32]
 ):
-    for i in m.for_(n):
+    for i in range(n):
         y[i] = alpha * x[i] + y[i]
 
 
