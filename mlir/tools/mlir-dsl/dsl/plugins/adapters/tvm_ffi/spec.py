@@ -233,6 +233,35 @@ class _HandleParam(Param):
         self.var = Var(name, tvm_ffi.dtype("handle"))
 
 
+class Stream(_HandleParam):
+    """A stream handle argument (an opaque pointer, an int or None)."""
+
+
+class CudaEvent(_HandleParam):
+    """A CUDA event handle argument.
+
+    TVM-FFI has a native stream type but no event type, so an event travels
+    as an opaque handle (or its integer address) like the graph kinds below.
+    """
+
+
+class CudaGraph(_HandleParam):
+    """A CUDA graph handle argument (opaque handle or integer address)."""
+
+
+class CudaGraphNode(_HandleParam):
+    """A CUDA graph node handle argument (opaque handle or integer address)."""
+
+
+class EnvStream(_HandleParam):
+    """The framework's current stream, obtained with ``TVMFFIEnvGetStream``.
+
+    It has no argument slot and is absent from :func:`signature`; the wrapper
+    queries it for the device of the first non-CPU :class:`Tensor` parameter,
+    so a function declaring an ``EnvStream`` needs such a tensor.
+    """
+
+
 class DataPointer(_HandleParam):
     """A raw data pointer argument.
 
@@ -310,7 +339,26 @@ class ConstFloat(Param):
         self.value = float(value)
 
 
+class TupleParam(Param):
+    """An ``ffi.Array`` argument whose elements are decoded by ``params``.
+
+    :param name: The parameter name
+    :param params: One specification per element, nested tuples included
+    """
+
+    name: str
+    params: list[Param]
+
+    def __init__(self, name: str, params: list[Param]) -> None:
+        self.name = name
+        self.params = params
+
+
 _HANDLE_PARAM_NAMES: dict[type, str] = {
+    Stream: "Stream",
+    CudaEvent: "CudaEvent",
+    CudaGraph: "CudaGraph",
+    CudaGraphNode: "CudaGraphNode",
     DataPointer: "DataPointer",
 }
 
@@ -345,6 +393,8 @@ def format_param_type(param: Param) -> str:
         return f"Bool({param.value})"
     if isinstance(param, ConstFloat):
         return f"Float({param.value})"
+    if isinstance(param, TupleParam):
+        return f"Tuple[{', '.join(format_param_type(p) for p in param.params)}]"
     raise DSLUserCodeError(
         TvmFfiDiagId.UNSUP_PARAM,
         detail=f"Unsupported parameter type: {type(param)}",
@@ -364,6 +414,7 @@ def signature(name: str, params: list[Param]) -> str:
     param_strs = [
         f"{param.name}: {format_param_type(param)}"  # type: ignore[attr-defined]
         for param in params
+        if not isinstance(param, EnvStream)
     ]
     return f"{name}({', '.join(param_strs)})"
 

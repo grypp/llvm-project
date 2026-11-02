@@ -17,6 +17,7 @@ from . import spec
 from .diagnostics import TvmFfiDiagId
 from .call_provider import (
     DirectCallProvider,
+    DynamicParamPackCallProvider,
     NopCallProvider,
 )
 from .plugin import (
@@ -47,6 +48,7 @@ __all__ = [
     "CallContext",
     "CallProvider",
     "DirectCallProvider",
+    "DynamicParamPackCallProvider",
     "NopCallProvider",
     "Param",
     "TVMFFIBuilder",

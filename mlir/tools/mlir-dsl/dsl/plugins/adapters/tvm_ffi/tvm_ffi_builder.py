@@ -1698,6 +1698,25 @@ class TVMFFIFunctionBuilder(TVMFFIBuilder):
             )
         return current_block
 
+    def decode_param_handle(
+        self,
+        current_block: ir.Block,
+        param: spec.Stream | spec.CudaEvent | spec.CudaGraph | spec.CudaGraphNode,
+        args: ir.Value,
+        arg_index: int,
+        arg_context: ArgContext,
+    ) -> ir.Block:
+        """Decode a stream, CUDA event, graph or graph-node parameter: all are
+        opaque handles (an integer is accepted as a pointer)."""
+        return self.decode_param_opaque_handle(
+            current_block,
+            param.var,
+            args,
+            arg_index,
+            arg_context,
+            allow_int_as_ptr=True,
+        )
+
     def decode_param_data_pointer(
         self,
         current_block: ir.Block,
@@ -1718,9 +1737,98 @@ class TVMFFIFunctionBuilder(TVMFFIBuilder):
             address_space=param.address_space,
         )
 
+    def find_env_stream(self, params: list[spec.Param]) -> Optional[ir.Value]:
+        """``TVMFFIEnvGetStream`` for the device of the first non-CPU tensor.
+
+        :param params: The parameters (tuples are searched recursively)
+        :return: The stream handle, or None when every tensor is on the CPU
+        """
+        for param in params:
+            if isinstance(param, spec.TupleParam):
+                # Recursively check tuples
+                result = self.find_env_stream(param.params)
+                if result is not None:
+                    return result
+            elif (
+                isinstance(param, spec.Tensor)
+                and param.dlpack_device_type != tvm_ffi.DLDeviceType.kDLCPU
+            ):
+                device_type = self.i32(param.dlpack_device_type)
+                device_id = self.matched_var_binding[param.device_id]
+                return llvm.call(
+                    result=self.ptr_type,
+                    callee="TVMFFIEnvGetStream",
+                    callee_operands=[device_type, device_id],
+                    op_bundle_sizes=[],
+                    op_bundle_operands=[],
+                )
+        return None
+
     def get_expected_num_args(self, params: list[spec.Param]) -> int:
-        """Every currently supported parameter occupies one ABI slot."""
-        return len(params)
+        """The argument count the wrapper demands: every param but ``EnvStream``."""
+        expected_num_args = 0
+        for param in params:
+            if not isinstance(param, spec.EnvStream):
+                expected_num_args += 1
+        return expected_num_args
+
+    def decode_param_tuple(
+        self,
+        current_block: ir.Block,
+        param: spec.TupleParam,
+        args: ir.Value,
+        arg_index: int,
+        arg_context: ArgContext,
+    ) -> ir.Block:
+        """Decode the tuple parameter at the given index."""
+        # Check if type is kTVMFFIArray
+        with ir.InsertionPoint(current_block):
+            type_index: ir.Value = self.load_ffi_any_array_item_type_index(
+                args, arg_index
+            )
+            is_ffi_array = self.equal(
+                type_index, self.i32(TVMFFITypeIndex.kTVMFFIArray)
+            )
+
+        # Check that the type is an array
+        current_block = self.check_condition(
+            current_block,
+            lambda: is_ffi_array,
+            "TypeError",
+            self._arg_err(
+                "Mismatched type ", arg_context, ", expected ffi.Array for tuple"
+            ),
+        )
+
+        # Load the array cell
+        with ir.InsertionPoint(current_block):
+            array_cell_ptr = self.get_object_cell_ptr(
+                self.load_ffi_any_array_item_v_ptr(args, arg_index)
+            )
+            array_data = self.load_array_cell_data_ptr(array_cell_ptr)
+            array_size = self.load_array_cell_size_as_i64(array_cell_ptr)
+
+        # Check that the array size matches the expected tuple size
+        current_block = self.check_condition(
+            current_block,
+            lambda: self.equal(array_size, self.i64(len(param.params))),
+            "ValueError",
+            self._arg_err(
+                "Mismatched tuple size ",
+                arg_context,
+                f", expected tuple size={len(param.params)}",
+            ),
+        )
+
+        # Recursively decode each element of the tuple
+        for i, tuple_param in enumerate(param.params):
+            # Create nested context for the tuple element
+            nested_context = arg_context.get_element_context(i)
+            current_block = self.decode_param(
+                current_block, tuple_param, array_data, i, nested_context
+            )
+
+        return current_block
 
     def decode_param(
         self,
@@ -1766,6 +1874,15 @@ class TVMFFIFunctionBuilder(TVMFFIBuilder):
             return self.decode_param_tensor(
                 current_block, param, args, arg_index, arg_context
             )
+        elif isinstance(
+            param, (spec.Stream, spec.CudaEvent, spec.CudaGraph, spec.CudaGraphNode)
+        ):
+            return self.decode_param_handle(
+                current_block, param, args, arg_index, arg_context
+            )
+        elif isinstance(param, spec.EnvStream):
+            # Bound after every argument is decoded (setup_env_stream_params).
+            return current_block
         elif isinstance(param, spec.DataPointer):
             return self.decode_param_data_pointer(
                 current_block, param, args, arg_index, arg_context
@@ -1777,11 +1894,40 @@ class TVMFFIFunctionBuilder(TVMFFIBuilder):
             return self.decode_param_const(
                 current_block, param, args, arg_index, arg_context
             )
+        elif isinstance(param, spec.TupleParam):
+            return self.decode_param_tuple(
+                current_block, param, args, arg_index, arg_context
+            )
         else:
             raise DSLUserCodeError(
                 TvmFfiDiagId.UNSUP_PARAM,
                 detail=f"Unsupported parameter type: {type(param)}",
             )
+
+    def setup_env_stream_params(
+        self,
+        current_block: ir.Block,
+        params: list[spec.Param],
+        env_stream: Optional[ir.Value],
+    ) -> ir.Block:
+        """Bind every ``EnvStream`` parameter to the queried ``env_stream``.
+
+        :raises DSLUserCodeError: ``UNSUP_PARAM`` when an ``EnvStream``
+            is declared but no parameter is a non-CPU tensor
+        """
+        for param in params:
+            if isinstance(param, spec.EnvStream):
+                if env_stream is None:
+                    raise DSLUserCodeError(
+                        TvmFfiDiagId.UNSUP_PARAM,
+                        detail=f"EnvStream cannot be detected in `{self.current_fn_signature}`"
+                        " we need parameters to contain GPU Tensors",
+                    )
+                self.matched_var_binding[param.var] = env_stream
+                self.matched_var_source[param.var] = env_stream
+                self.matched_var_arg_field_name[param.var] = param.name
+
+        return current_block
 
     def attach_ffi_func(
         self,
@@ -1816,6 +1962,12 @@ class TVMFFIFunctionBuilder(TVMFFIBuilder):
                 [self.ptr_type, self.ptr_type, self.i32_type],
                 self.void_type,
             )
+            # void* TVMFFIEnvGetStream(int32_t device_type, int32_t device_id);
+            self.find_or_declare_extern_func(
+                "TVMFFIEnvGetStream",
+                [self.i32_type, self.i32_type],
+                self.ptr_type,
+            )
 
             (handle, args, num_args, result), entry_block = self.function(
                 name=f"__tvm_ffi_{symbol_name}",
@@ -1843,6 +1995,9 @@ class TVMFFIFunctionBuilder(TVMFFIBuilder):
             # The argument index runs over the slots only: an EnvStream has none.
             ffi_arg_index = 0
             for param in params_list:
+                if isinstance(param, spec.EnvStream):
+                    continue
+
                 arg_context = ArgContext(
                     param_name=param.name,  # type: ignore[attr-defined]
                     arg_index=ffi_arg_index,
@@ -1853,12 +2008,19 @@ class TVMFFIFunctionBuilder(TVMFFIBuilder):
                 )
                 ffi_arg_index += 1
 
+            with ir.InsertionPoint(current_block):
+                env_stream = self.find_env_stream(params_list)
+
+            current_block = self.setup_env_stream_params(
+                current_block, params_list, env_stream
+            )
+
             context = CallContext(
                 fn_name=symbol_name,
                 module=self.module,
                 entry_block=entry_block,
                 params=params_list,
-                env_stream=None,
+                env_stream=env_stream,
                 matched_var_binding=self.matched_var_binding,
                 raw_args=args,
                 raw_num_args=num_args,
