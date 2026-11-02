@@ -59,6 +59,8 @@ An optional preprocessor preserves source locations, defaults and closure cells 
 
 Python `for` loops with staged bounds lower to structured loops. Loops over Python values execute during tracing.
 
+Staged `if`, `elif` and `else` statements merge branch results. Unsupported early exits and incompatible result structures are diagnosed.
+
 The call keywords `pipeline`, `container_attrs`, `no_cache`, `extra_link_libs`
 and `compile_only` belong to the framework. They do not bind to user Meta
 parameters; use different names for compile-time keyword arguments.

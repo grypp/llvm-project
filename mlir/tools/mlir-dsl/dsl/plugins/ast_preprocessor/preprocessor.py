@@ -708,6 +708,16 @@ class DSLPreprocessor(ast.NodeTransformer):
         print(unparsed_code)
         print("#", "-" * 40, "End Transformed AST", "-" * 40)
 
+    def make_func_param_name(self, base_name: str, used_names: Iterable[str]) -> str:
+        """Generate a unique parameter name that doesn't collide with existing names."""
+        if base_name not in used_names:
+            return base_name
+
+        i = 0
+        while f"{base_name}_{i}" in used_names:
+            i += 1
+        return f"{base_name}_{i}"
+
     @staticmethod
     def _default_arg_source_names(func_ast: ast.FunctionDef) -> dict[str, str]:
         """Map parameters to source-level names used as their defaults."""
@@ -901,16 +911,45 @@ class DSLPreprocessor(ast.NodeTransformer):
         functions) are early exits; ``break``/``continue`` only when they
         belong to this loop (``kind`` is ``"for"``/``"while"``) and not to a
         loop nested inside it. An ``if`` region owns no ``break``/``continue``.
+        A ``raise`` in the ``try`` suite of a ``try`` statement of the region
+        whose handlers cover it (a bare ``except``, or a handler naming the
+        raised class or a base of it) never leaves the region and is not an
+        early exit; a ``raise`` the handlers do not cover, or one in a
+        handler, ``else`` or ``finally`` clause, is.
 
         :return: ``(node, "return" | "raise" | "break" | "continue")`` of the
             last early exit found, or ``None``
         """
+        resolve = self._resolve_exception_class
+
+        def covers(handlers: list[ast.ExceptHandler], raised: ast.Raise) -> bool:
+            """Whether one of ``handlers`` catches what ``raised`` raises."""
+            raised_class = resolve(raised.exc)
+            for handler in handlers:
+                if handler.type is None:
+                    return True
+                caught = (
+                    handler.type.elts
+                    if isinstance(handler.type, ast.Tuple)
+                    else [handler.type]
+                )
+                for caught_expr in caught:
+                    caught_class = resolve(caught_expr)
+                    if (
+                        raised_class is not None
+                        and caught_class is not None
+                        and issubclass(raised_class, caught_class)
+                    ):
+                        return True
+            return False
 
         class EarlyExitChecker(ast.NodeVisitor):
             def __init__(self, kind: str) -> None:
                 self.early_exit: tuple[ast.AST, str] | None = None
                 self.kind = kind
                 self.loop_nest_level = 0
+                # The handler lists of the ``try`` suites being visited.
+                self.guarding_handlers: list[list[ast.ExceptHandler]] = []
 
             def _record(self, node: ast.AST, exit_type: str) -> None:
                 self.early_exit = (node, exit_type)
@@ -919,7 +958,17 @@ class DSLPreprocessor(ast.NodeTransformer):
                 self._record(node, "return")
 
             def visit_Raise(self, node: ast.Raise) -> None:
+                if any(covers(handlers, node) for handlers in self.guarding_handlers):
+                    return
                 self._record(node, "raise")
+
+            def visit_Try(self, node: ast.Try) -> None:
+                self.guarding_handlers.append(node.handlers)
+                for stmt in node.body:
+                    self.visit(stmt)
+                self.guarding_handlers.pop()
+                for stmt in chain(node.handlers, node.orelse, node.finalbody):
+                    self.visit(stmt)
 
             def visit_Break(self, node: ast.Break) -> None:
                 if self.loop_nest_level == 0 and self.kind != "if":
@@ -958,6 +1007,84 @@ class DSLPreprocessor(ast.NodeTransformer):
             else ""
         )
         raise self._user_error("early_exit", offender, kind=exit_type, where=where)
+
+    def _handle_native_early_exit(
+        self, node: ast.If | ast.While, early_exit: tuple[ast.AST, str]
+    ) -> list[ast.stmt]:
+        """Keep an ``if``/``while`` that owns an early exit as native Python.
+
+        Outlining the statement into a region function would detach its
+        ``return``/``raise`` (or the ``break``/``continue`` of the enclosing
+        native loop) from what they exit, so the statement stays a Python one
+        and its test is wrapped in ``early_exit_predicate(...)``: at trace time
+        a Meta test is evaluated by Python, a staged one raises
+        ``UNSUP_EARLY_EXIT`` at the exit's location. The arms are visited under
+        the NATIVE policy, so nested regions without an early exit are staged
+        as usual. Statements hoisted out of the test (ternary blocks) precede an
+        ``if``; a ``while`` re-evaluates them per iteration through a
+        ``while True:`` form.
+        """
+        offender, exit_type = early_exit
+        hoisted: list[ast.stmt] = []
+        with Region(self.session_data, new_value=hoisted):
+            test = self.visit(node.test)
+        assert isinstance(test, ast.expr)
+        where = f"`{self.session_data.function_name}`" + (
+            f" in `{self.session_data.class_name}`"
+            if self.session_data.class_name
+            else ""
+        )
+        guard = ast.copy_location(
+            ast.Call(
+                func=create_module_attribute(
+                    "early_exit_predicate",
+                    lineno=node.test.lineno,
+                    col_offset=node.test.col_offset,
+                ),
+                args=[test],
+                keywords=[
+                    ast.keyword(arg="kind", value=ast.Constant(value=exit_type)),
+                    ast.keyword(arg="where", value=ast.Constant(value=where)),
+                    ast.keyword(
+                        arg="filename",
+                        value=ast.Constant(value=self.session_data.file_name),
+                    ),
+                    *(
+                        ast.keyword(
+                            arg=key,
+                            value=ast.Constant(value=getattr(offender, key, None)),
+                        )
+                        for key in ("lineno", "col_offset", "end_col_offset")
+                    ),
+                ],
+            ),
+            node.test,
+        )
+        with self.session_data.control_flow_policy(ControlFlowPolicy.NATIVE):
+            body: list[ast.stmt] = []
+            with Region(self.session_data, new_value=body):
+                self._visit_stmts_into(node.body, body)
+            orelse: list[ast.stmt] = []
+            with Region(self.session_data, new_value=orelse):
+                self._visit_stmts_into(node.orelse, orelse)
+        if isinstance(node, ast.While) and hoisted:
+            # ``while True: <hoisted>; if not guard: <else>; break; <body>``
+            stop = ast.copy_location(
+                ast.If(
+                    test=ast.UnaryOp(op=ast.Not(), operand=guard),
+                    body=orelse + [ast.copy_location(ast.Break(), node)],
+                    orelse=[],
+                ),
+                node,
+            )
+            node.test = ast.copy_location(ast.Constant(value=True), node.test)
+            node.body = hoisted + [stop] + body
+            node.orelse = []
+            return [node]
+        node.test = guard
+        node.body = body
+        node.orelse = orelse
+        return hoisted + [node]
 
     def transform(
         self,
@@ -1186,6 +1313,27 @@ class DSLPreprocessor(ast.NodeTransformer):
         reads = self._reads_outside_region(node, born)
         for name, read in reads.items():
             self._raise_region_local_escapes(name, region, born[name], read)
+
+    def _if_born_locals(
+        self, node: ast.If, active_symbols: list[set[str]]
+    ) -> list[str]:
+        """Names first bound in an arm of a staged ``if`` and read after it.
+
+        With ``if_born_locals_escape`` these names join the region's write_args
+        (seeded ``None`` by ``get_locals_or_none``) so the executor joins the
+        arms' values; otherwise such a read is an error, the names being local
+        to the arm that binds them.
+        """
+        born = self._region_bound_names([*node.body, *node.orelse], active_symbols)
+        if not born:
+            return []
+        reads = self._reads_outside_region(node, born)
+        if not reads:
+            return []
+        if not self.if_born_locals_escape:
+            name, read = next(iter(reads.items()))
+            self._raise_region_local_escapes(name, "if", born[name], read)
+        return [name for name in born if name in reads]
 
     # =============================================================================
     # For loops
@@ -2136,6 +2284,10 @@ class DSLPreprocessor(ast.NodeTransformer):
             )
         return [ast.copy_location(assign, node)]
 
+    # =============================================================================
+    # If statements
+    # =============================================================================
+
     def _visit_runtime_dispatch(
         self,
         node: ast.If,
@@ -2150,6 +2302,63 @@ class DSLPreprocessor(ast.NodeTransformer):
         assert isinstance(visited_test, ast.expr)
         node.test = visited_test
 
+    def visit_If(self, node: ast.If) -> ast.If | list[ast.stmt]:
+        """Rewrite an ``if`` into an ``@if_selector`` region."""
+        if self.session_data.current_control_flow_policy is ControlFlowPolicy.NATIVE:
+            # The native policy is entered only while visiting the Python arm
+            # of a runtime-dispatched ``for``.  Keep an ``if`` native when
+            # outlining it would detach an early exit from that loop/function;
+            # ordinary nested conditions must still be staged.
+            early_exit = self._find_early_exit(node, "for")
+            if early_exit is not None:
+                return self._handle_native_early_exit(node, early_exit)
+            with self.session_data.control_flow_policy(ControlFlowPolicy.TRACE):
+                return self.visit_If(node)
+
+        # An ``if`` owning a ``return``/``raise`` cannot be outlined: it stays
+        # native and its test must be a Meta value at trace time.
+        early_exit = self._find_early_exit(node, "if")
+        if early_exit is not None:
+            return self._handle_native_early_exit(node, early_exit)
+
+        active_symbols = self.session_data.scope_manager.get_active_symbols()
+        active_callables = self.session_data.scope_manager.get_active_callables()
+
+        with self.session_data.scope_manager.enter_control_flow_scope():
+            (
+                yield_args,
+                full_write_args_count,
+                called_closures,
+                mutated_names,
+            ) = self.analyze_region_variables(node, active_symbols, active_callables)
+            # A name born in an arm and read after the ``if`` joins the stored
+            # group of the write_args, seeded ``None`` in the enclosing frame.
+            born_locals = self._if_born_locals(node, active_symbols)
+            if born_locals:
+                yield_args = (
+                    yield_args[:full_write_args_count]
+                    + born_locals
+                    + yield_args[full_write_args_count:]
+                )
+                full_write_args_count += len(born_locals)
+            exprs: list[ast.stmt] = []
+            if called_closures:
+                exprs.append(self._create_closure_check_call(called_closures, node))
+
+            func_name = f"if_region_{self.session_data.counter}"
+            self.session_data.counter += 1
+
+            func_def = self.create_if_function(
+                func_name, node, yield_args, full_write_args_count, mutated_names
+            )
+            assign = self.create_cf_call(func_name, yield_args, node)
+
+        # The writeback binds the if-born names in the enclosing scope.
+        for name in born_locals:
+            self.session_data.scope_manager.add_to_scope(name)
+
+        return exprs + [func_def] + assign
+
     def generate_get_locals_or_none_call(self, write_args: list[str]) -> ast.Call:
         """``get_locals_or_none(locals(), [...names])``: the region's seed values."""
         return ast.Call(
@@ -2161,6 +2370,217 @@ class DSLPreprocessor(ast.NodeTransformer):
                 self._names_constant_list(write_args),
             ],
             keywords=[],
+        )
+
+    def create_if_function(
+        self,
+        func_name: str,
+        node: ast.If,
+        write_args: list[str],
+        full_write_args_count: int,
+        mutated_names: Sequence[str] = (),
+    ) -> ast.FunctionDef:
+        """Create the ``@if_selector`` region of an ``if``.
+
+        The region defines ``then_block_N``/``else_block_N`` over the
+        write_args and returns ``if_executor(...)``; an ``elif`` becomes a
+        nested region inside the else block.
+        """
+        test_expr = self.visit(node.test)
+        pred_name = self.make_func_param_name("pred", write_args)
+        func_args = [ast.arg(arg=pred_name, annotation=None)]
+        func_args += [ast.arg(arg=var, annotation=None) for var in write_args]
+        func_args_then_else = [ast.arg(arg=var, annotation=None) for var in write_args]
+
+        then_body: list[ast.stmt] = []
+        with Region(self.session_data, new_value=then_body):
+            with self.session_data.scope_manager.enter_control_flow_scope():
+                self._visit_stmts_into(node.body, then_body)
+
+        # Create common return list for all blocks
+        return_list = ast.List(
+            elts=[ast.Name(id=var, ctx=ast.Load()) for var in write_args],
+            ctx=ast.Load(),
+        )
+
+        # Create common function arguments
+        func_decorator_arguments = ast.arguments(
+            posonlyargs=[], args=func_args, kwonlyargs=[], kw_defaults=[], defaults=[]
+        )
+        func_then_else_arguments = ast.arguments(
+            posonlyargs=[],
+            args=func_args_then_else,
+            kwonlyargs=[],
+            kw_defaults=[],
+            defaults=[],
+        )
+
+        then_block_name = f"then_block_{self.session_data.counter}"
+        else_block_name = f"else_block_{self.session_data.counter}"
+        elif_region_name = f"elif_region_{self.session_data.counter}"
+        self.session_data.counter += 1
+
+        # Create then block
+        then_block = ast.copy_location(
+            ast.FunctionDef(
+                name=then_block_name,
+                args=func_then_else_arguments,
+                body=then_body + [ast.Return(value=return_list)],
+                decorator_list=[],
+            ),
+            node,
+        )
+
+        # Decorator keywords
+        decorator_keywords = [
+            ast.keyword(arg="pred", value=test_expr),
+            ast.keyword(
+                arg="write_args",
+                value=self.generate_get_locals_or_none_call(write_args),
+            ),
+        ]
+
+        # Create decorator
+        decorator = ast.copy_location(
+            ast.Call(
+                func=create_module_attribute(
+                    self.DECORATOR_IF_STATEMENT,
+                    lineno=node.lineno,
+                    col_offset=node.col_offset,
+                ),
+                args=[],
+                keywords=decorator_keywords,
+            ),
+            node,
+        )
+
+        # Executor keywords
+        execute_keywords = [
+            ast.keyword(arg="pred", value=ast.Name(id=pred_name, ctx=ast.Load())),
+            ast.keyword(
+                arg="write_args",
+                value=ast.List(
+                    elts=[ast.Name(id=arg, ctx=ast.Load()) for arg in write_args],
+                    ctx=ast.Load(),
+                ),
+            ),
+            ast.keyword(
+                arg="full_write_args_count",
+                value=ast.Constant(value=full_write_args_count),
+            ),
+            ast.keyword(
+                arg="write_args_names",
+                value=self._names_constant_list(write_args),
+            ),
+            ast.keyword(
+                arg="mutated_names",
+                value=self._names_constant_tuple(mutated_names),
+            ),
+            ast.keyword(
+                arg="then_block", value=ast.Name(id=then_block_name, ctx=ast.Load())
+            ),
+        ]
+        # Handle different cases
+        if not write_args and node.orelse == []:
+            # No write_args case - only then_block needed
+            execute_call = ast.copy_location(
+                ast.Call(
+                    func=create_module_attribute(
+                        self.IF_EXECUTOR, lineno=node.lineno, col_offset=node.col_offset
+                    ),
+                    args=[],
+                    keywords=execute_keywords,
+                ),
+                node,
+            )
+            func_body = [then_block, ast.Return(value=execute_call)]
+        else:
+            # Create else block based on node.orelse
+            if node.orelse:
+                if len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If):
+                    # Handle elif case
+                    elif_node = node.orelse[0]
+                    nested_if_name = elif_region_name
+                    # `elif pred:` and `else: if pred:` share one AST. Statements
+                    # hoisted while visiting the elif test (ternary blocks) must
+                    # execute only when every earlier arm's condition is false:
+                    # collect them into the synthesized else block.
+                    elif_pre: list[ast.stmt] = []
+                    # Recursion for nested elif
+                    with Region(self.session_data, new_value=elif_pre):
+                        nested_if = self.create_if_function(
+                            nested_if_name,
+                            elif_node,
+                            write_args,
+                            full_write_args_count,
+                            mutated_names,
+                        )
+                    else_block = ast.FunctionDef(
+                        name=else_block_name,
+                        args=func_then_else_arguments,
+                        body=elif_pre
+                        + [
+                            nested_if,
+                            ast.Return(
+                                value=ast.Name(id=nested_if_name, ctx=ast.Load())
+                            ),
+                        ],
+                        decorator_list=[],
+                    )
+                else:
+                    else_body: list[ast.stmt] = []
+                    with Region(self.session_data, new_value=else_body):
+                        with self.session_data.scope_manager.enter_control_flow_scope():
+                            self._visit_stmts_into(node.orelse, else_body)
+
+                    # Regular else block
+                    else_block = ast.FunctionDef(
+                        name=else_block_name,
+                        args=func_then_else_arguments,
+                        body=else_body + [ast.Return(value=return_list)],
+                        decorator_list=[],
+                    )
+            else:
+                # Default else block
+                else_block = ast.FunctionDef(
+                    name=else_block_name,
+                    args=func_then_else_arguments,
+                    body=[ast.Return(value=return_list)],
+                    decorator_list=[],
+                )
+
+            ast.copy_location(else_block, node)
+            # Add else_block to execute keywords
+            execute_keywords.append(
+                ast.keyword(
+                    arg="else_block", value=ast.Name(id=else_block_name, ctx=ast.Load())
+                )
+            )
+
+            execute_call = ast.copy_location(
+                ast.Call(
+                    func=create_module_attribute(
+                        self.IF_EXECUTOR, lineno=node.lineno, col_offset=node.col_offset
+                    ),
+                    args=[],
+                    keywords=execute_keywords,
+                ),
+                node,
+            )
+            func_body = [
+                then_block,
+                else_block,
+                ast.Return(value=execute_call),
+            ]
+
+        return ast.copy_location(
+            ast.FunctionDef(
+                name=func_name,
+                args=func_decorator_arguments,
+                body=func_body,
+                decorator_list=[decorator],
+            ),
+            node,
         )
 
 
@@ -2314,6 +2734,26 @@ class DSLPreprocessor(ast.NodeTransformer):
 
 
     BARE_RANGE_STAGES: ClassVar[bool] = False
+
+
+    def _resolve_exception_class(self, expr: ast.expr | None) -> type | None:
+        """The exception class a ``raise``/``except`` expression names, when
+        it is a plain name (or a call of one) bound in the function's globals
+        or the builtins to an exception class; None otherwise."""
+        if isinstance(expr, ast.Call):
+            expr = expr.func
+        if not isinstance(expr, ast.Name):
+            return None
+        function_globals = (
+            self._session_data.function_globals if self._session_data else None
+        ) or {}
+        if expr.id in function_globals:
+            value = function_globals[expr.id]
+        else:
+            value = getattr(builtins, expr.id, None)
+        if isinstance(value, type) and issubclass(value, BaseException):
+            return value
+        return None
 
 
 

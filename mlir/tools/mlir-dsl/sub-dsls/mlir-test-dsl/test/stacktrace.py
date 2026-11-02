@@ -60,3 +60,23 @@ def staged_for(n: m.Int32) -> m.Int32:
 # CHECK-NEXT:       acc += int(None)
 # CHECK:        TypeError: int() argument must be
 show("FOR", staged_for, 3)
+
+
+@m.jit
+def staged_if(n: m.Int32) -> m.Int32:
+    if n > 1:
+        n = n + int(None)
+    return n
+
+# there: filtered, the two are one frame.
+# CHECK-LABEL:  --- IF
+# CHECK:          File "{{.*}}stacktrace.py", line [[#IF_LINE:]], in staged_if
+# CHECK-NEXT:       if n > 1:
+# UNFILTERED:     File "{{.*}}stacktrace.py", line [[#IF_LINE]], in if_region_{{[0-9]+}}
+# UNFILTERED-NEXT:  if n > 1:
+# FILTERED-NOT:   in if_region_
+# FILTERED-NOT:   {{[\\/]}}mlir{{[\\/]}}dsl{{[\\/]}}
+# CHECK:          File "{{.*}}stacktrace.py", line {{[0-9]+}}, in then_block_{{[0-9]+}}
+# CHECK-NEXT:       n = n + int(None)
+# CHECK:        TypeError: int() argument must be
+show("IF", staged_if, 3)
