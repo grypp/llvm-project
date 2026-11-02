@@ -134,6 +134,7 @@ class JitArgAdapterRegistry:
 
     # ``(predicate, adapter)`` pairs for arguments recognised by a protocol
     # rather than a type (``__dlpack__``); tried after the type-keyed lookups.
+    protocol_jit_arg_adapters: tuple[tuple[Callable[[object], bool], Any], ...] = ()
 
     @classmethod
     def register_jit_arg_adapter(
@@ -361,10 +362,31 @@ class JitArgAdapterRegistry:
                     },
                 )
 
+        if adapter is None:
+            for predicate, candidate in cls.protocol_jit_arg_adapters:
+                if predicate(arg):
+                    adapter = candidate
+                    break
+
         if adapter is None and cls._record_policies:
             adapter = cls._default_dataclass_adapter_for(arg)
         return adapter
 
+    @classmethod
+    def register_protocol_adapter(
+        cls, predicate: Callable[[object], bool], adapter: Any
+    ) -> None:
+        """Register ``adapter`` for every argument ``predicate`` accepts.
+
+        Protocol adapters are consulted after the type-keyed registries, in
+        registration order; registering the same pair twice is a no-op.
+        """
+        with cls._write_lock:
+            if (predicate, adapter) not in cls.protocol_jit_arg_adapters:
+                cls.protocol_jit_arg_adapters = (
+                    *cls.protocol_jit_arg_adapters,
+                    (predicate, adapter),
+                )
 
     @classmethod
     def _default_dataclass_adapter_for(cls, arg: object) -> Any:

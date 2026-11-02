@@ -51,6 +51,8 @@ Typed `Pointer` values support address arithmetic, address spaces, scalar loads 
 
 An optional compiler plugin runs the DSL-owned pass pipeline and invokes the resulting code through the execution engine. `compile()` returns a reusable compiled callable.
 
+The DLPack adapter accepts supported buffers as pointer arguments and validates their dtype, layout and ownership.
+
 The call keywords `pipeline`, `container_attrs`, `no_cache`, `extra_link_libs`
 and `compile_only` belong to the framework. They do not bind to user Meta
 parameters; use different names for compile-time keyword arguments.

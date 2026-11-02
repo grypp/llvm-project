@@ -111,6 +111,6 @@ def total(p: m.Pointer[m.Int32], n: m.Int32) -> m.Int32:
 
 
 data = np.arange(1000, dtype=np.int32)
-results = {total(data.ctypes.data, 1000) for _ in range(3)}
+results = {total(data, 1000) for _ in range(3)}
 print("SUM:", *sorted(results))
 # CHECK: SUM: 499500

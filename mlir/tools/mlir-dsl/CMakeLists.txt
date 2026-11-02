@@ -28,6 +28,21 @@ declare_mlir_python_sources(MLIRPythonSources.DSL.Core
     dsl/util/tree_utils.py
 )
 
+declare_mlir_python_sources(MLIRPythonSources.DSL.adapters
+  ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
+  ADD_TO_PARENT MLIRPythonSources.DSL.Python
+  SOURCES
+    dsl/plugins/adapters/__init__.py
+)
+
+declare_mlir_python_sources(MLIRPythonSources.DSL.adapters.dlpack
+  ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
+  ADD_TO_PARENT MLIRPythonSources.DSL.Python
+  SOURCES
+    dsl/plugins/adapters/dlpack/__init__.py
+    dsl/plugins/adapters/dlpack/plugin.py
+)
+
 declare_mlir_python_sources(MLIRPythonSources.DSL.astpreprocessor
   ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
   ADD_TO_PARENT MLIRPythonSources.DSL.Python
@@ -77,6 +92,13 @@ declare_mlir_python_sources(MLIRPythonSources.DSL.typeops
     dsl/plugins/type_ops/llvm.py
     dsl/plugins/type_ops/upstream_dialects.py
     dsl/plugins/type_ops/vector.py
+)
+
+declare_mlir_python_extension(MLIRPythonExtension.DSL.Dlpack
+  MODULE_NAME _mlirDslDlpack
+  ADD_TO_PARENT MLIRPythonSources.DSL.Python
+  ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dsl/plugins/adapters/dlpack/csrc"
+  SOURCES DlpackPlugin.cpp
 )
 
 declare_mlir_python_sources(MLIRPythonSources.DSL.MlirTestDSL
