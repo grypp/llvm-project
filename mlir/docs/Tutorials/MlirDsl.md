@@ -49,6 +49,8 @@ Typed `Pointer` values support address arithmetic, address spaces, scalar loads 
 
 `Vector` supports construction, arithmetic, extraction and reduction. Pointer operations can load and store vectors, including masked accesses.
 
+An optional compiler plugin runs the DSL-owned pass pipeline and invokes the resulting code through the execution engine. `compile()` returns a reusable compiled callable.
+
 The call keywords `pipeline`, `container_attrs`, `no_cache`, `extra_link_libs`
 and `compile_only` belong to the framework. They do not bind to user Meta
 parameters; use different names for compile-time keyword arguments.

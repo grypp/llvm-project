@@ -30,7 +30,7 @@ from ..dsl.plugins.ast_preprocessor.scf import (
     yield_,
 )
 
-from .mlir_dsl import LOWER_TO_LLVM, MlirTestDSL, jit
+from .mlir_dsl import LOWER_TO_LLVM, MlirTestDSL, compile, jit
 
 __all__ = [
     *_core_names,
@@ -48,5 +48,6 @@ __all__ = [
     "yield_",
     "LOWER_TO_LLVM",
     "MlirTestDSL",
+    "compile",
     "jit",
 ]

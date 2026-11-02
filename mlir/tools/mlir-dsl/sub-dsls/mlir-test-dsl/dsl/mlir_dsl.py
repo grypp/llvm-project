@@ -15,11 +15,15 @@ sub-DSL of your own is the same shape with another record
 """
 
 from .. import ir
-from typing import Any
 from types import SimpleNamespace
+from collections.abc import Callable
+from typing import Any
+
+from ..dsl.core.common import DSLUserCodeError
 from ..dsl.core.diagnostics import DiagId, register_dsl_package
 from ..dsl.core.dsl import BaseDSL
 from ..dsl.core.plugin import Plugins
+from ..dsl.plugins.compiler import execution_engine
 from ..dsl.plugins.decorators.jit import func
 from ..dsl.plugins.type_ops import UpstreamDialectTypeOps, arith, llvm, vector
 
@@ -31,7 +35,7 @@ from ..dsl.util.tree_utils import (
     register_leaf_protocol,
 )
 
-__all__ = ["LOWER_TO_LLVM", "MlirTestDSL", "jit"]
+__all__ = ["LOWER_TO_LLVM", "MlirTestDSL", "compile", "jit"]
 
 #: The passes lowering what the test DSL emits (arith, math, vector and llvm ops
 #: on builtin types, the ``scf`` control flow, the ``func.func`` entry) to the
@@ -118,6 +122,7 @@ class MlirTestDSL(BaseDSL):
 
     plugins = Plugins(
         type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),
+        compiler=execution_engine.Compiler(),
         # @jit over a func.func host entry, then @kernel over gpu.func.
         decorators=[func.Jit()],
     )
@@ -137,3 +142,16 @@ class MlirTestDSL(BaseDSL):
 
 
 jit = MlirTestDSL.jit
+
+
+def compile(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Compile a ``@jit`` function for ``args`` without running it.
+
+    :param func: A function decorated with ``jit``
+    :param args: Representative arguments; runtime values fix the argument
+        types, Python values specialise the compiled function
+    :return: The compiled function, callable with matching runtime arguments
+    """
+    if not hasattr(func, "_dsl_cls"):
+        raise DSLUserCodeError(DiagId.CALL_MISSING_JIT_DECORATOR)
+    return func(*args, compile_only=True, **kwargs)

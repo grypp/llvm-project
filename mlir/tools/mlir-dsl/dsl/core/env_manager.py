@@ -450,6 +450,9 @@ class EnvironmentVarManager(LogEnvironmentManager):
     show_stacktrace: bool = env_var(
         "SHOW_STACKTRACE", affects_compile=False, default=lambda mgr: mgr.debug
     )
+    enable_pass_profiling: bool = env_var(
+        "ENABLE_PASS_PROFILING", affects_compile=False, default=False
+    )
     filter_stacktrace: bool = env_var(
         "FILTER_STACKTRACE",
         affects_compile=False,
@@ -470,6 +473,8 @@ class EnvironmentVarManager(LogEnvironmentManager):
         "WARNINGS_IGNORE", affects_compile=False, default=False
     )
     pipeline: str | None = env_var("PIPELINE", affects_compile=True, default=None)
+    # MLIR runtime libraries linked by the JIT.
+    shared_libs: str | None = env_var("LIBS", affects_compile=True)
     loc_tracebacks: int = env_var("LOC_TRACEBACKS", affects_compile=True, default=0)
 
     def __init__(self, prefix: str = "DSL") -> None:
