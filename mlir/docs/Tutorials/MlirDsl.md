@@ -63,6 +63,8 @@ Staged `if`, `elif` and `else` statements merge branch results. Unsupported earl
 
 Staged `while` loops carry values between their condition and body regions.
 
+The preprocessor handles conditional expressions, Boolean expressions, comparison chains and supported builtin redirection.
+
 The call keywords `pipeline`, `container_attrs`, `no_cache`, `extra_link_libs`
 and `compile_only` belong to the framework. They do not bind to user Meta
 parameters; use different names for compile-time keyword arguments.

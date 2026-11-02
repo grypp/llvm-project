@@ -308,6 +308,40 @@ except TypeError:
 # CHECK: PY TYPEERROR
 
 
+# --- Boolean: `and`/`or`/`not` go through the executor contract
+# (`__dsl_and__`/`__dsl_or__`/`__dsl_not__`): a select on `x != 0` (`cmpf
+# une` for floats) with an `arith.andi` fast path for Boolean and Boolean;
+# `-Boolean` is a user error.
+@m.jit
+def logic(a: I32, b: I32, f: F32, p: B, q: B) -> I32:
+    x = a and b  # select(a != 0, b, a)
+    y = a or b  # select(a != 0, a, b)
+    z = not a  # a == 0
+    w = p and q  # Boolean and Boolean: one andi on i1
+    g = f or 1.0  # floats test with `cmpf une`
+    return x * 1000 + y * 100 + I32(z) * 10 + I32(w) + I32(g)
+
+
+# CHECK-LABEL: func.func @logic(
+# CHECK-SAME:    %[[A:[^:]+]]: i32, %[[B:[^:]+]]: i32, %[[F:[^:]+]]: f32, %[[P:[^:]+]]: i1, %[[Q:[^:]+]]: i1) -> i32
+# CHECK:         %[[T0:.+]] = arith.cmpi ne, %[[A]], %{{.+}} : i32
+# CHECK:         arith.select %[[T0]], %[[B]], %[[A]] : i32
+# CHECK:         %[[T1:.+]] = arith.cmpi ne, %[[A]], %{{.+}} : i32
+# CHECK:         arith.select %[[T1]], %[[A]], %[[B]] : i32
+# CHECK:         arith.cmpi eq, %[[A]], %{{.+}} : i32
+# CHECK:         arith.andi %[[P]], %[[Q]] : i1
+# CHECK:         %[[TF:.+]] = arith.cmpf une, %[[F]], %{{.+}} : f32
+# CHECK:         arith.select %[[TF]], %[[F]], %{{.+}} : f32
+# EXEC:          RESULT: 712 7302
+print("RESULT:", logic(0, 7, 0.0, True, True), logic(3, 7, 2.0, True, False))
+show("DSL_BOOL", I32(5).__dsl_and__(3), I32(0).__dsl_or__(3), B(True).__dsl_not__())
+show("DSL_BOOL float", F32(-0.1).__dsl_bool__(), F32(0.0).__dsl_not__())
+err("-Boolean", lambda: -B(True))
+# CHECK: DSL_BOOL: Int32(3) Int32(3) False
+# CHECK: DSL_BOOL float: Boolean(True) True
+# CHECK: -Boolean: <free-form>
+
+
 # --- Casts: a dtype constructor picks the `arith` cast from the source and
 # target signedness and kind (Boolean zero-extends, `Boolean(x)` compares
 # with zero); `cast()` accepts an abstract target the value already
