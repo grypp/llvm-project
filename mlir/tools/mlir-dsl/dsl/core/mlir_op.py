@@ -135,6 +135,9 @@ class OpEmitter:
     def int_to_int(self, *args: Any, **kwargs: Any) -> Any:
         return self._unsupported("int_to_int")
 
+    def minmax(self, *args: Any, **kwargs: Any) -> Any:
+        return self._unsupported("minmax")
+
 
 def current_emitter() -> OpEmitter:
     """The ``type_ops`` plugin of the tracing DSL."""

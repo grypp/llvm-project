@@ -17,10 +17,13 @@ trace a ``Pointer`` holds a host address and a struct its host field values,
 so both can be passed to a ``@jit`` function.
 """
 
+import builtins
 import ctypes
+import functools
 import math
 import operator
 import struct as _pystruct
+from abc import abstractmethod
 from typing import (
     Any,
     Callable,
@@ -142,6 +145,64 @@ class NumericMeta(DslType):
         if not is_abstract:
             _register_dtype(new_cls)
         return new_cls
+
+    def n_bytes(cls, n_elements: int) -> int:
+        """Return the storage byte count for ``n_elements`` dtype elements."""
+        return n_elements * cls.bytes
+
+    @property
+    def numpy_dtype(cls) -> Optional[type]:
+        """Return the NumPy scalar type for this dtype, or None if it has none.
+
+        NumPy is an optional dependency, so it is imported on first access
+        rather than at module load: nothing else in the type system needs it.
+        """
+        if cls._np_dtype_name is None:
+            return None
+
+        import numpy
+
+        return getattr(numpy, cls._np_dtype_name, None)
+
+    @property
+    @abstractmethod
+    def is_integer(cls) -> bool:
+        ...
+
+    @property
+    @abstractmethod
+    def is_float(cls) -> bool:
+        ...
+
+    @property
+    @abstractmethod
+    def zero(cls) -> Union[int, float]:
+        ...
+
+    def is_same_kind(cls, other: Type) -> bool:
+        """True when ``other`` is an integer dtype like this one, or a float one."""
+        return cls.is_integer == other.is_integer or cls.is_float == other.is_float
+
+    def isinstance(cls, value: Any) -> bool:
+        """Check if the value is a compatible type with the numeric type.
+
+        :param value: The value to check
+        :type value: Any
+        :return: True if the value is compatible with the numeric type
+        :rtype: bool
+        """
+        if isinstance(value, Numeric):
+            return value.dtype is cls
+        elif isinstance(value, ir.Value):
+            return _lookup_mlir_type(value.type) is cls
+        elif isinstance(value, bool):
+            return cls.is_integer
+        elif isinstance(value, int):
+            return cls.is_integer
+        elif isinstance(value, float):
+            return cls.is_float
+        else:
+            return False
 
     @property
     def scalar_mlir_type(cls) -> ir.Type:
@@ -326,6 +387,19 @@ class IntegerMeta(NumericMeta):
         else:
             return 2**cls.width - 1
 
+    def recast_width(cls, width: int) -> Type["Integer"]:
+        """Return the signed integer dtype of ``width`` bits."""
+        type_map = {
+            8: Int8,
+            16: Int16,
+            32: Int32,
+            64: Int64,
+            128: Int128,
+        }
+        if width not in type_map:
+            raise DSLRuntimeError(f"Unsupported integer width: {width}")
+        return type_map[width]
+
 
 class FloatMeta(NumericMeta):
     """Metaclass for floating-point types.
@@ -395,6 +469,14 @@ class FloatMeta(NumericMeta):
     def zero(cls) -> float:
         return 0.0
 
+    @property
+    def exponent_width(cls) -> int:
+        return cls._exponent_width
+
+    @property
+    def mantissa_width(cls) -> int:
+        return cls._mantissa_width
+
     def recast_width(cls, width: int) -> Type["Float"]:
         """Return the IEEE float dtype of ``width`` bits (16, 32 or 64).
 
@@ -402,7 +484,9 @@ class FloatMeta(NumericMeta):
         family at the wider of the two operand widths.
         """
         type_map = {
+            16: Float16,
             32: Float32,
+            64: Float64,
         }
         if width not in type_map:
             raise DSLRuntimeError(f"Unsupported float width: {width}")
@@ -508,7 +592,7 @@ def _promote_float(
 
     # If one type is integer, convert it to the float type
     if a_type.is_float != b_type.is_float:
-        if max(a_width, b_width) != 32:
+        if max(a_width, b_width) not in (16, 32, 64):
             raise unsupported()
         if a_type.is_float:
             b_type = a_type.recast_width(max(a_width, b_width))  # type: ignore[attr-defined]
@@ -522,8 +606,12 @@ def _promote_float(
         res_type = b_type
     elif a_width == b_width:
         # Same bitwidth - handle special cases like TFloat32 -> Float32 and BFloat16 -> Float16
-        if a_type is Float32 or b_type is Float32:
+        if a_type is Float64 or b_type is Float64:
+            res_type = Float64
+        elif a_type is Float32 or b_type is Float32:
             res_type = Float32
+        elif a_type is Float16 or b_type is Float16:
+            res_type = Float16
         else:
             raise unsupported()
     else:
@@ -1415,7 +1503,9 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
 # ``struct`` round-trips. Only these standard formats are probed; non-IEEE /
 # narrow types (bf16, tf32, fp8, fp6, fp4) are absent and narrow later in IR.
 _IEEE_FLOAT_PROBE: dict = {
+    "Float16": ("e", 65504.0, 2.0**-24),
     "Float32": ("f", 3.4028234663852886e38, 2.0**-149),
+    "Float64": ("d", 1.7976931348623157e308, 2.0**-1074),
 }
 
 
@@ -1585,11 +1675,80 @@ class Boolean(Integer, metaclass=IntegerMeta, width=1, signed=True, mlir_type=T.
 # =============================================================================
 
 
+class Int2(
+    Integer,
+    metaclass=IntegerMeta,
+    width=2,
+    signed=True,
+    mlir_type=lambda: T.i(2),
+):
+    ...
+
+
+class Int4(
+    Integer,
+    metaclass=IntegerMeta,
+    width=4,
+    signed=True,
+    mlir_type=lambda: T.i(4),
+):
+    ...
+
+
+class Int8(Integer, metaclass=IntegerMeta, width=8, signed=True, mlir_type=T.i8):
+    ...
+
+
+class Int16(Integer, metaclass=IntegerMeta, width=16, signed=True, mlir_type=T.i16):
+    ...
+
+
 class Int32(Integer, metaclass=IntegerMeta, width=32, signed=True, mlir_type=T.i32):
     ...
 
 
 class Int64(Integer, metaclass=IntegerMeta, width=64, signed=True, mlir_type=T.i64):
+    ...
+
+
+class Int128(
+    Integer, metaclass=IntegerMeta, width=128, signed=True, mlir_type=lambda: T.i(128)
+):
+    ...
+
+
+class Uint8(Integer, metaclass=IntegerMeta, width=8, signed=False, mlir_type=T.i8):
+    ...
+
+
+class Uint16(Integer, metaclass=IntegerMeta, width=16, signed=False, mlir_type=T.i16):
+    ...
+
+
+class Uint32(Integer, metaclass=IntegerMeta, width=32, signed=False, mlir_type=T.i32):
+    ...
+
+
+class Uint64(Integer, metaclass=IntegerMeta, width=64, signed=False, mlir_type=T.i64):
+    ...
+
+
+class Uint128(
+    Integer, metaclass=IntegerMeta, width=128, signed=False, mlir_type=lambda: T.i(128)
+):
+    ...
+
+
+class Float64(
+    Float,
+    metaclass=FloatMeta,
+    width=64,
+    mlir_type=T.f64,
+    exponent_width=11,
+    mantissa_width=52,
+    np_dtype_name="float64",
+    ctype=ctypes.c_double,
+):
     ...
 
 
@@ -1606,9 +1765,235 @@ class Float32(
     ...
 
 
+class TFloat32(
+    Float,
+    metaclass=FloatMeta,
+    width=32,
+    mlir_type=T.tf32,
+    exponent_width=8,
+    mantissa_width=10,
+):
+    ...
+
+
+class Float16(
+    Float,
+    metaclass=FloatMeta,
+    width=16,
+    mlir_type=T.f16,
+    exponent_width=5,
+    mantissa_width=10,
+    np_dtype_name="float16",
+    ctype=ctypes.c_uint16,
+):
+    @classmethod
+    def _to_ctype(cls, value: Union[bool, int, float]) -> ctypes.c_uint16:
+        """Marshal ``value`` as its IEEE-754 binary16 bit pattern.
+
+        Two cases need handling beyond a plain ``struct`` pack:
+
+        * NaN. ``struct`` collapses every NaN to the canonical quiet pattern,
+          which would turn a signaling NaN into a quiet one and drop the
+          payload. Narrow the payload explicitly instead, keeping the high
+          mantissa bits and forcing a nonzero payload so the result cannot
+          decay into an infinity.
+        * Finite overflow. ``struct`` raises rather than saturating to inf.
+        """
+        value = float(value)
+        if value != value:
+            double_bits = _pystruct.unpack("<Q", _pystruct.pack("<d", value))[0]
+            sign = (double_bits >> 48) & 0x8000
+            payload = (double_bits & ((1 << 52) - 1)) >> 42
+            bits = sign | 0x7C00 | (payload or 1)
+        else:
+            try:
+                bits = _pystruct.unpack("<H", _pystruct.pack("<e", value))[0]
+            except OverflowError:
+                bits = 0xFC00 if value < 0 else 0x7C00
+        return ctypes.c_uint16(bits)
+
+
+class BFloat16(
+    Float,
+    metaclass=FloatMeta,
+    width=16,
+    mlir_type=T.bf16,
+    exponent_width=8,
+    mantissa_width=7,
+    np_dtype_name="bfloat16",
+    ctype=ctypes.c_uint16,
+):
+    @classmethod
+    def _to_ctype(cls, value: Union[bool, int, float]) -> ctypes.c_uint16:
+        """Marshal ``value`` as bfloat16: the high 16 bits of its binary32 form."""
+        value = float(value)
+        try:
+            bits = _pystruct.unpack("<I", _pystruct.pack("<f", value))[0]
+        except OverflowError:
+            # binary32 pack raises rather than saturating to inf.
+            bits = 0xFF800000 if value < 0 else 0x7F800000
+        return ctypes.c_uint16(bits >> 16)
+
+
+class Float8E5M2(
+    Float,
+    metaclass=FloatMeta,
+    width=8,
+    mlir_type=T.f8E5M2,
+    exponent_width=5,
+    mantissa_width=2,
+):
+    ...
+
+
+class Float8E4M3(
+    Float,
+    metaclass=FloatMeta,
+    width=8,
+    mlir_type=T.f8E4M3,
+    exponent_width=4,
+    mantissa_width=3,
+):
+    ...
+
+
+class Float8E4M3FN(
+    Float,
+    metaclass=FloatMeta,
+    width=8,
+    mlir_type=T.f8E4M3FN,
+    exponent_width=4,
+    mantissa_width=3,
+):
+    ...
+
+
+class Float8E4M3B11FNUZ(
+    Float,
+    metaclass=FloatMeta,
+    width=8,
+    mlir_type=T.f8E4M3B11FNUZ,
+    exponent_width=4,
+    mantissa_width=3,
+):
+    ...
+
+
+class Float8E3M4(
+    Float,
+    metaclass=FloatMeta,
+    width=8,
+    mlir_type=T.f8E3M4,
+    exponent_width=3,
+    mantissa_width=4,
+):
+    ...
+
+
+class Float8E8M0FNU(
+    Float,
+    metaclass=FloatMeta,
+    width=8,
+    mlir_type=T.f8E8M0FNU,
+    exponent_width=8,
+    mantissa_width=0,
+):
+    ...
+
+
+class Float8E5M3FNU(
+    Float,
+    metaclass=FloatMeta,
+    width=8,
+    mlir_type=T.f8E5M3FNU,
+    exponent_width=5,
+    mantissa_width=3,
+):
+    ...
+
+
+class Float8E5M2FNUZ(
+    Float,
+    metaclass=FloatMeta,
+    width=8,
+    mlir_type=ir.Float8E5M2FNUZType.get,
+    exponent_width=5,
+    mantissa_width=2,
+):
+    ...
+
+
+class Float8E4M3FNUZ(
+    Float,
+    metaclass=FloatMeta,
+    width=8,
+    mlir_type=ir.Float8E4M3FNUZType.get,
+    exponent_width=4,
+    mantissa_width=3,
+):
+    ...
+
+
+class Float4E2M1FN(
+    Float,
+    metaclass=FloatMeta,
+    width=4,
+    mlir_type=T.f4E2M1FN,
+    exponent_width=2,
+    mantissa_width=1,
+):
+    ...
+
+
+class Float6E3M2FN(
+    Float,
+    metaclass=FloatMeta,
+    width=6,
+    mlir_type=T.f6E3M2FN,
+    exponent_width=3,
+    mantissa_width=2,
+):
+    ...
+
+
+class Float6E2M3FN(
+    Float,
+    metaclass=FloatMeta,
+    width=6,
+    mlir_type=T.f6E2M3FN,
+    exponent_width=2,
+    mantissa_width=3,
+):
+    ...
+
+
 # =============================================================================
 # dtype lookup
 # =============================================================================
+
+
+def dtype(dtype_: str) -> Type[Numeric]:
+    """Return the dtype class named ``dtype_`` (``"Int32"``, ``"Float32"``, ...)."""
+    t = _NAME_TO_DTYPE.get(dtype_) if isinstance(dtype_, str) else None
+    if t is None:
+        raise DSLUserCodeError(DiagId.TYPE_UNKNOWN_DTYPE_NAME, name=str(dtype_))
+    return t
+
+
+def from_numpy_dtype(name: Any) -> Type[Numeric]:
+    """Return the dtype whose NumPy scalar type is spelled ``name``.
+
+    ``name`` is a ``numpy.dtype``, or its name (``"float32"``, ``"int8"``,
+    ``"bool"``); frameworks that spell dtypes as NumPy does (``"bfloat16"``)
+    resolve too.
+    """
+    name = getattr(name, "name", name)
+    t = None
+    if isinstance(name, str):
+        t = _NP_NAME_TO_DTYPE.get(name) or _NP_NAME_TO_DTYPE.get(f"{name}_")
+    if t is None:
+        raise DSLUserCodeError(DiagId.TYPE_UNKNOWN_DTYPE_NAME, name=str(name))
+    return t
 
 
 def _mlir_type_index() -> dict:
@@ -1643,6 +2028,59 @@ def _lookup_mlir_type(mlir_type: ir.Type) -> Optional[Type[Numeric]]:
     return _lookup_scalar_type(scalar)
 
 
+# =============================================================================
+# The DSL's max and min
+# =============================================================================
+
+
+def _minmax(is_min: bool, *args: Any, loc: Any = None, ip: Any = None) -> Any:
+    """min/max over scalars and iterables of scalars; the result dtype is the
+    operands' promoted dtype, Python-only operands fold in Python."""
+    # ``core/staging.py`` imports this module; import ``is_mlir_op`` on use.
+    from ..core.staging import is_mlir_op
+
+    values: list[Any] = []
+    for arg in args:
+        values.extend(arg if isinstance(arg, (list, tuple)) else [arg])
+    if not values:
+        raise DSLUserCodeError(
+            DiagId.CALL_ARGUMENTS,
+            function_name="min" if is_min else "max",
+            detail="at least one value is required",
+            suggestion="Pass one or more scalars, or a non-empty list or tuple of them.",
+        )
+
+    def minmax_op(lhs: Any, rhs: Any) -> Any:
+        if not isinstance(lhs, Numeric) and not isinstance(rhs, Numeric):
+            if not is_mlir_op(lhs) and not is_mlir_op(rhs):
+                return builtins.min(lhs, rhs) if is_min else builtins.max(lhs, rhs)
+        a, b, res_type = _binary_op_type_promote(as_numeric(lhs), as_numeric(rhs))
+        a, b = a.to(res_type), b.to(res_type)
+        signed = getattr(res_type, "signed", None)
+        return res_type(
+            _emitter().minmax(
+                a.ir_value(loc=loc, ip=ip),
+                b.ir_value(loc=loc, ip=ip),
+                is_min=is_min,
+                signed=signed,
+                loc=loc,
+                ip=ip,
+            )
+        )
+
+    return functools.reduce(minmax_op, values[1:], values[0])
+
+
+def max_(*args: Any, loc: Any = None, ip: Any = None) -> Any:
+    """The DSL's ``max``: the result type follows the operand types, not the values."""
+    return _minmax(False, *args, loc=loc, ip=ip)
+
+
+def min_(*args: Any, loc: Any = None, ip: Any = None) -> Any:
+    """The DSL's ``min``: the result type follows the operand types, not the values."""
+    return _minmax(True, *args, loc=loc, ip=ip)
+
+
 __all__ = [
     "DslType",
     "Numeric",
@@ -1651,11 +2089,39 @@ __all__ = [
     "FloatMeta",
     "Boolean",
     "Integer",
+    "Int2",
+    "Int4",
+    "Int8",
+    "Int16",
     "Int32",
     "Int64",
+    "Int128",
+    "Uint8",
+    "Uint16",
+    "Uint32",
+    "Uint64",
+    "Uint128",
     "Float",
+    "Float16",
+    "BFloat16",
+    "TFloat32",
     "Float32",
+    "Float64",
+    "Float8E5M2",
+    "Float8E4M3",
+    "Float8E4M3FN",
+    "Float8E4M3B11FNUZ",
+    "Float8E3M4",
+    "Float8E8M0FNU",
+    "Float8E5M3FNU",
+    "Float8E5M2FNUZ",
+    "Float8E4M3FNUZ",
+    "Float4E2M1FN",
+    "Float6E2M3FN",
+    "Float6E3M2FN",
     "ALL_DTYPES",
+    "dtype",
+    "from_numpy_dtype",
     "as_numeric",
     "cast",
 ]

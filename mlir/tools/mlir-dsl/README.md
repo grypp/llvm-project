@@ -36,3 +36,5 @@ MLIR, then run `check-mlir-dsl` to exercise the tracing tests.
 ## Available capabilities
 
 Typed scalar parameters become SSA block arguments. Numeric operators dispatch through the selected `type_ops` emitter, so the same Python expression can target different dialects.
+
+The scalar catalogue includes signed and unsigned integers, standard floating-point types and supported low-precision formats. Casts and promotions validate supported combinations.

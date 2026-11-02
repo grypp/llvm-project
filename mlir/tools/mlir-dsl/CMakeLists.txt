@@ -70,5 +70,6 @@ add_mlir_python_modules(MLIRPythonModulesEmitCTestDSL
 
 if(MLIR_INCLUDE_TESTS)
   add_subdirectory(test)
+  add_subdirectory(sub-dsls/mlir-test-dsl/test)
   add_subdirectory(sub-dsls/emitc-test-dsl/test)
 endif()

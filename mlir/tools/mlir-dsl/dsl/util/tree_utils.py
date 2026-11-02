@@ -28,7 +28,7 @@ from typing import Any, NamedTuple, Optional
 from ... import ir
 from ..core.common import DSLRuntimeError, DSLUserCodeError
 from ..core.diagnostics import DiagId
-from ..types.typing import Numeric
+from ..types.typing import Numeric, _lookup_mlir_type
 
 __all__ = [
     "Leaf",
@@ -36,11 +36,28 @@ __all__ = [
     "PyTreeDef",
     "contains_leaf",
     "is_leaf",
+    "is_staged_leaf",
     "leaf_entry",
     "leaf_ir_types",
     "tree_flatten",
     "tree_leaves",
+    "wrap_ir_value",
 ]
+
+
+def is_frozen_dataclass(obj_or_cls: Any) -> bool:
+    """Check if an object or class is a dataclass declared with ``frozen=True``."""
+    cls = obj_or_cls if isinstance(obj_or_cls, type) else obj_or_cls.__class__
+    return (
+        dataclasses.is_dataclass(cls)
+        and getattr(cls, "__dataclass_params__", None) is not None
+        and cls.__dataclass_params__.frozen  # type: ignore[attr-defined]
+    )
+
+
+# =============================================================================
+# Leaf registry
+# =============================================================================
 
 
 class LeafEntry(NamedTuple):
@@ -92,6 +109,21 @@ def is_leaf(obj_or_cls: Any) -> bool:
     return leaf_entry(cls) is not None
 
 
+def is_staged_leaf(value: Any) -> bool:
+    """True for a leaf whose payload is an ``ir.Value``, or a raw ``ir.Value``.
+
+    A ``Numeric`` with a Python payload and a host ``Pointer`` are not staged.
+    """
+    entry = leaf_entry(type(value))
+    if entry is None:
+        return isinstance(value, ir.Value)
+    if entry.staged is not None:
+        return bool(entry.staged(value))
+    # No hook: a staged payload is an ``ir.Value`` somewhere in the instance.
+    payload = getattr(value, "__dict__", None) or {}
+    return any(isinstance(v, ir.Value) for v in payload.values())
+
+
 def contains_leaf(value: Any) -> bool:
     """True if ``value`` is, or holds inside containers, a leaf or a raw ``ir.Value``.
     The walk is wider than ``tree_flatten`` on purpose: tuples, lists, sets,
@@ -131,6 +163,32 @@ def contains_leaf(value: Any) -> bool:
         raise DSLUserCodeError(
             DiagId.CONTAINER_TOO_DEEP, var="value", type=type(value).__name__
         ) from None
+
+
+def wrap_ir_value(value: ir.Value) -> Any:
+    """Wrap a raw ``ir.Value`` in the DSL leaf that claims its type.
+
+    A scalar type of a registered dtype becomes that ``Numeric``; then
+    the registered leaves are asked in registration order, through their
+    ``wrap`` hook (the built-ins) or through ``ir_types`` when it needs no
+    prototype. No claimant raises ``TYPE_UNSUPPORTED_MLIR_TYPE``.
+    """
+    dt = _lookup_mlir_type(value.type)
+    if dt is not None:
+        return dt(value)
+    for entry in _leaf_registry.values():
+        if entry.wrap is not None:
+            wrapped = entry.wrap(value)
+            if wrapped is not None:
+                return wrapped
+            continue
+        try:
+            types = list(entry.ir_types(None))
+        except Exception:
+            continue
+        if types == [value.type]:
+            return entry.from_ir_values(None, [value])
+    raise DSLUserCodeError(DiagId.TYPE_UNSUPPORTED_MLIR_TYPE, mlir_type=str(value.type))
 
 
 # =============================================================================
@@ -272,6 +330,14 @@ def _tree_flatten(
             DiagId.CONTAINER_UNSUPPORTED, var=path or "value", type=type(x).__name__
         )
     return [], [], Leaf(meta=x)
+    if isinstance(x, ir.Value):
+        wrapped = wrap_ir_value(x)
+        entry = leaf_entry(type(wrapped))
+        if entry is None:
+            raise DSLRuntimeError(
+                f"wrap_ir_value returned an unregistered {type(wrapped).__qualname__}"
+            )
+        return _flatten_leaf(wrapped, entry, return_ir_values)
 
 
 def tree_leaves(treedef: PyTreeDef | Leaf) -> list[tuple[str, Leaf]]:

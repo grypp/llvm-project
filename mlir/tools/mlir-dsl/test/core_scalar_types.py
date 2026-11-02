@@ -90,7 +90,8 @@ with ir.Context(), ir.Location.unknown(), active_dsl(STAND_IN):
             text.append(
                 f"PROMOTED: {type(a + x).__name__} {type(a + w).__name__} {type(2 - a).__name__}"
             )
-            err("INT64 + FLOAT LITERAL", lambda: w + 1.5)
+            # Float64 exists from the registry PR on: the literal promotes to it.
+            text.append(f"INT64 + FLOAT LITERAL: {type(w + 1.5).__name__}")
             # -- comparisons are Boolean
             # CHECK: arith.cmpi slt, %[[A]], %[[B]] : i32
             # CHECK: arith.cmpf une, %[[X]], %[[X]] : f32
@@ -198,7 +199,9 @@ with ir.Context(), ir.Location.unknown(), active_dsl(STAND_IN):
             text.append(
                 f"FROM MLIR TYPE: {Numeric.from_mlir_type(T.i64()).__name__} {Numeric.from_mlir_type(T.bool()).__name__}"
             )
-            err("FROM MLIR TYPE F64", lambda: Numeric.from_mlir_type(T.f64()))
+            text.append(
+                f"FROM MLIR TYPE F64: {Numeric.from_mlir_type(T.f64()).__name__}"
+            )
             err("INT32 OF F64 VALUE", lambda: Int32(arith.const(1.0, T.f64())))
             # CHECK: return
             func.ReturnOp([])
@@ -325,7 +328,7 @@ print("\n".join(text))
 # CHECK: RESULTS: Int32 Int32 Float32 ?
 # CHECK: TRUEDIV: Float32
 # CHECK: PROMOTED: Float32 Int64 Int32
-# CHECK: INT64 + FLOAT LITERAL: TYPE_IMPLICIT_PROMOTION_UNSUPPORTED | `Int64` and `Float32` cannot be combined by `add` without an explicit conversion: the DSL does not pick a common type for them.
+# CHECK: INT64 + FLOAT LITERAL: Float64
 # CHECK: COMPARE: Boolean Boolean Boolean
 # CHECK: CONVERT: Float32 Int32 Int64 Int32 Boolean
 # CHECK: TO: Float32 Int32 True
@@ -345,7 +348,7 @@ print("\n".join(text))
 # CHECK: INFER: Int32 None
 # CHECK: MLIR TYPES: i32 i64 f32 i1
 # CHECK: FROM MLIR TYPE: Int64 Boolean
-# CHECK: FROM MLIR TYPE F64: TYPE_UNSUPPORTED_MLIR_TYPE | An MLIR value of type `f64` reached the DSL, but no DSL type claims that MLIR type.
+# CHECK: FROM MLIR TYPE F64: Float64
 # CHECK: INT32 OF F64 VALUE: NO ERROR
 # CHECK: MLIR TYPE OUTSIDE: CALL_OUTSIDE_JIT | `a DSL type's MLIR type or op` was called from plain Python, but it can only be used inside a function decorated with `@jit`.
 # CHECK: CAST ABSTRACT OUTSIDE: <free-form> | Cannot cast a `int` to the abstract type `Numeric`: no DSL is tracing, so there is no `type_ops` plugin to ask.

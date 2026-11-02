@@ -25,19 +25,25 @@ calls (``plugins/ast_preprocessor/helpers.py``) reach the active DSL's
 executor through the module-level ``executor`` proxy.
 """
 
+import dataclasses
 from inspect import Parameter
 from typing import Annotated, get_args, get_origin
 from collections.abc import Callable
 from typing import Any, Optional
 
+from ... import ir
+from .common import DSLRuntimeError, DSLUserCodeError, get_current_dsl
 from ..types.typing import NumericMeta
 from ..util.tree_utils import (
     contains_leaf,
+    is_frozen_dataclass,
     is_leaf,
+    is_staged_leaf,
 )
 
 __all__ = [
     "is_argument_meta",
+    "is_mlir_op",
     "is_reserved_python_func_arg",
 ]
 
@@ -112,3 +118,43 @@ def is_argument_meta(
     ):
         return True
     return not _is_dsl_type_annotation(arg_annotation) and not contains_leaf(arg)
+
+
+def _is_mlir_op_leaf(value: Any) -> bool:
+    """One value, no container walk: a raw ``ir.Value`` or ``ir.BlockArgumentList``,
+    or a registered leaf whose payload is an SSA value (a staged ``Int32``,
+    never a host one or a host ``Pointer``). ``BaseDSL.is_mlir_op``'s default."""
+    return isinstance(value, ir.BlockArgumentList) or is_staged_leaf(value)
+
+
+def _any_leaf(value: Any, judge: Callable[[Any], bool]) -> bool:
+    """Walk tuples, lists and frozen records; ``judge`` decides each leaf."""
+    if isinstance(value, (tuple, list)):
+        return any(_any_leaf(x, judge) for x in value)
+    if is_frozen_dataclass(value) and not isinstance(value, type):
+        return any(
+            _any_leaf(getattr(value, f.name, None), judge)
+            for f in dataclasses.fields(value)
+        )
+    return bool(judge(value))
+
+
+def is_mlir_op(value: Any) -> bool:
+    """Whether ``value`` is an MLIR op (its result) rather than a Python value.
+
+    A tuple, list or frozen record (a ``@struct``, a frozen dataclass) is an
+    MLIR op when any of its leaves is; dicts and other objects are Python
+    values. Each leaf is judged by the DSL that is tracing
+    (``BaseDSL.is_mlir_op``, which a sub-DSL with its own value model
+    overrides); outside a trace a leaf is an MLIR op when it holds an SSA
+    value. User code branches on it at trace time where Python values and
+    MLIR ops need different handling::
+
+        if is_mlir_op(n):
+            ...  # an MLIR op: build IR
+        else:
+            ...  # a Python value: plain Python
+    """
+    dsl = get_current_dsl()
+    judge = dsl.is_mlir_op if dsl is not None else _is_mlir_op_leaf
+    return _any_leaf(value, judge)
