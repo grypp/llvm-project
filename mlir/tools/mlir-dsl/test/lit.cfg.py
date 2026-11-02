@@ -50,6 +50,12 @@ llvm_config.with_environment(
 # ASan does not play well with the Python interpreter.
 config.environment["ASAN_OPTIONS"] = "detect_leaks=0"
 
+# MLIR_DSL_KEEP_IR dumps and the file cache go under MLIR_DSL_CACHE_DIR: keep
+# them out of the source tree and of the shared system temp dir.
+config.environment["MLIR_DSL_CACHE_DIR"] = os.path.join(
+    config.test_exec_root, "Output", "mlir_dsl_cache"
+)
+
 
 def have_host_jit_feature_support(feature_name):
     """Whether the host can run the ExecutionEngine (asked of mlir-runner)."""

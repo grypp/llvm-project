@@ -84,7 +84,7 @@ def main():
     def compiled():
         # A specialization is compiled, or loaded from the on-disk cache of an
         # earlier process (on by default, see 09): count both.
-        return dsl.cache_misses
+        return dsl.cache_misses + dsl.file_cache_hits
 
     check("affine(3, scale=2, bias=1)", affine(3.0, Affine(m.Float32(2.0), 1)), 7.0)
     before = compiled()

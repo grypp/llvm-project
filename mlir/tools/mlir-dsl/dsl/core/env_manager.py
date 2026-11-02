@@ -428,6 +428,7 @@ class EnvironmentVarManager(LogEnvironmentManager):
         phase times). Any other non-switch value is a file path for the report
         (default: off)
     - [DSL_NAME]_NO_CACHE: Disable JIT cache (default: False)
+    - [DSL_NAME]_FILE_CACHING: Cache lowered modules on disk (default: False)
     - [DSL_NAME]_JIT_CACHE_MAX_ELEMS: Capacity of the in-memory JIT cache, LRU eviction (default: unlimited)
     - [DSL_NAME]_LIBS: Path to dependent shared libraries (default: None)
     - [DSL_NAME]_LOC_TRACEBACKS: Maximum depth of location tracebacks (default: 0)
@@ -469,6 +470,8 @@ class EnvironmentVarManager(LogEnvironmentManager):
     verify_trace: bool = env_var("VERIFY_TRACE", affects_compile=False, default=False)
     # Governs whether results are cached, not what is compiled.
     no_cache: bool = env_var("NO_CACHE", affects_compile=False, default=False)
+    # Root for IR dumps and the file cache.
+    cache_dir: str | None = env_var("CACHE_DIR", affects_compile=False, default=None)
     dryrun: bool = env_var("DRYRUN", affects_compile=True, default=False)
     # Stored under _arch because the public spelling belongs to the arch property;
     # read_as sends the key through that property.
@@ -478,6 +481,8 @@ class EnvironmentVarManager(LogEnvironmentManager):
     warnings_ignore: bool = env_var(
         "WARNINGS_IGNORE", affects_compile=False, default=False
     )
+    # Governs whether results are cached, not what is compiled.
+    file_caching: bool = env_var("FILE_CACHING", affects_compile=False, default=False)
     # Capacity of the in-memory JIT cache; None is unlimited, 0 disables it.
     jit_cache_max_elems: int | None = env_var(
         "JIT_CACHE_MAX_ELEMS", affects_compile=False, default=None
