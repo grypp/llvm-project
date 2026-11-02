@@ -21,7 +21,7 @@ from ..dsl.core.diagnostics import DiagId, register_dsl_package
 from ..dsl.core.dsl import BaseDSL
 from ..dsl.core.plugin import Plugins
 from ..dsl.plugins.decorators.jit import func
-from ..dsl.plugins.type_ops import UpstreamDialectTypeOps, arith
+from ..dsl.plugins.type_ops import UpstreamDialectTypeOps, arith, llvm
 
 from ..dsl.util.tree_utils import (
     is_leaf,
@@ -117,7 +117,7 @@ class MlirTestDSL(BaseDSL):
     """
 
     plugins = Plugins(
-        type_ops=UpstreamDialectTypeOps(scalars=arith),
+        type_ops=UpstreamDialectTypeOps(scalars=arith, memory=llvm),
         # @jit over a func.func host entry, then @kernel over gpu.func.
         decorators=[func.Jit()],
     )

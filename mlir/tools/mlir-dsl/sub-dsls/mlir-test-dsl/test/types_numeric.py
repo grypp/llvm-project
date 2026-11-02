@@ -481,10 +481,12 @@ err("dtype(float32)", lambda: m.dtype("float32"))
 err("from_numpy_dtype(complex64)", lambda: npd("complex64"))
 with ir.Context(), active_dsl(m.MlirTestDSL()):
     err("from_mlir_type(index)", lambda: back(ir.IndexType.get()))
+err("align(6)", lambda: m.align(6))
 # CHECK: Int32(str): ARG_NOT_NUMERIC
 # CHECK: dtype(float32): TYPE_UNKNOWN_DTYPE_NAME
 # CHECK: from_numpy_dtype(complex64): TYPE_UNKNOWN_DTYPE_NAME
 # CHECK: from_mlir_type(index): TYPE_UNSUPPORTED_MLIR_TYPE
+# CHECK: align(6): ARG_INVALID_ALIGNMENT
 print(str(err("rendered", lambda: I8(1) * FP8(1.0))))
 # CHECK:      rendered: TYPE_IMPLICIT_PROMOTION_UNSUPPORTED
 # CHECK:      error[TYPE_IMPLICIT_PROMOTION_UNSUPPORTED]:{{.*}} `Int8` and `Float8E4M3FN` cannot be combined by `mul` without an explicit conversion

@@ -15,7 +15,8 @@ SSA type a value has and which op implements each operation:
   and conversion ops of ``Numeric``;
 * vectors: ``vector_type``/``vector_shape`` and ``from_elements``,
   ``broadcast``, ``extract``, ``reduce``;
-* pointers: ``pointer_type``/``pointer_space`` and ``load``, ``store``,
+* pointers: ``pointer_type``/``pointer_space``, ``address_dtype`` (the
+  integer width of an address per address space) and ``load``, ``store``,
   ``ptr_add``, ``inttoptr``, ``ptrtoint``, ``addrspacecast``.
 
 The types call :func:`current_emitter`: the ``type_ops`` plugin of the
@@ -68,6 +69,25 @@ class OpEmitter:
         makes the value an ``ARG_ANNOTATION_MISMATCH`` at the boundary: the
         default, so a plugin that does not decide rejects Python numbers
         there; a DSL value of the family is taken as it is either way."""
+        return None
+
+
+
+    def pointer_type(self, dtype: Any, address_space: int) -> ir.Type:
+        """The SSA type of a pointer to ``dtype`` in ``address_space``."""
+        return self._unsupported("pointer_type")
+
+    def pointer_space(self, mlir_type: ir.Type) -> int | None:
+        """The address space of a pointer SSA type of this dialect, or None
+        when it is not a pointer of the dialect."""
+        return None
+
+    def address_dtype(self, address_space: int) -> Any:
+        """The integer dtype of an address in ``address_space``: what
+        ``Pointer.toint()`` returns and what a Python address becomes in
+        ``Pointer.from_address`` there. None, the default, leaves it to the
+        types: the 64-bit integer. A plugin over a target whose addresses are
+        narrower in some address space answers that dtype for it."""
         return None
 
     # -- scalar ops (the ``Numeric`` operators) ------------------------------
@@ -143,6 +163,32 @@ class OpEmitter:
 
     def minmax(self, *args: Any, **kwargs: Any) -> Any:
         return self._unsupported("minmax")
+
+    # -- vector ops (``Vector``) ---------------------------------------------
+
+
+
+
+
+    # -- memory ops (``Pointer``) --------------------------------------------
+
+    def load(self, *args: Any, **kwargs: Any) -> Any:
+        return self._unsupported("load")
+
+    def store(self, *args: Any, **kwargs: Any) -> Any:
+        return self._unsupported("store")
+
+    def ptr_add(self, *args: Any, **kwargs: Any) -> Any:
+        return self._unsupported("ptr_add")
+
+    def inttoptr(self, *args: Any, **kwargs: Any) -> Any:
+        return self._unsupported("inttoptr")
+
+    def ptrtoint(self, *args: Any, **kwargs: Any) -> Any:
+        return self._unsupported("ptrtoint")
+
+    def addrspacecast(self, *args: Any, **kwargs: Any) -> Any:
+        return self._unsupported("addrspacecast")
 
 
 def current_emitter() -> OpEmitter:

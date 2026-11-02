@@ -109,7 +109,13 @@ class UpstreamDialectTypeOps(TypeOpsPlugin):
 
 
 
+    def pointer_type(self, dtype: Any, address_space: int) -> ir.Type:
+        return self._part("memory", "Pointer").pointer_type(dtype, address_space)
 
+    def pointer_space(self, mlir_type: ir.Type) -> int | None:
+        if self._memory is None:
+            return None
+        return self._memory.pointer_space(mlir_type)
 
     # -- scalar ops ----------------------------------------------------------
 
@@ -192,3 +198,31 @@ class UpstreamDialectTypeOps(TypeOpsPlugin):
 
 
     # -- memory ops ----------------------------------------------------------
+
+    def load(self, *args: Any, **kwargs: Any) -> Any:
+        return self._part("memory", "Pointer").load(*args, **kwargs)
+
+    def store(self, *args: Any, **kwargs: Any) -> Any:
+        return self._part("memory", "Pointer").store(*args, **kwargs)
+
+    def ptr_add(self, *args: Any, **kwargs: Any) -> Any:
+        return self._part("memory", "Pointer").ptr_add(*args, **kwargs)
+
+    def inttoptr(
+        self, value: ir.Value, address_space: int, *, loc: Any = None, ip: Any = None
+    ) -> Any:
+        return self._part("memory", "Pointer").inttoptr(
+            value, address_space, loc=loc, ip=ip
+        )
+
+    def ptrtoint(
+        self, ptr: ir.Value, int_type: ir.Type, *, loc: Any = None, ip: Any = None
+    ) -> Any:
+        return self._part("memory", "Pointer").ptrtoint(ptr, int_type, loc=loc, ip=ip)
+
+    def addrspacecast(
+        self, ptr: ir.Value, address_space: int, *, loc: Any = None, ip: Any = None
+    ) -> Any:
+        return self._part("memory", "Pointer").addrspacecast(
+            ptr, address_space, loc=loc, ip=ip
+        )

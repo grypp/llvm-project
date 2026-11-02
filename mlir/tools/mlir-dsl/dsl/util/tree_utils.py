@@ -32,7 +32,7 @@ from ... import ir
 from ..core.common import DSLRuntimeError, DSLUserCodeError
 from ..core.diagnostics import DiagId
 from ..core.mlir_op import current_emitter
-from ..types.typing import Numeric, _lookup_mlir_type
+from ..types.typing import Numeric, Pointer, _lookup_mlir_type
 
 __all__ = [
     "Leaf",
@@ -950,5 +950,20 @@ _add_entry(
         reference=False,
         prototype=lambda v: type(v),
         staged=lambda v: isinstance(v.value, ir.Value),
+    )
+)
+_add_entry(
+    LeafEntry(
+        Pointer,
+        ir_types=lambda p: [current_emitter().pointer_type(p[0], p[1])],
+        ir_values=lambda v: [v.ir_value()],
+        from_ir_values=lambda p, vs: Pointer(vs[0], dtype=p[0], space=p[1]),
+        marshal=lambda v: [v.marshal()],
+        reference=True,
+        prototype=lambda v: (v._dtype, v._addrspace),
+        staged=lambda v: v.is_staged,
+        wrap=lambda v: (
+            Pointer(v) if current_emitter().pointer_space(v.type) is not None else None
+        ),
     )
 )

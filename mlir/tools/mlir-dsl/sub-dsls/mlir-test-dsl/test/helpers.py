@@ -79,6 +79,23 @@ except ValueError as e:
 # CHECK: ATTR KIND: ARG_REJECTED_BY_OP True True
 # CHECK: ATTR VALUE: ARG_REJECTED_BY_OP True True
 # CHECK: UNCHANGED: True not a binding error
+
+
+@m.jit
+def stored(p: m.Pointer[m.Int32], x: m.Int32):
+    print("STORE:", p.store(x))
+    p.store(x, ordering="acquire")  # the verifier rejects an acquire store
+
+
+# A statement builder (`Pointer.store`) returns the op it built, so the wrapper
+# verifies it in every mode and names the builder; the `-> None` annotation
+# hands the caller None, not the op.
+# CHECK:      STORE: None
+# CHECK-NEXT: INTERNAL: Operation verification failed in 'store'
+storage = (ctypes.c_int32 * 1)(0)
+report(stored, ctypes.addressof(storage), 1)
+
+
 # A sub-DSL's root class replaces the wrapper of every operator and the driver
 # behind the binary ones through two class attributes: a class body that sets
 # `user_op` has its inherited operators re-wrapped with it at class creation,

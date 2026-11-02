@@ -37,7 +37,7 @@ from ... import ir
 from .common import DSLRuntimeError, _user_error, get_current_dsl
 from .diagnostics import DiagId
 from ..util.logger import log
-from ..types.typing import NumericMeta
+from ..types.typing import NumericMeta, TypedPointer
 from ..util.tree_utils import (
     contains_leaf,
     is_frozen_dataclass,
@@ -355,7 +355,7 @@ def _is_dsl_type_annotation(annotation: Any) -> bool:
     annotations (their arguments are Python values)."""
     if get_origin(annotation) is Annotated:
         annotation = get_args(annotation)[0]
-    if isinstance(annotation, (NumericMeta,)):
+    if isinstance(annotation, (NumericMeta, TypedPointer)):
         return True
     return isinstance(annotation, type) and is_leaf(annotation)
 

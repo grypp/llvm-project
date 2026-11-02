@@ -24,7 +24,9 @@ from ....core.diagnostics import DiagId
 from ....types.typing import (
     Boolean,
     DslType,
+    Pointer,
     Struct,
+    TypedPointer,
     _binary_op_type_promote,
     as_numeric,
 )
@@ -260,6 +262,16 @@ def _flatten_result(result_type: Any, value: Any) -> list[ir.Value]:
             for name, ann in result_type._field_annotations.items()
             for v in _flatten_result(ann, getattr(value, name))
         ]
+    if isinstance(result_type, TypedPointer):
+        if not isinstance(value, Pointer):
+            raise DSLUserCodeError(
+                DiagId.ARG_ANNOTATION_MISMATCH,
+                num=1,
+                arg_name="result",
+                expected=f"a `{result_type!r}`",
+                got=type(value).__name__,
+            )
+        return [value.ir_value()]
     return [result_type(value).ir_value()]
 
 
@@ -272,6 +284,8 @@ def _restore_result(result_type: Any, values: Any) -> Any:
                 for name, ann in result_type._field_annotations.items()
             }
         )
+    if isinstance(result_type, TypedPointer):
+        return Pointer(next(values), dtype=result_type.dtype, space=result_type.space)
     return result_type(next(values))
 
 

@@ -42,7 +42,13 @@ from typing import (
 
 from ... import ir
 from ...extras import types as T
-from ..core.common import DSLRuntimeError, DSLUserCodeError, get_current_dsl, report_warning
+from ..core.common import (
+    DSLRuntimeError,
+    DSLUserCodeError,
+    DSLUserCodeValueError,
+    get_current_dsl,
+    report_warning,
+)
 from ..core.diagnostics import DiagId, WarnId
 from ..core.mlir_op import current_emitter as _emitter
 from ..core.user_op import dsl_user_op
@@ -2474,6 +2480,17 @@ def min_(*args: Any, loc: Any = None, ip: Any = None) -> Any:
     return _minmax(True, *args, loc=loc, ip=ip)
 
 
+class align(int):
+    """An alignment in bytes: a positive power of two, else ``ARG_INVALID_ALIGNMENT``
+    (a ``ValueError`` too: the kind is right, the value is not)."""
+
+    def __new__(cls, value: int) -> "align":
+        if value <= 0 or (value & (value - 1)) != 0:
+            raise DSLUserCodeValueError(DiagId.ARG_INVALID_ALIGNMENT)
+        return super().__new__(cls, value)
+
+    def __str__(self) -> str:
+        return f"align({super().__str__()})"
 
 
 # =============================================================================
@@ -2481,14 +2498,727 @@ def min_(*args: Any, loc: Any = None, ip: Any = None) -> Any:
 # =============================================================================
 
 
+class TypedPointer:
+    """Type annotation object for a ``Pointer`` element type and memory space.
+
+    ``Pointer[dtype]`` and ``Pointer[dtype, space]`` return a ``TypedPointer``
+    for use in kernel/JIT signatures. It is not a pointer SSA value itself;
+    it carries the metadata needed to derive the corresponding MLIR argument
+    type and to adapt a host buffer or address passed for that parameter.
+
+    :param dtype: Element type such as ``Float32`` or ``Int8``.
+    :param space: Address space, an integer (``0`` is generic).
+
+    Example::
+
+        def kernel(data: Pointer[Float32]):
+            ...
+    """
+
+    def __init__(self, dtype: Type[Numeric], space: int = 0):
+        self.dtype = dtype
+        self.space = _normalize_address_space(space)
+
+    def __repr__(self) -> str:
+        return f"Pointer[{self.dtype}, {self.space}]"
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, TypedPointer):
+            return NotImplemented
+        return self.dtype is other.dtype and self.space == other.space
+
+    def __hash__(self) -> int:
+        return hash((self.dtype, self.space))
+
+    @property
+    def mlir_type(self) -> ir.Type:
+        return _emitter().pointer_type(self.dtype, self.space)
 
 
+def _normalize_address_space(space: Any) -> int:
+    """Return ``space`` as a plain address-space integer."""
+    space = getattr(space, "value", space)
+    if isinstance(space, bool) or not isinstance(space, int) or space < 0:
+        raise DSLRuntimeError(
+            f"an address space must be a non-negative int; got {space!r}"
+        )
+    return space
 
 
+def _vector_operand(value: Any) -> Optional[ir.Value]:
+    """Return the ``ir.Value`` of a vector-typed operand, else None."""
+    if isinstance(value, (Numeric, Pointer, Struct)):
+        return None
+    v = value
+    if not isinstance(v, ir.Value) and hasattr(v, "ir_value"):
+        v = v.ir_value()
+    if isinstance(v, ir.Value) and _emitter().vector_shape(v.type) is not None:
+        return v
+    return None
 
 
+class Pointer(ir.Value):
+    """A pointer value with element dtype metadata.
+    ``Pointer`` is the DSL's memory type. Inside a trace it wraps one pointer
+    SSA value of the DSL's ``type_ops`` plugin (``!llvm.ptr`` under the builtin type ops, a
+    rank-0 tile of pointers under a tile dialect) and subclasses ``ir.Value``
+    so it can be passed directly to MLIR ops; ``p + i``, ``p[i]``/``p.load()``
+    and ``p[i] = v``/``p.store(v)`` are the emitter's ``ptr_add``, ``load`` and
+    ``store``. Outside a trace it holds a host address (an ``int``) for a
+    ``@jit`` argument, which ``marshal`` passes to the compiled function.
+
+    :param base: The pointer SSA value (``!llvm.ptr`` under the builtin type
+        ops), or a host address
+    :param dtype: Element type, defaults to ``Int8``
+    :param space: Address space, defaults to that of ``base`` (``0`` on the host)
+    :param kind: Host payload kind: ``"host"``, ``"device"`` or ``"unknown"``
+    :param keepalive: An object kept alive as long as the host pointer is
+    """
+
+    _dtype: Type[Numeric]
+    _addrspace: int
+    _base: Optional[ir.Value]
+    _address: Optional[ctypes.c_void_p]
+    _kind: str
+    _keepalive: Any
+
+    def __init__(
+        self,
+        base: Union[ir.Value, int],
+        *,
+        dtype: Optional[Type[Numeric]] = None,
+        space: Optional[int] = None,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+        kind: str = "unknown",
+        keepalive: Any = None,
+    ) -> None:
+        if isinstance(base, Pointer):
+            dtype = dtype or base._dtype
+            space = base._addrspace if space is None else space
+            kind = base._kind if kind == "unknown" else kind
+            keepalive = base._keepalive if keepalive is None else keepalive
+            base = base._base if base._base is not None else base.address  # type: ignore[assignment]
+        elif hasattr(base, "ir_value") and not isinstance(base, ir.Value):
+            base = base.ir_value(loc=loc, ip=ip)
+
+        self._dtype = dtype or Int8
+        self._kind = kind
+        self._keepalive = keepalive
+
+        if isinstance(base, ir.Value):
+            super().__init__(base)
+            self._base = base
+            self._address = None
+            if space is not None:
+                self._addrspace = _normalize_address_space(space)
+            else:
+                found = _emitter().pointer_space(base.type)
+                if found is None:
+                    raise DSLUserCodeError(
+                        DiagId.TYPE_UNSUPPORTED_MLIR_TYPE, mlir_type=str(base.type)
+                    )
+                self._addrspace = found
+        elif isinstance(base, int) and not isinstance(base, bool):
+            # Host payload: ``ir.Value.__init__`` is not run; the instance is
+            # only ever read through the Python attributes below.
+            if base < 0:
+                raise DSLUserCodeError(
+                    DiagId.ARG_ANNOTATION_MISMATCH,
+                    num=1,
+                    arg_name="base",
+                    expected="a non-negative address (`0` for null)",
+                    got=f"{base}",
+                )
+            self._base = None
+            self._address = ctypes.c_void_p(base)
+            self._addrspace = 0 if space is None else _normalize_address_space(space)
+        else:
+            raise DSLUserCodeError(
+                DiagId.ARG_UNSUPPORTED_TYPE,
+                num=1,
+                arg_name="base",
+                function_name="Pointer",
+                arg_type=type(base).__name__,
+            )
+
+    def __class_getitem__(cls, args: Any) -> TypedPointer:
+        params = args if isinstance(args, tuple) else (args,)
+        if len(params) == 1:
+            dtype_, space = params[0], 0
+        elif len(params) == 2:
+            dtype_, space = params
+        else:
+            dtype_, space = None, None
+        space = getattr(space, "value", space)
+        if (
+            not isinstance(dtype_, NumericMeta)
+            or isinstance(space, bool)
+            or not isinstance(space, int)
+            or space < 0
+        ):
+            raise DSLUserCodeError(
+                DiagId.POINTER_BAD_SUBSCRIPT,
+                args=", ".join(getattr(p, "__name__", repr(p)) for p in params),
+            )
+        return TypedPointer(dtype_, space)
+
+    # -- Payload -------------------------------------------------------------
+
+    @property
+    def is_staged(self) -> bool:
+        """True inside a trace: the pointer wraps a pointer SSA value."""
+        return self._base is not None
+
+    @property
+    def address(self) -> Optional[int]:
+        """The host address of a pointer built outside a trace, else None."""
+        if self._address is None:
+            return None
+        return self._address.value or 0
+
+    @property
+    def kind(self) -> str:
+        """Host payload kind: ``"host"``, ``"device"`` or ``"unknown"``."""
+        return self._kind
+
+    def marshal(self) -> ctypes.c_void_p:
+        """Return an owning pointer to the ``c_void_p`` holding the host address."""
+        if self._address is None:
+            raise DSLRuntimeError(
+                "a staged Pointer has no host address to pass to a compiled function"
+            )
+        c_pointer = make_owning_c_pointer(self._address)
+        c_pointer._keepalive = (self._address, self._keepalive)  # type: ignore[attr-defined]
+        return c_pointer
+
+    def ir_value(
+        self,
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> ir.Value:
+        if self._base is None:
+            raise DSLUserCodeError(
+                "A host pointer (a buffer or address adapted at the `@jit` "
+                "boundary) can only enter compiled code as an argument.",
+                suggestion="Pass the buffer to the `@jit` function as a parameter "
+                "annotated `Pointer[dtype]` instead of reading it from an outer scope.",
+            )
+        return self._base
+
+    def __str__(self) -> str:
+        return f"ptr<space={self._addrspace}, dtype={self._dtype}>"
+
+    def __repr__(self) -> str:
+        return self.__str__()
+
+    def __eq__(self, other: Any) -> bool:  # type: ignore[override]
+        if isinstance(other, Pointer):
+            if self._base is not None and other._base is not None:
+                return self._base == other._base
+            return (
+                self._base is None
+                and other._base is None
+                and self.address == other.address
+            )
+        if isinstance(other, ir.Value):
+            return self._base is not None and self._base == other
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        if self._base is not None:
+            return hash(self._base)
+        return hash((self.address, self._addrspace))
+
+    # -- Metadata ------------------------------------------------------------
+
+    @property
+    def dtype(self) -> Type[Numeric]:
+        return self._dtype
+
+    @property
+    def natural_alignment(self) -> int:
+        return max(1, self._dtype.width // 8)
+
+    @property
+    def alignment(self) -> int:
+        return self.natural_alignment
+
+    @property
+    def space(self) -> int:
+        return self._addrspace
+
+    @property
+    def mlir_type(self) -> ir.Type:
+        return _emitter().pointer_type(self._dtype, self._addrspace)
+
+    def _effective_alignment(self, alignment: Optional[int]) -> int:
+        return alignment if alignment is not None else self.natural_alignment
+
+    def _check_vector_dtype(self, value: Any, vec: ir.Value, op: str) -> None:
+        dt = getattr(value, "dtype", None)
+        if isinstance(dt, NumericMeta):
+            mismatch = dt is not self._dtype
+            got: Any = dt.__name__
+        else:
+            elem_type = _emitter().vector_shape(vec.type)[0]
+            mismatch = elem_type != self._dtype.scalar_mlir_type
+            got = elem_type
+        if mismatch:
+            raise DSLUserCodeError(
+                DiagId.TYPE_IMPLICIT_PROMOTION_UNSUPPORTED,
+                lhs_type=self._dtype.__name__,
+                rhs_type=str(got),
+                op=op,
+            )
+
+    def _prepare_store_value(
+        self,
+        value: Any,
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> ir.Value:
+        vec = _vector_operand(value)
+        if vec is not None:
+            self._check_vector_dtype(value, vec, "store")
+            return vec
+        if isinstance(value, Numeric):
+            if value.dtype is not self._dtype:
+                raise DSLUserCodeError(
+                    DiagId.TYPE_IMPLICIT_PROMOTION_UNSUPPORTED,
+                    lhs_type=self._dtype.__name__,
+                    rhs_type=value.dtype.__name__,
+                    op="store",
+                )
+            return value.ir_value(loc=loc, ip=ip)
+        if isinstance(value, (bool, int, float)):
+            return self._dtype(value, loc=loc, ip=ip).ir_value(loc=loc, ip=ip)
+        if isinstance(value, ir.Value) and value.type == self._dtype.mlir_type:
+            return value
+        raise DSLUserCodeError(
+            DiagId.ARG_NOT_NUMERIC, arg_name="value", arg_type=type(value).__name__
+        )
+
+    # -- Address arithmetic --------------------------------------------------
+
+    @dsl_user_op
+    def tospace(
+        self,
+        space: int,
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> "Pointer":
+        target = _normalize_address_space(space)
+        if target == self._addrspace:
+            return self
+        res_ptr = _emitter().addrspacecast(self.ir_value(), target, loc=loc, ip=ip)
+        return type(self)(res_ptr, dtype=self._dtype, space=target)
+
+    def _gep(
+        self,
+        offset: Union[int, Integer, ir.Value],
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> "Pointer":
+        """The pointer ``offset`` elements on: the emitter's ``ptr_add``, built
+        as an instance of this pointer's class. A subclass overrides it to
+        compute addresses its own way."""
+        if isinstance(offset, int) and not isinstance(offset, bool):
+            index: Any = offset
+        elif isinstance(offset, Integer):
+            index = offset.ir_value(loc=loc, ip=ip)
+        elif (
+            isinstance(offset, ir.Value)
+            and not isinstance(offset, Pointer)
+            and isinstance(_emitter().scalar_type(offset.type), ir.IntegerType)
+        ):
+            index = offset
+        else:
+            raise DSLUserCodeError(
+                DiagId.POINTER_INDEX_UNSUPPORTED, kind=type(offset).__name__
+            )
+        res_ptr = _emitter().ptr_add(
+            self.ir_value(), self._dtype, index, loc=loc, ip=ip
+        )
+        return type(self)(res_ptr, dtype=self._dtype, space=self._addrspace)
+
+    @dsl_user_op
+    def toint(
+        self,
+        dtype: Optional[Type[Integer]] = None,
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> Integer:
+        """The address as an integer: of ``dtype``, else of the address dtype
+        of this pointer's space (the type ops' ``address_dtype``, the 64-bit
+        integer by default)."""
+        if dtype is None:
+            dtype = _emitter().address_dtype(self._addrspace) or _int_dtype(64)
+        int_type = dtype.mlir_type
+        return dtype(_emitter().ptrtoint(self.ir_value(), int_type, loc=loc, ip=ip))
+
+    @classmethod
+    @dsl_user_op
+    def from_address(
+        cls,
+        value: Union[int, Integer, ir.Value],
+        space: int,
+        dtype: Type[Numeric],
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> "Pointer":
+        """A pointer of this class to ``dtype`` in ``space`` at the integer
+        address ``value`` (the emitter's ``inttoptr``).
+
+        A Python int becomes a constant of the address dtype of ``space`` (the
+        type ops' ``address_dtype``, the 64-bit integer by default); an
+        ``Integer`` or a raw integer value is converted as it is.
+        """
+        space = _normalize_address_space(space)
+        if isinstance(value, (bool, Pointer)) or not isinstance(
+            value, (int, Integer, ir.Value)
+        ):
+            raise DSLUserCodeError(
+                DiagId.ARG_NOT_NUMERIC,
+                arg_name="value",
+                arg_type=type(value).__name__,
+            )
+        if isinstance(value, int):
+            address_dtype = _emitter().address_dtype(space) or _int_dtype(64)
+            value = address_dtype(value).ir_value(loc=loc, ip=ip)
+        elif isinstance(value, Integer):
+            value = value.ir_value(loc=loc, ip=ip)
+
+        res_val = _emitter().inttoptr(value, space, loc=loc, ip=ip)
+        return cls(res_val, dtype=dtype, space=space)
+
+    # -- Memory access -------------------------------------------------------
+
+    @dsl_user_op
+    def load(
+        self,
+        alignment: Optional[int] = None,
+        *,
+        count: Optional[int] = None,
+        is_volatile: bool = False,
+        is_invariant: bool = False,
+        is_invariant_group: bool = False,
+        ordering: Any = "not_atomic",
+        syncscope: Optional[str] = None,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> Any:
+        """Load a scalar, or a vector of ``count`` elements, through this pointer.
+
+        :param alignment: Alignment in bytes, defaults to the element's natural alignment
+        :param count: Number of elements of a vector load; None loads one scalar
+        :return: A ``Numeric`` of the pointer's dtype, or the ``Vector`` leaf for ``count``
+        """
+        res = _emitter().load(
+            self.ir_value(),
+            self._dtype,
+            lanes=count,
+            alignment=self._effective_alignment(alignment),
+            volatile=is_volatile,
+            invariant=is_invariant,
+            invariant_group=is_invariant_group,
+            ordering=ordering,
+            syncscope=syncscope,
+            loc=loc,
+            ip=ip,
+        )
+        if count is None:
+            return self._dtype(res, loc=loc, ip=ip)
+        # The registry-aware wrapper (a ``Vector`` for ``vector<N x T>``); the
+        # import is deferred because ``util/tree_utils`` imports this module.
+        from ..util.tree_utils import wrap_ir_value
+
+        return wrap_ir_value(res)
 
 
+    @dsl_user_op
+    def store(
+        self,
+        value: Any,
+        *,
+        alignment: Optional[int] = None,
+        is_volatile: bool = False,
+        is_invariant_group: bool = False,
+        ordering: Any = "not_atomic",
+        syncscope: Optional[str] = None,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> None:
+        """Store a scalar or vector value through this pointer.
+
+        A Python scalar is converted to the pointer's dtype; a ``Numeric`` or a
+        vector must already have that dtype. The emitter's store op is handed
+        to the ``dsl_user_op`` wrapper, which verifies it; the caller gets None.
+
+        .. code-block:: python
+
+            (output_ptr + offset).store(values, alignment=16)
+        """
+        ir_value = self._prepare_store_value(value, loc=loc, ip=ip)
+        return _emitter().store(
+            self.ir_value(),
+            ir_value,
+            alignment=self._effective_alignment(alignment),
+            volatile=is_volatile,
+            invariant_group=is_invariant_group,
+            ordering=ordering,
+            syncscope=syncscope if syncscope else None,
+            loc=loc,
+            ip=ip,
+        )
+
+    @staticmethod
+    def _validate_i1_mask(mask: Any) -> ir.Value:
+        """Return ``mask`` as an ``ir.Value``, checking it is a vector of ``i1``."""
+        vec = _vector_operand(mask)
+        if vec is not None:
+            elem_type = _emitter().vector_shape(vec.type)[0]
+            if isinstance(elem_type, ir.IntegerType) and elem_type.width == 1:
+                return vec
+        raise DSLUserCodeError(
+            DiagId.ARG_ANNOTATION_MISMATCH,
+            num=1,
+            arg_name="mask",
+            expected="a `Vector` of `Boolean`",
+            got=type(mask).__name__,
+        )
+
+    @dsl_user_op
+    def masked_load(
+        self,
+        mask: Any,
+        pass_thru: Any = None,
+        *,
+        alignment: Optional[int] = None,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> Any:
+        """Load the vector lanes selected by a boolean mask (the emitter's masked ``load``).
+
+        :param mask: A ``Vector`` of ``Boolean``, one lane per element
+        :param pass_thru: A ``Vector`` of the pointer's dtype supplying the masked-off lanes
+        :return: The ``Vector`` leaf of the loaded lanes
+        """
+        mask_val = self._validate_i1_mask(mask)
+        vec_len = _emitter().vector_shape(mask_val.type)[1]
+        pass_thru_val = None
+        if pass_thru is not None:
+            pass_thru_val = _vector_operand(pass_thru)
+            if (
+                pass_thru_val is None
+                or _emitter().vector_shape(pass_thru_val.type)[1] != vec_len
+            ):
+                raise DSLUserCodeError(
+                    DiagId.ARG_ANNOTATION_MISMATCH,
+                    num=2,
+                    arg_name="pass_thru",
+                    expected=f"a `Vector` of {vec_len} `{self._dtype.__name__}`",
+                    got=type(pass_thru).__name__,
+                )
+            self._check_vector_dtype(pass_thru, pass_thru_val, "masked_load")
+
+        res = _emitter().load(
+            self.ir_value(),
+            self._dtype,
+            lanes=vec_len,
+            mask=mask_val,
+            pass_thru=pass_thru_val,
+            alignment=self._effective_alignment(alignment),
+            loc=loc,
+            ip=ip,
+        )
+        # The registry-aware wrapper (a ``Vector`` for ``vector<N x T>``); the
+        # import is deferred because ``util/tree_utils`` imports this module.
+        from ..util.tree_utils import wrap_ir_value
+
+        return wrap_ir_value(res)
+
+    @dsl_user_op
+    def masked_store(
+        self,
+        value: Any,
+        mask: Any,
+        *,
+        alignment: Optional[int] = None,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> None:
+        """Store the vector lanes selected by a boolean mask (the emitter's masked ``store``).
+
+        .. code-block:: python
+
+            (output_ptr + offset).masked_store(values, mask, alignment=16)
+        """
+        vec = _vector_operand(value)
+        if vec is None:
+            raise DSLUserCodeError(
+                DiagId.ARG_ANNOTATION_MISMATCH,
+                num=1,
+                arg_name="value",
+                expected=f"a `Vector` of `{self._dtype.__name__}`",
+                got=type(value).__name__,
+            )
+        self._check_vector_dtype(value, vec, "masked_store")
+        mask_val = self._validate_i1_mask(mask)
+        lanes = _emitter().vector_shape(vec.type)[1]
+        if lanes != _emitter().vector_shape(mask_val.type)[1]:
+            raise DSLUserCodeError(
+                DiagId.ARG_ANNOTATION_MISMATCH,
+                num=2,
+                arg_name="mask",
+                expected=f"a `Vector` of {lanes} `Boolean`",
+                got=str(mask_val.type),
+            )
+        return _emitter().store(
+            self.ir_value(),
+            vec,
+            mask=mask_val,
+            alignment=self._effective_alignment(alignment),
+            loc=loc,
+            ip=ip,
+        )
+
+    # -- Operators -----------------------------------------------------------
+
+    @dsl_user_op
+    def __add__(
+        self,
+        offset: Union[int, Integer, ir.Value],
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> "Pointer":
+        return self._gep(offset, loc=loc, ip=ip)
+
+    @dsl_user_op
+    def __sub__(
+        self,
+        offset: Union[int, Integer, ir.Value],
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> "Pointer":
+        if isinstance(offset, Pointer):
+            raise DSLUserCodeError(DiagId.POINTER_INDEX_UNSUPPORTED, kind="`Pointer`")
+        if isinstance(offset, int):
+            neg_offset: Any = -offset
+        else:
+            neg_offset = _int_dtype(32)(0) - offset
+        return self._gep(neg_offset, loc=loc, ip=ip)
+
+    @dsl_user_op
+    def __radd__(
+        self,
+        offset: Union[int, Integer, ir.Value],
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> "Pointer":
+        return self._gep(offset, loc=loc, ip=ip)
+
+    @dsl_user_op
+    def __iadd__(
+        self,
+        offset: Union[int, Integer, ir.Value],
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> "Pointer":
+        return self._gep(offset, loc=loc, ip=ip)
+
+    @dsl_user_op
+    def __isub__(
+        self,
+        offset: Union[int, Integer, ir.Value],
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> "Pointer":
+        return self.__sub__(offset, loc=loc, ip=ip)
+
+    @dsl_user_op
+    def __and__(
+        self,
+        mask: Union[int, Integer, ir.Value],
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> "Pointer":
+        masked_int = self.toint(loc=loc, ip=ip) & mask
+        return type(self).from_address(
+            masked_int, self._addrspace, self._dtype, loc=loc, ip=ip
+        )
+
+    @dsl_user_op
+    def __rand__(
+        self,
+        mask: Union[int, Integer, ir.Value],
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> "Pointer":
+        return self.__and__(mask, loc=loc, ip=ip)
+
+    def _validate_scalar_index(self, idx: Any) -> Any:
+        if isinstance(idx, (tuple, slice)):
+            raise DSLUserCodeError(
+                DiagId.POINTER_INDEX_UNSUPPORTED, kind=type(idx).__name__
+            )
+        return idx
+
+    @dsl_user_op
+    def __getitem__(
+        self,
+        idx: Any,
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> Any:
+        offset = self._validate_scalar_index(idx)
+        ptr = self._gep(offset, loc=loc, ip=ip)
+        return ptr.load(loc=loc, ip=ip)
+
+    @dsl_user_op
+    def __setitem__(
+        self,
+        idx: Any,
+        value: Any,
+        *,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+    ) -> None:
+        offset = self._validate_scalar_index(idx)
+        ptr = self._gep(offset, loc=loc, ip=ip)
+        ptr.store(value, loc=loc, ip=ip)
+
+
+def inttoptr(
+    value: Union[int, Integer, ir.Value],
+    mem_space: int,
+    dtype: Type[Numeric],
+    *,
+    loc: Optional[ir.Location] = None,
+    ip: Optional[ir.InsertionPoint] = None,
+) -> Pointer:
+    """Convert an integer address to a typed ``Pointer`` (``Pointer.from_address``).
+
+    :param value: Integer address value.
+    :param mem_space: Target pointer address space.
+    :param dtype: Pointer element type.
+    :return: Typed pointer in ``mem_space``.
+    """
+    return Pointer.from_address(value, mem_space, dtype, loc=loc, ip=ip)
 
 
 # =============================================================================
@@ -2577,7 +3307,7 @@ def _is_struct_class(ann: Any) -> bool:
 def _is_field_annotation(ann: Any) -> bool:
     """True if ``ann`` can type a struct field: a numeric dtype, a
     ``Pointer[T]`` annotation or another struct class."""
-    return isinstance(ann, NumericMeta) or _is_struct_class(ann)
+    return isinstance(ann, (NumericMeta, TypedPointer)) or _is_struct_class(ann)
 
 
 def _field_mismatch(
@@ -2620,6 +3350,17 @@ def _coerce_field_value(
         if value is None:
             return ann(ann.zero)
         return ann(value, loc=loc, ip=ip)
+    if isinstance(ann, TypedPointer):
+        if value is None:
+            if _in_trace():
+                # A staged null pointer, so the field can be carried and compared.
+                return inttoptr(0, ann.space, ann.dtype, loc=loc, ip=ip)
+            return Pointer(0, dtype=ann.dtype, space=ann.space)
+        if isinstance(value, Pointer):
+            if value.dtype is not ann.dtype or value.space != ann.space:
+                raise _field_mismatch(position, name, ann, value)
+            return value
+        raise _field_mismatch(position, name, Pointer, value)
     if _is_struct_class(ann):
         if value is None:
             return ann()
@@ -2842,6 +3583,10 @@ __all__ = [
     "as_numeric",
     "as_ir_value",
     "cast",
+    "align",
+    "Pointer",
+    "TypedPointer",
+    "inttoptr",
     "Struct",
     "struct",
     "make_struct",

@@ -33,7 +33,7 @@ from ... import ir
 from ..types import typing as t
 from ..util import tree_utils
 from ..util.logger import log
-from .arguments import JitArgAdapterRegistry
+from .arguments import JitArgAdapterRegistry, adapt_pointer_address
 from .common import (
     DSLBaseError,
     DSLRuntimeError,
@@ -613,7 +613,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         annotation = spec_ty
         if get_origin(annotation) is Annotated:
             annotation = get_args(annotation)[0]
-        if isinstance(annotation, t.NumericMeta):
+        if isinstance(annotation, (t.NumericMeta, t.TypedPointer)):
             return False
         if (
             isinstance(annotation, type)
@@ -746,6 +746,45 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     # ===------------------------------------------------------------------===
     # Host argument boundary
     # ===------------------------------------------------------------------===
+
+    def _validate_arg(
+        self, arg: Any, arg_index: int, arg_name: str, arg_spec: Any
+    ) -> Any:
+        """Check the (adapted) ``arg`` against a leaf-class or ``Pointer[T]`` annotation.
+
+        A ``Pointer[T]`` annotation requires a ``Pointer``; a ``@struct`` class
+        or a registered leaf class other than a ``Numeric`` (``Vector``, a
+        sub-DSL leaf) requires an instance of that class. Returns an
+        ``ARG_ANNOTATION_MISMATCH`` error, or None when the annotation is of
+        another kind or satisfied. A sub-DSL may extend this.
+        """
+        spec = arg_spec
+        if get_origin(spec) is Annotated:
+            spec = get_args(spec)[0]
+        if isinstance(arg, ir.Value):
+            return None
+        if isinstance(spec, t.TypedPointer):
+            if isinstance(arg, t.Pointer):
+                return None
+            space = f", {spec.space}" if spec.space else ""
+            expected = f"a `Pointer[{spec.dtype.__name__}{space}]`"
+        elif (
+            isinstance(spec, type)
+            and not isinstance(spec, t.NumericMeta)
+            and (issubclass(spec, t.Struct) or tree_utils.leaf_entry(spec) is not None)
+        ):
+            if isinstance(arg, spec):
+                return None
+            expected = f"a `{spec.__name__}`"
+        else:
+            return None
+        return self.user_error(
+            DiagId.ARG_ANNOTATION_MISMATCH,
+            num=arg_index + 1,
+            arg_name=arg_name,
+            expected=expected,
+            got=f"a `{type(arg).__name__}`",
+        )
 
     @staticmethod
     def _extract_annotation_markers(spec_ty: Any, arg: Any) -> list[Any]:
@@ -946,7 +985,12 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             # adapted value. Keep the scope active through nested adaptations.
             with JitArgAdapterRegistry.using_scope(self._jit_arg_adapter_scope):
                 adapted = None
-                if not isinstance(arg, ir.Value):
+                if isinstance(spec_ty, t.TypedPointer):
+                    # The Pointer[T] annotation adapts a bare address or a buffer.
+                    adapted = adapt_pointer_address(
+                        arg, spec_ty, arg_name=arg_name, arg_index=i
+                    )
+                elif not isinstance(arg, ir.Value):
                     adapter = JitArgAdapterRegistry.get_registered_adapter(arg)
                     if adapter is not None:
                         with JitArgAdapterRegistry.using_argument(arg_name, i):
@@ -954,6 +998,12 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 if adapted is not None:
                     arg = adapted
                     jit_adapted_args[i] = arg
+
+                # Type safety check
+                if spec_ty is not inspect.Parameter.empty:
+                    err = self._validate_arg(arg, i, arg_name, spec_ty)
+                    if err is not None:
+                        raise err
 
                 # A Python value (``None`` triple) is specialised on by the
                 # trace; an MLIR op gets its types, attributes and values.
@@ -1118,6 +1168,11 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 raise self.user_error(
                     DiagId.TYPE_RETURN_MISMATCH,
                     got=f"a `{cls.__name__}`",
+                    detail=(
+                        " (a `Pointer` result is memory: write through the pointer instead)"
+                        if issubclass(cls, t.Pointer)
+                        else ""
+                    ),
                 )
         if not leaves:
             raise self.user_error(
