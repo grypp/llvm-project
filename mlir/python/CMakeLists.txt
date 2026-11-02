@@ -11,6 +11,10 @@ set(PYTHON_SOURCE_DIR "${MLIR_SOURCE_DIR}/lib/Bindings/Python")
 ################################################################################
 
 declare_mlir_python_sources(MLIRPythonSources)
+if(MLIR_ENABLE_PYTHON_DSL)
+  add_subdirectory("${MLIR_MAIN_SRC_DIR}/tools/mlir-dsl"
+                   "${CMAKE_CURRENT_BINARY_DIR}/mlir-dsl")
+endif()
 declare_mlir_python_sources(MLIRPythonSources.Dialects
   ADD_TO_PARENT MLIRPythonSources)
 declare_mlir_python_sources(MLIRPythonSources.Core
