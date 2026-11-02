@@ -496,6 +496,13 @@ class Plugins:
     def __len__(self) -> int:
         return sum(1 for _ in self)
 
+    def named(self, name: str) -> Plugin | None:
+        """The plugin called ``name`` (a role or a family member), or None."""
+        for plugin in self:
+            if plugin.name == name:
+                return plugin
+        return None
+
     def resolve(self) -> tuple["Plugins", dict[str, str]]:
         """The record of one DSL instance: a shallow copy of every available
         plugin (a plugin instance named on two classes must not carry another

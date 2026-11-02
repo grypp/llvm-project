@@ -116,7 +116,7 @@ try:
     frozen = False
 except TypeError:
     frozen = True
-print("FROZEN:", frozen)
+print("FROZEN:", frozen, type(R.protocol_jit_arg_adapters).__name__)
 
 
 class Fourth:
@@ -149,7 +149,7 @@ print(
     len(R.jit_arg_adapter_registry) - size_before == 1,
 )
 # CHECK:      RACE_FREE: True True
-# CHECK-NEXT: FROZEN: True
+# CHECK-NEXT: FROZEN: True tuple
 # CHECK-NEXT: PROMOTED_ONCE: True True
 
 # --- a scoped record policy ------------------------------------------------

@@ -24,6 +24,7 @@ from ..dsl.core.diagnostics import DiagId, register_dsl_package
 from ..dsl.core.dsl import BaseDSL
 from ..dsl.core.plugin import Plugins
 from ..dsl.plugins.compiler import execution_engine
+from ..dsl.plugins.adapters import dlpack
 from ..dsl.plugins.decorators.jit import func
 from ..dsl.plugins.type_ops import UpstreamDialectTypeOps, arith, llvm, vector
 
@@ -125,6 +126,9 @@ class MlirTestDSL(BaseDSL):
         compiler=execution_engine.Compiler(),
         # @jit over a func.func host entry, then @kernel over gpu.func.
         decorators=[func.Jit()],
+        # Inbound: anything speaking DLPack (numpy arrays, torch tensors on the
+        # host or a device) through the nanobind extension.
+        adapters=[dlpack.DlpackPlugin()],
     )
 
     def pipeline(self) -> list[str]:
