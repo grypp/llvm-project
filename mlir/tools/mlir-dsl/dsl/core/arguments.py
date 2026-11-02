@@ -14,12 +14,16 @@ by type, per scope, lazily by qualified type name, or by protocol;
 ``register_jit_arg_adapter`` is the user-facing extension point. The
 registry publishes read-only mappings that writers replace whole under one
 lock, so a lookup on the call path never sees a half-written table.
-Whether an adapted
+``adapt_pointer_address`` is the annotation-driven step for ``Pointer[T]``
+parameters, never a registry entry, so an unannotated ``int`` stays a Python
+value; ``pointer_address`` reads the address of an ``int``, a ctypes pointer
+or any object implementing ``__pointer_address__()``. Whether an adapted
 argument is a Python value or an MLIR op is decided in
 ``staging.is_argument_meta``. No ``int``/``float``/``bool`` adapter lives
 here; a sub-DSL that stages Python scalars registers them in its own scope.
 """
 
+import ctypes
 import functools
 import threading
 import typing
@@ -31,12 +35,18 @@ from types import MappingProxyType
 from typing import (
     Any,
     Callable,
+    Optional,
     Union,
 )
 
 from .common import DSLRuntimeError, DSLUserCodeError
 from .diagnostics import DiagId
-from ..types.typing import NumericMeta, cast
+from ..types.typing import (
+    NumericMeta,
+    Pointer,
+    TypedPointer,
+    cast,
+)
 from ..util.tree_utils import (
     contains_leaf,
     is_frozen_dataclass,
@@ -48,6 +58,9 @@ from .staging import _is_dsl_type_annotation
 __all__ = [
     "JitArgAdapterRegistry",
     "DefaultDataclassAdapter",
+    "adapt_pointer_address",
+    "check_pointer_annotation",
+    "pointer_address",
 ]
 
 
@@ -405,7 +418,8 @@ class DefaultDataclassAdapter:
     """Adapter for frozen dataclass typed JIT arguments.
 
     ``DefaultDataclassAdapter(arg)`` returns a new ``type(arg)`` record for
-    ``tree_flatten``: ``Numeric``-annotated fields cast, other fields adapted
+    ``tree_flatten``: ``Numeric``-annotated fields cast, ``Pointer[T]``
+    fields adapted and checked against the annotation, other fields adapted
     through the registry when an adapter exists. The record is rebuilt field
     by field (no ``__init__``), so ``init=False`` fields and custom
     constructors are fine; instance attributes that are not fields are kept.
@@ -437,6 +451,15 @@ class DefaultDataclassAdapter:
                 arg_field, annotation
             ):
                 value = cast(arg_field, annotation)  # type: ignore[arg-type]
+            elif isinstance(annotation, TypedPointer):
+                value = adapt_pointer_address(
+                    arg_field, annotation, arg_name=field_name, arg_index=arg_index
+                )
+                if value is None:
+                    check_pointer_annotation(
+                        arg_field, annotation, arg_name=field_name, arg_index=arg_index
+                    )
+                    value = arg_field
             else:
                 arg_adapter = JitArgAdapterRegistry.get_registered_adapter(arg_field)
                 if arg_adapter is None:
@@ -469,3 +492,109 @@ def _convert_python_sequence(arg: Union[tuple, list]) -> Union[tuple, list]:
         adapter = JitArgAdapterRegistry.get_registered_adapter(elem)
         adapted_arg.append(elem if adapter is None else adapter(elem))
     return type(arg)(adapted_arg)
+
+
+def _check_contiguous(arg: Any, contiguous: bool) -> None:
+    """Raise ``ARG_BUFFER_INVALID`` unless the buffer is one contiguous block."""
+    if not contiguous:
+        arg_name, _ = JitArgAdapterRegistry.active_argument()
+        raise DSLUserCodeError(
+            DiagId.ARG_BUFFER_INVALID,
+            arg_name=arg_name,
+            arg_type=f"{type(arg).__module__}.{type(arg).__qualname__}",
+            detail=f"it is a `{type(arg).__module__}.{type(arg).__qualname__}` that is not contiguous in memory",
+        )
+
+
+# =============================================================================
+# The ``Pointer[T]`` annotation path
+# =============================================================================
+
+
+def pointer_address(arg: object) -> Optional[int]:
+    """The address held by an ``int``, ``c_void_p`` or ctypes pointer, or by
+    an object implementing ``__pointer_address__() -> int`` (a null-pointer
+    sentinel returns 0), else None."""
+    if isinstance(arg, bool):
+        return None
+    if isinstance(arg, int):
+        return arg
+    if isinstance(arg, ctypes.c_void_p):
+        return 0 if arg.value is None else int(arg.value)
+    if isinstance(arg, ctypes._Pointer):
+        value = ctypes.cast(arg, ctypes.c_void_p).value
+        return 0 if value is None else int(value)
+    address = getattr(arg, "__pointer_address__", None)
+    if address is not None and not isinstance(arg, type):
+        return int(address())
+    return None
+
+
+_python_pointer_address = pointer_address
+
+
+def _pointer_annotation_text(dtype: Any, space: int) -> str:
+    """The annotation spelling of a pointer type, for diagnostics."""
+    name = getattr(dtype, "__name__", str(dtype))
+    return f"`Pointer[{name}]`" if space == 0 else f"`Pointer[{name}, {space}]`"
+
+
+def check_pointer_annotation(
+    value: Any, typed_pointer: TypedPointer, *, arg_name: str, arg_index: int
+) -> None:
+    """Raise ``ARG_ANNOTATION_MISMATCH`` unless ``value`` is a ``Pointer`` of the
+    annotated dtype and address space.
+
+    :param value: The adapted argument
+    :param typed_pointer: The ``Pointer[T]``/``Pointer[T, space]`` annotation
+    :param arg_name: The parameter name, for the diagnostic
+    :param arg_index: The parameter's position, for the diagnostic
+    """
+    if isinstance(value, Pointer):
+        if value.dtype is typed_pointer.dtype and value.space == typed_pointer.space:
+            return
+        got = f"a {_pointer_annotation_text(value.dtype, value.space)}"
+    else:
+        got = f"a `{type(value).__name__}`"
+    raise DSLUserCodeError(
+        DiagId.ARG_ANNOTATION_MISMATCH,
+        num=arg_index + 1,
+        arg_name=arg_name,
+        expected=f"a {_pointer_annotation_text(typed_pointer.dtype, typed_pointer.space)}",
+        got=got,
+    )
+
+
+def adapt_pointer_address(
+    arg: Any, typed_pointer: TypedPointer, *, arg_name: str = "", arg_index: int = 0
+) -> Optional[Pointer]:
+    """Adapt the value passed for a ``Pointer[T]``-annotated parameter.
+
+    A bare address (``int``, ``ctypes.c_void_p``, a ctypes pointer, an object
+    with ``__pointer_address__()``; e.g. ``tensor.data_ptr()`` or ``0`` for
+    null) becomes a host ``Pointer`` of the annotated dtype and space with
+    kind ``"unknown"`` (negative ->
+    ``ARG_ANNOTATION_MISMATCH``). A ``Pointer``, or a buffer the registry adapts
+    to one, is checked against the annotation (``ARG_ANNOTATION_MISMATCH``).
+    None when nothing applies, so the caller continues with its own checks.
+    Never a registry entry: an unannotated ``int`` stays a Python value.
+
+    :param arg: The argument value
+    :param typed_pointer: The ``Pointer[T]``/``Pointer[T, space]`` annotation
+    :param arg_name: The parameter name, for diagnostics
+    :param arg_index: The parameter's position, for diagnostics
+    :return: The host ``Pointer``, or None
+    """
+    if not isinstance(arg, Pointer):
+        address = pointer_address(arg)
+        if address is not None:
+            return Pointer(
+                address, dtype=typed_pointer.dtype, space=typed_pointer.space
+            )
+        adapter = JitArgAdapterRegistry.get_registered_adapter(arg)
+        if adapter is None:
+            return None
+        with JitArgAdapterRegistry.using_argument(arg_name, arg_index):
+            arg = adapter(arg)
+    check_pointer_annotation(arg, typed_pointer, arg_name=arg_name, arg_index=arg_index)
+    return arg

@@ -1244,6 +1244,10 @@ class DiagId(DiagCatalog, enum.Enum):
             "annotation to that type.",
         ),
     )
+    ARG_INVALID_ALIGNMENT = (
+        "The value given to `align()` is not a positive power of 2.",
+        ("Pass a positive power of 2 to `align()`, e.g. `align(16)`.",),
+    )
     ARG_NOT_NUMERIC = (
         "Argument `{arg_name}` expects a numeric value, but this call passes a value "
         "of type `{arg_type}`.",
@@ -1262,6 +1266,14 @@ class DiagId(DiagCatalog, enum.Enum):
             "tuple or frozen record of them for `{arg_name}`.",
             "To pass a custom class, register an adapter for it with "
             "`@register_jit_arg_adapter(YourClass)`.",
+        ),
+    )
+    ARG_BUFFER_INVALID = (
+        "Argument `{arg_name}` cannot be used as a `Pointer` argument: {detail}.",
+        (
+            "Pass one contiguous block of memory on the device the function runs on, "
+            "e.g. `np.ascontiguousarray(a)`, `t.contiguous()`, or `t.cpu()` for a "
+            "host function.",
         ),
     )
     ARG_REJECTED_BY_OP = (
@@ -1329,6 +1341,23 @@ class DiagId(DiagCatalog, enum.Enum):
     STRUCT_FIELD_ASSIGNMENT = (
         "`{name}.{field}` cannot be assigned: a `@struct` instance is immutable.",
         ("Create an updated copy instead: `v = v.replace({field}=...)`.",),
+    )
+
+    # --- POINTER ---
+    POINTER_INDEX_UNSUPPORTED = (
+        "A `Pointer` cannot be indexed with a {kind}; only a single integer offset is "
+        "supported.",
+        (
+            "Use `load(count=...)` / `store(...)` for several elements, or index one "
+            "element at a time, e.g. `p[i]`.",
+        ),
+    )
+    POINTER_BAD_SUBSCRIPT = (
+        "`Pointer[{args}]` is not a valid pointer annotation.",
+        (
+            "Write `Pointer[dtype]` or `Pointer[dtype, space]`, e.g. "
+            "`Pointer[Float32]` or `Pointer[Float32, 1]`.",
+        ),
     )
 
 
@@ -1471,6 +1500,8 @@ _classify_error(
     "ARG_ANNOTATION_MISMATCH",
     "ARG_UNSUPPORTED_TYPE",
     "ARG_NOT_NUMERIC",
+    "ARG_INVALID_ALIGNMENT",
+    "ARG_BUFFER_INVALID",
     "ARG_REJECTED_BY_OP",
     "CALL_ARGUMENTS",
     "TYPE_LOOP_BOUND_NOT_INT",
@@ -1502,6 +1533,12 @@ _classify_error(
     "STRUCT_DEFINITION",
     "STRUCT_CONSTRUCTION",
     "STRUCT_FIELD_ASSIGNMENT",
+)
+_classify_error(
+    USAGE,
+    "pointers",
+    "POINTER_INDEX_UNSUPPORTED",
+    "POINTER_BAD_SUBSCRIPT",
 )
 _classify_warning(
     WARNING,

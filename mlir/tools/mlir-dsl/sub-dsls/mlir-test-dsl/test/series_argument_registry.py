@@ -213,3 +213,31 @@ with R.using_scope("rec"):
 outside = failure(lambda: R.get_registered_adapter(Record(1, 2)))
 print("SCOPED_RECORD:", inside, outside, "|", failure(lambda: total(Record(1, 2))))
 # CHECK: SCOPED_RECORD: FrozenRecord CONTAINER_INVALID_RECORD | no error
+
+# --- the boundary's public predicates ---------------------------------------
+# `is_type_argument`: a class passed where the annotation is absent is a
+# Python value; `pointer_address` reads an object's `__pointer_address__()`,
+# so a null-pointer sentinel passes a `Pointer[T]` parameter as a null host
+# pointer without being special-cased.
+from inspect import Parameter
+
+from mlir.dsl.core.arguments import adapt_pointer_address, pointer_address
+from mlir.dsl.core.staging import is_type_argument
+
+
+class Null:
+    def __pointer_address__(self):
+        return 0
+
+
+null = adapt_pointer_address(Null(), m.Pointer[m.Float32])
+print(
+    "TYPE_ARG:",
+    is_type_argument(m.Int32, Parameter.empty),
+    is_type_argument(5, Parameter.empty),
+)
+print(
+    "NULL_PROTOCOL:", null.address, null.kind, pointer_address(Null), pointer_address(7)
+)
+# CHECK:      TYPE_ARG: True False
+# CHECK-NEXT: NULL_PROTOCOL: 0 unknown None 7

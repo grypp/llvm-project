@@ -64,6 +64,7 @@ declare_mlir_python_sources(MLIRPythonSources.DSL.typeops
   SOURCES
     dsl/plugins/type_ops/__init__.py
     dsl/plugins/type_ops/arith.py
+    dsl/plugins/type_ops/llvm.py
     dsl/plugins/type_ops/upstream_dialects.py
 )
 

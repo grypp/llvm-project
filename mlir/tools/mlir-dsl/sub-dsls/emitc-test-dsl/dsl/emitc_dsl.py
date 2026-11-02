@@ -21,7 +21,7 @@ from ..dsl.core.diagnostics import register_dsl_package
 from ..dsl.core.dsl import BaseDSL
 from ..dsl.core.plugin import Plugins
 from ..dsl.plugins.decorators.jit import func
-from ..dsl.plugins.type_ops import UpstreamDialectTypeOps, arith
+from ..dsl.plugins.type_ops import UpstreamDialectTypeOps, arith, llvm
 
 __all__ = ["EmitCScalarOps", "EmitCTestDSL", "jit"]
 
@@ -72,7 +72,7 @@ class EmitCTestDSL(BaseDSL):
     """
 
     plugins = Plugins(
-        type_ops=EmitCScalarOps(scalars=arith),
+        type_ops=EmitCScalarOps(scalars=arith, memory=llvm),
         decorators=[func.Jit()],
     )
 
