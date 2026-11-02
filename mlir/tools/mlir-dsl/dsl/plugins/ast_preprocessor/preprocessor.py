@@ -2251,6 +2251,73 @@ class DSLPreprocessor(ast.NodeTransformer):
                 self.session_data.scope_manager.add_to_scope(item.optional_vars.id)
         return self.generic_visit(node)
 
+    # =============================================================================
+    # While loops
+    # =============================================================================
+
+    def visit_While(self, node: ast.While) -> ast.While | list[ast.stmt]:
+        """Rewrite a ``while`` into a ``@while_selector`` region."""
+        early_exit = self._find_early_exit(node, "while")
+        if self.session_data.current_control_flow_policy is ControlFlowPolicy.NATIVE:
+            if early_exit is not None:
+                return self._handle_native_early_exit(node, early_exit)
+            with self.session_data.control_flow_policy(ControlFlowPolicy.TRACE):
+                return self.visit_While(node)
+
+        # A ``while`` owning a ``break``/``continue``/``return``/``raise`` cannot
+        # be outlined: it stays native and its test must be Meta at trace time.
+        if early_exit is not None:
+            return self._handle_native_early_exit(node, early_exit)
+
+        # A staged ``while ... else:`` cannot capture its else-clause (parity with
+        # the staged ``for ... else`` rejection).
+        if node.orelse:
+            raise self._user_error(
+                "loop_else",
+                node,
+                end_col_offset=getattr(node.test, "end_col_offset", None),
+            )
+
+        self._check_region_locals_escape(node, "while")
+
+        active_symbols = self.session_data.scope_manager.get_active_symbols()
+        active_callables = self.session_data.scope_manager.get_active_callables()
+
+        with self.session_data.scope_manager.enter_control_flow_scope():
+            (
+                write_args,
+                full_write_args_count,
+                called_closures,
+                mutated_names,
+            ) = self.analyze_region_variables(node, active_symbols, active_callables)
+            # A name the condition first binds with ``:=`` (one bound before
+            # the loop is a write_arg already and is carried like any other).
+            condition_bound = [
+                name
+                for name in _while_condition_bound_names(node.test)
+                if name not in write_args
+            ]
+            if condition_bound:
+                write_args, full_write_args_count = (
+                    self._adopt_while_condition_bound_names(
+                        node, condition_bound, write_args, full_write_args_count
+                    )
+                )
+            exprs: list[ast.stmt] = []
+            if called_closures:
+                exprs.append(self._create_closure_check_call(called_closures, node))
+
+            func_name = f"while_region_{self.session_data.counter}"
+            self.session_data.counter += 1
+
+            with self.session_data.enclosing_body(node):
+                func_def = self.create_while_function(
+                    func_name, node, write_args, full_write_args_count, mutated_names
+                )
+            assign = self.create_cf_call(func_name, write_args, node)
+
+        return exprs + [func_def] + assign
+
     def create_cf_call(
         self, func_name: str, yield_args: list[str], node: ast.stmt
     ) -> list[ast.stmt]:
@@ -2583,6 +2650,161 @@ class DSLPreprocessor(ast.NodeTransformer):
             node,
         )
 
+    def create_while_function(
+        self,
+        func_name: str,
+        node: ast.While,
+        write_args: list[str],
+        full_write_args_count: int,
+        mutated_names: Sequence[str] = (),
+    ) -> ast.FunctionDef:
+        """Create a while function that looks like:
+
+        @while_selector(write_args=[])
+        def while_region(write_args):
+            def while_before_block(*write_args):
+                # Note that during eval of pred can possibly alter yield_args
+                return [pred, write_args]
+            def while_after_block(*write_args):
+                ...loop_body_transformed...
+                return write_args
+            return while_executor(write_args, full_write_args_count,
+                while_before_block, while_after_block, write_args_names, mutated_names)
+        write_args = while_region
+
+        The executor builds ``scf.while`` from the two blocks (the before
+        block yields the condition, the after block the carried values), or
+        runs them as a Python loop when the condition is a Python bool.
+        """
+
+        # Section: decorator construction
+        decorator_keywords = [
+            ast.keyword(
+                arg="write_args",
+                value=self.generate_get_locals_or_none_call(write_args),
+            ),
+        ]
+        decorator = ast.copy_location(
+            ast.Call(
+                func=create_module_attribute(
+                    self.DECORATOR_WHILE_STATEMENT,
+                    lineno=node.lineno,
+                    col_offset=node.col_offset,
+                ),
+                args=[],
+                keywords=decorator_keywords,
+            ),
+            node,
+        )
+
+        # Section: Shared initialization for before and after blocks
+        while_before_block_name = f"while_before_block_{self.session_data.counter}"
+        while_after_block_name = f"while_after_block_{self.session_data.counter}"
+        self.session_data.counter += 1
+        block_args_args = [ast.arg(arg=var, annotation=None) for var in write_args]
+        block_args = ast.arguments(
+            posonlyargs=[],
+            args=block_args_args,
+            kwonlyargs=[],
+            kw_defaults=[],
+            defaults=[],
+        )
+
+        yield_args_ast_name_list = ast.List(
+            elts=[ast.Name(id=var, ctx=ast.Load()) for var in write_args],
+            ctx=ast.Load(),
+        )
+
+        # Section: while_before_block FunctionDef, which contains condition
+        while_before_stmts: list[ast.stmt] = []
+        with Region(self.session_data, new_value=while_before_stmts):
+            test_expr = ast.copy_location(self.visit(node.test), node.test)
+
+        while_before_return_list = ast.List(
+            elts=[test_expr, yield_args_ast_name_list],
+            ctx=ast.Load(),
+        )
+        while_before_stmts.append(ast.Return(value=while_before_return_list))
+        while_before_block = ast.copy_location(
+            ast.FunctionDef(
+                name=while_before_block_name,
+                args=block_args,
+                body=while_before_stmts,
+                decorator_list=[],
+            ),
+            test_expr,
+        )
+
+        # Section: while_after_block FunctionDef, which contains loop body
+        while_after_stmts: list[ast.stmt] = []
+        with Region(self.session_data, new_value=while_after_stmts):
+            self._visit_stmts_into(node.body, while_after_stmts)
+
+        while_after_stmts.append(ast.Return(value=yield_args_ast_name_list))
+
+        while_after_block = ast.copy_location(
+            ast.FunctionDef(
+                name=while_after_block_name,
+                args=block_args,
+                body=while_after_stmts,
+                decorator_list=[],
+            ),
+            node,
+        )
+
+        # Section: Execute via executor
+        execute_keywords = [
+            ast.keyword(
+                arg="write_args",
+                value=ast.List(
+                    elts=[ast.Name(id=arg, ctx=ast.Load()) for arg in write_args],
+                    ctx=ast.Load(),
+                ),
+            ),
+            ast.keyword(
+                arg="full_write_args_count",
+                value=ast.Constant(value=full_write_args_count),
+            ),
+            ast.keyword(
+                arg="while_before_block",
+                value=ast.Name(id=while_before_block_name, ctx=ast.Load()),
+            ),
+            ast.keyword(
+                arg="while_after_block",
+                value=ast.Name(id=while_after_block_name, ctx=ast.Load()),
+            ),
+            ast.keyword(
+                arg="write_args_names",
+                value=self._names_constant_list(write_args),
+            ),
+            ast.keyword(
+                arg="mutated_names",
+                value=self._names_constant_tuple(mutated_names),
+            ),
+        ]
+        execute_call = ast.Call(
+            func=create_module_attribute(
+                self.WHILE_EXECUTOR, lineno=node.lineno, col_offset=node.col_offset
+            ),
+            args=[],
+            keywords=execute_keywords,
+        )
+
+        # Putting everything together, FunctionDef for while_region
+        return ast.copy_location(
+            ast.FunctionDef(
+                name=func_name,
+                args=block_args,
+                body=[
+                    while_before_block,
+                    while_after_block,
+                    ast.Return(value=execute_call),
+                ],
+                decorator_list=[decorator],
+            ),
+            node,
+        )
+
 
     DIAGNOSTICS: ClassVar[dict[str, tuple[Any, dict[str, Any]]]] = {
         "no_source": (DiagId.UNSUP_NO_SOURCE, {}),
@@ -2756,6 +2978,40 @@ class DSLPreprocessor(ast.NodeTransformer):
         return None
 
 
+    def _adopt_while_condition_bound_names(
+        self,
+        node: ast.While,
+        names: list[str],
+        write_args: list[str],
+        full_write_args_count: int,
+    ) -> tuple[list[str], int]:
+        """Decide what a staged ``while`` does with a name its condition first
+        binds with ``:=``.
+
+        The condition is evaluated in the region's before block, so a name it
+        binds is local to that block and the body never sees it: a body read
+        of such a name is refused here (the ``walrus_in_while`` diagnostic
+        names the fix, binding the name before the loop so it is carried); a
+        name the body never reads stays local to the condition. A sub-DSL
+        whose region protocol can carry a condition-bound name overrides
+        this and returns the extended ``(write_args,
+        full_write_args_count)``.
+        """
+        finder = _RegionReadFinder(names, skip=node.test)
+        for stmt in chain(node.body, node.orelse):
+            finder.visit(stmt)
+        for name in names:
+            read = finder.reads.get(name)
+            if read is not None:
+                raise self._user_error(
+                    "walrus_in_while",
+                    read,
+                    what=f"Reading `{name}`, which the `while` condition binds with `:=`, inside the loop body",
+                    name=name,
+                )
+        return write_args, full_write_args_count
+
+
 
 def create_module_attribute(
     func_name: str,
@@ -2806,6 +3062,27 @@ def create_module_attribute(
     result = ast.Attribute(value=base, attr=func_name, ctx=ast.Load())
     set_location(result, lineno, col_offset)
     return result
+
+
+def _while_condition_bound_names(test: ast.expr) -> list[str]:
+    """The names a ``while`` condition binds with ``:=``, in source order.
+
+    A lambda body is skipped: an assignment expression there binds the
+    lambda's own local (PEP 572), not a name of the loop.
+    """
+    names: list[str] = []
+
+    class Collector(ast.NodeVisitor):
+        def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+            self.visit(node.value)
+            if isinstance(node.target, ast.Name) and node.target.id not in names:
+                names.append(node.target.id)
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return None
+
+    Collector().visit(test)
+    return names
 
 
 _create_module_attribute = create_module_attribute

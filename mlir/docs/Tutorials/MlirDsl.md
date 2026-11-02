@@ -61,6 +61,8 @@ Python `for` loops with staged bounds lower to structured loops. Loops over Pyth
 
 Staged `if`, `elif` and `else` statements merge branch results. Unsupported early exits and incompatible result structures are diagnosed.
 
+Staged `while` loops carry values between their condition and body regions.
+
 The call keywords `pipeline`, `container_attrs`, `no_cache`, `extra_link_libs`
 and `compile_only` belong to the framework. They do not bind to user Meta
 parameters; use different names for compile-time keyword arguments.
