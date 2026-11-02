@@ -13,7 +13,8 @@ the fields of the ``Plugins`` record a DSL names on its class:
 * families, any number each: ``decorators/`` (``jit/func.Jit`` adds ``@jit``
   over a ``func.func`` entry, ``kernels/gpu_plugin.Kernels`` adds ``@kernel``
   and its launch), ``adapters/`` (the host boundary: ``dlpack`` turns anything
-  speaking DLPack, numpy arrays and torch tensors included, into arguments).
+  speaking DLPack, numpy arrays and torch tensors included, into arguments,
+  ``tvm_ffi`` exposes the compiled entry through another ABI).
 
 Each folder also ships the op modules its plugin emits through (``type_ops/``:
 ``arith``, ``vector``, ``llvm``; ``ast_preprocessor/scf/``: the

@@ -51,6 +51,19 @@ declare_mlir_python_sources(MLIRPythonSources.DSL.adapters.dlpack
     dsl/plugins/adapters/dlpack/plugin.py
 )
 
+declare_mlir_python_sources(MLIRPythonSources.DSL.adapters.tvmffi
+  ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
+  ADD_TO_PARENT MLIRPythonSources.DSL.Python
+  SOURCES
+    dsl/plugins/adapters/tvm_ffi/__init__.py
+    dsl/plugins/adapters/tvm_ffi/call_provider.py
+    dsl/plugins/adapters/tvm_ffi/diagnostics.py
+    dsl/plugins/adapters/tvm_ffi/mlir_builder.py
+    dsl/plugins/adapters/tvm_ffi/plugin.py
+    dsl/plugins/adapters/tvm_ffi/spec.py
+    dsl/plugins/adapters/tvm_ffi/tvm_ffi_builder.py
+)
+
 declare_mlir_python_sources(MLIRPythonSources.DSL.astpreprocessor
   ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
   ADD_TO_PARENT MLIRPythonSources.DSL.Python

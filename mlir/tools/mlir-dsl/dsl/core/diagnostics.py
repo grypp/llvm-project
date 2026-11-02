@@ -1523,7 +1523,8 @@ def classify(catalog: type, category: str, subcategory: str, *codes: str) -> Non
     """Classify ``codes`` of ``catalog`` (a ``DiagCatalog`` enum) under
     ``category``/``subcategory``, so they render like the base ones; every code
     must be a member of the catalog. Called once per catalog, next to its
-    definition (the gpu plugin's ``GpuDiagId``)."""
+    definition (the gpu plugin's ``GpuDiagId``, the tvm_ffi plugin's
+    ``TvmFfiDiagId``)."""
     members = getattr(catalog, "__members__", {})
     for code in codes:
         if code not in members:

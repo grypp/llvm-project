@@ -7,8 +7,8 @@
 ``MlirTestDSL`` is one ``BaseDSL`` subclass naming one ``Plugins`` record: the
 builtin types over ``arith``/``math``/``vector``/``llvm`` ops, a ``func.func``
 host entry, gpu kernels, Python control flow as ``scf``, the ``mlir`` pass
-manager and execution engine as its compiler, and the ``dlpack`` adapter
-(numpy arrays and torch tensors arrive through DLPack). A plugin whose dependency is absent is dropped from the
+manager and execution engine as its compiler, and the ``dlpack`` and
+``tvm_ffi`` adapters (numpy arrays and torch tensors arrive through DLPack). A plugin whose dependency is absent is dropped from the
 record at the first construction. ``MLIR_DSL_*`` is its environment prefix. A
 sub-DSL of your own is the same shape with another record
 (``examples/11_custom_dsl.py``).
@@ -25,7 +25,7 @@ from ..dsl.core.dsl import BaseDSL
 from ..dsl.core.plugin import Plugins
 from ..dsl.plugins.ast_preprocessor import scf
 from ..dsl.plugins.compiler import execution_engine
-from ..dsl.plugins.adapters import dlpack
+from ..dsl.plugins.adapters import dlpack, tvm_ffi
 from ..dsl.plugins.decorators.jit import func
 from ..dsl.plugins.decorators.kernels import gpu_plugin
 from ..dsl.plugins.type_ops import UpstreamDialectTypeOps, arith, llvm, vector
@@ -130,8 +130,9 @@ class MlirTestDSL(BaseDSL):
         # @jit over a func.func host entry, then @kernel over gpu.func.
         decorators=[func.Jit(), gpu_plugin.Kernels(chip_option="cubin-chip")],
         # Inbound: anything speaking DLPack (numpy arrays, torch tensors on the
-        # host or a device) through the nanobind extension.
-        adapters=[dlpack.DlpackPlugin()],
+        # host or a device) through the nanobind extension. Outbound: the
+        # compiled entry as a tvm_ffi.Function when enabled.
+        adapters=[dlpack.DlpackPlugin(), tvm_ffi.TvmFfiPlugin()],
     )
 
     def pipeline(self) -> list[str]:

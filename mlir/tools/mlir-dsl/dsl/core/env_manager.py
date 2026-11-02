@@ -448,6 +448,7 @@ class EnvironmentVarManager(LogEnvironmentManager):
     - [DSL_NAME]_LIBS: Path to dependent shared libraries (default: None)
     - [DSL_NAME]_LOC_TRACEBACKS: Maximum depth of location tracebacks (default: 0)
     - [DSL_NAME]_PIPELINE: MLIR pipeline, replacing the composed default (default: None)
+    - [DSL_NAME]_ENABLE_TVM_FFI: Also export compiled functions under the TVM-FFI ABI (default: False)
     - [DSL_NAME]_REMARKS: Regular expression over remark categories to emit (default: "", remarks off)
     - [DSL_NAME]_REMARKS_POLICY: Remark policy, "all" or "final" (default: "all")
     - [DSL_NAME]_REMARKS_OUTPUT: File the remarks stream to; ".yaml" or ".bitstream" picks the format (default: "")
@@ -529,6 +530,11 @@ class EnvironmentVarManager(LogEnvironmentManager):
     # Capacity of the in-memory JIT cache; None is unlimited, 0 disables it.
     jit_cache_max_elems: int | None = env_var(
         "JIT_CACHE_MAX_ELEMS", affects_compile=False, default=None
+    )
+    # Export every compiled function under the TVM-FFI ABI as well (the
+    # ``tvm_ffi`` plugin); keyed because it adds a function to the module.
+    enable_tvm_ffi: bool = env_var(
+        "ENABLE_TVM_FFI", affects_compile=True, default=False
     )
     pipeline: str | None = env_var("PIPELINE", affects_compile=True, default=None)
     # MLIR runtime libraries linked by the JIT.

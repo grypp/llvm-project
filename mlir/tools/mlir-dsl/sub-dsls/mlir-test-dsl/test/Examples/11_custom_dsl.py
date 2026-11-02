@@ -39,7 +39,7 @@ from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps
 # (a) A variant of an existing DSL is its record with a change: `without("gpu")`
 # drops the gpu kernels plugin (so `@kernel` is a diagnostic; `@jit` stays, it
 # is the `func.Jit` plugin's) and `replace` drops the adapters (no tensor
-# adapters); the types, the entry, the compiler and the
+# adapters, no TVM-FFI export); the types, the entry, the compiler and the
 # syntax are inherited.
 class JitOnlyDSL(m.MlirTestDSL):
     plugins = replace(m.MlirTestDSL.plugins.without("gpu"), adapters=())

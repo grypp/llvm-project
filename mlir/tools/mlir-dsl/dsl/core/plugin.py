@@ -33,7 +33,7 @@ its plugins once, as a :class:`Plugins` record on the class::
             ast_preprocessor=scf.ASTPreprocessor(),
             compiler=execution_engine.Compiler(),
             decorators=[func.Jit(), gpu.Kernels()],
-            adapters=[dlpack.DlpackPlugin()],
+            adapters=[dlpack.DlpackPlugin(), tvm_ffi.TvmFfiPlugin()],
         )
 
 ``BaseDSL.__init_subclass__`` installs the decorators of the record on the
@@ -542,7 +542,7 @@ class AdapterPlugin(Plugin):
     type (a ``torch.Tensor``, anything speaking DLPack) meets a ``Pointer[T]``
     parameter like a NumPy array does, and the plugin's dependency is imported
     only when such an object arrives. Outbound, a plugin exposing the compiled
-    entry through another ABI sees the traced module before it is
+    entry through another ABI (TVM-FFI) sees the traced module before it is
     hashed (``attach_to_module``), the lowered module before the engine is
     built (``after_lowering``) and the compiled function before it is cached
     (``wrap_compiled_function``); what it adds to a module is part of the

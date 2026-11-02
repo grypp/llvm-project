@@ -73,6 +73,8 @@ IR dumping, pass inspection and profiling expose tracing, lowering and JIT activ
 
 Optimization remarks can be collected, filtered and written through the compiler plugin.
 
+The optional TVM-FFI adapter exports scalar calls through generated ABI wrappers. It is available when the external runtime is installed.
+
 The call keywords `pipeline`, `container_attrs`, `no_cache`, `extra_link_libs`
 and `compile_only` belong to the framework. They do not bind to user Meta
 parameters; use different names for compile-time keyword arguments.

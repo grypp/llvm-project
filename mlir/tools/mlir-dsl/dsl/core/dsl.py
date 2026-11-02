@@ -2191,7 +2191,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         ):
             module, result, result_spec = self._maybe_profile(build_ir_module)()
             # Plugins add to the module before the hash, so what they add is
-            # part of the cached artifact.
+            # part of the cached artifact (the TVM-FFI wrapper, for one).
             for plugin in self.plugins.adapters:
                 plugin.attach_to_module(
                     self, module, function_name, sig, args, kwonlyargs
@@ -2576,8 +2576,9 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     def invoke_compiled(self, jit_function: Any, trace: _TraceResult) -> Any:
         """Run the compiled ``jit_function`` for the call ``trace`` describes
         and build the call's result (:meth:`_call_result`). A function that
-        prefers the Python arguments is called with them; the packed entry
-        takes the marshalled ``exe_args``. A DSL's deferred step (:class:`PendingCompile`) calls
+        prefers the Python arguments (the TVM-FFI export marshals them
+        itself) is called with them; the packed entry takes the marshalled
+        ``exe_args``. A DSL's deferred step (:class:`PendingCompile`) calls
         this once its compile is done."""
         if getattr(jit_function, "prefers_python_args", False):
             return jit_function(*trace.args, **trace.kwonlyargs)

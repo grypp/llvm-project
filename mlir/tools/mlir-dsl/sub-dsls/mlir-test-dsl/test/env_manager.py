@@ -50,7 +50,7 @@ GROUPS = [
     ("no_cache", "cache_dir", "disable_file_caching", "jit_cache_max_elems"),
     ("keep_ir", "keep_ir_after_passes", "print_ir_after_passes", "loc_tracebacks"),
     ("remarks", "remarks_policy", "remarks_output"),
-    ("arch", "pipeline", "shared_libs"),
+    ("arch", "pipeline", "shared_libs", "enable_tvm_ffi"),
 ]
 
 
@@ -166,12 +166,12 @@ show(manager("T_DEF"))
 # CHECK-NEXT: no_cache=False cache_dir=None disable_file_caching=False jit_cache_max_elems=None
 # CHECK-NEXT: keep_ir='' keep_ir_after_passes='' print_ir_after_passes='' loc_tracebacks=0
 # CHECK-NEXT: remarks='' remarks_policy='all' remarks_output=''
-# CHECK-NEXT: arch=None pipeline=None shared_libs=None
+# CHECK-NEXT: arch=None pipeline=None shared_libs=None enable_tvm_ffi=False
 # Every variable read under the prefix (the spec plus PROFILE_COMPILER, less
 # the computed setting, which has none), all documented on the class.
 suffixes = _prefixed_env_var_suffixes()
 print("suffixes:", len(SPEC), len(suffixes), " ".join(suffixes))
-# CHECK: suffixes: 29 29 ARCH AST_PREPROCESSOR CACHE_DIR DEBUG DEBUGINFO DISABLE_FILE_CACHING DRYRUN ENABLE_PASS_PROFILING FILTER_STACKTRACE JIT_CACHE_MAX_ELEMS JIT_TIME_PROFILING KEEPIR_AFTER_PASSES KEEP_IR LIBS LOC_TRACEBACKS LOG_LEVEL LOG_TO_CONSOLE LOG_TO_FILE NO_CACHE PIPELINE PRINT_IR PRINT_IR_AFTER_PASSES PROFILE_COMPILER REMARKS REMARKS_OUTPUT REMARKS_POLICY SHOW_STACKTRACE VERIFY_TRACE WARNINGS_IGNORE
+# CHECK: suffixes: 30 30 ARCH AST_PREPROCESSOR CACHE_DIR DEBUG DEBUGINFO DISABLE_FILE_CACHING DRYRUN ENABLE_PASS_PROFILING ENABLE_TVM_FFI FILTER_STACKTRACE JIT_CACHE_MAX_ELEMS JIT_TIME_PROFILING KEEPIR_AFTER_PASSES KEEP_IR LIBS LOC_TRACEBACKS LOG_LEVEL LOG_TO_CONSOLE LOG_TO_FILE NO_CACHE PIPELINE PRINT_IR PRINT_IR_AFTER_PASSES PROFILE_COMPILER REMARKS REMARKS_OUTPUT REMARKS_POLICY SHOW_STACKTRACE VERIFY_TRACE WARNINGS_IGNORE
 doc = EnvironmentVarManager.__doc__
 print("documented:", all(f"[DSL_NAME]_{s}" in doc for s in suffixes))
 # CHECK: documented: True
@@ -184,7 +184,7 @@ PRINT_IR=on SHOW_STACKTRACE=0 ENABLE_PASS_PROFILING=yes AST_PREPROCESSOR=false
 DEBUGINFO=no VERIFY_TRACE=True NO_CACHE=ON CACHE_DIR=/some/cache/dir KEEP_IR=1
 KEEPIR_AFTER_PASSES=canonicalize,cse PRINT_IR_AFTER_PASSES=cse REMARKS=llvm-.*
 REMARKS_POLICY=final REMARKS_OUTPUT=/some/remarks.yaml DRYRUN=1 ARCH=chip-a
-WARNINGS_IGNORE=1 DISABLE_FILE_CACHING=1 JIT_CACHE_MAX_ELEMS=16
+WARNINGS_IGNORE=1 DISABLE_FILE_CACHING=1 JIT_CACHE_MAX_ELEMS=16 ENABLE_TVM_FFI=1
 PIPELINE=canonicalize LIBS=/a.so:/b.so LOC_TRACEBACKS=3"""
 env = manager("T_PARSE", **parse(PARSE))
 show(env)
@@ -195,7 +195,7 @@ show(env)
 # CHECK-NEXT: no_cache=True cache_dir='/some/cache/dir' disable_file_caching=True jit_cache_max_elems=16
 # CHECK-NEXT: keep_ir='1' keep_ir_after_passes='canonicalize,cse' print_ir_after_passes='cse' loc_tracebacks=3
 # CHECK-NEXT: remarks='llvm-.*' remarks_policy='final' remarks_output='/some/remarks.yaml'
-# CHECK-NEXT: arch='chip-a' pipeline='canonicalize' shared_libs='/a.so:/b.so'
+# CHECK-NEXT: arch='chip-a' pipeline='canonicalize' shared_libs='/a.so:/b.so' enable_tvm_ffi=True
 # Values are read once, at construction: a later change to the process
 # environment is seen by a fresh manager only.
 os.environ["T_PARSE_DRYRUN"] = "0"
@@ -294,12 +294,12 @@ print("readers:", [reader(a) for a in ANNOTATIONS])
 keys = sorted(e.key_name for e in SPEC)
 in_key = {e.key_name for e in SPEC if e.affects_compile}
 print("in key:", " ".join(k for k in keys if k in in_key))
-# CHECK: in key: arch ast_preprocessor debug debuginfo dryrun keep_ir_after_passes loc_tracebacks pipeline remarks remarks_output remarks_policy shared_libs
+# CHECK: in key: arch ast_preprocessor debug debuginfo dryrun enable_tvm_ffi keep_ir_after_passes loc_tracebacks pipeline remarks remarks_output remarks_policy shared_libs
 print("not in key:", " ".join(k for k in keys if k not in in_key))
 # CHECK: not in key: cache_dir console_for_profiling disable_file_caching enable_pass_profiling filter_stacktrace jit_cache_max_elems jit_time_profiling keep_ir log_level log_to_console log_to_file no_cache print_ir print_ir_after_passes show_stacktrace verify_trace warnings_ignore
 base = key("T_KEY")
 print("defaults:", base)
-# CHECK: defaults: ast_preprocessor=True;debug=False;debuginfo=False;dryrun=False;keep_ir_after_passes='';loc_tracebacks=0;remarks='';remarks_output='';remarks_policy='all';
+# CHECK: defaults: ast_preprocessor=True;debug=False;debuginfo=False;dryrun=False;enable_tvm_ffi=False;keep_ir_after_passes='';loc_tracebacks=0;remarks='';remarks_output='';remarks_policy='all';
 # Settings that only govern caching, printing or logging never enter it, so a
 # change to them cannot miss the cache.
 NON_COMPILE = """PRINT_IR=1 NO_CACHE=1 LOG_LEVEL=20 CACHE_DIR=/x KEEP_IR=1 VERIFY_TRACE=1
@@ -310,7 +310,7 @@ print("unchanged by non-compile settings:", key("T_KEY", **parse(NON_COMPILE)) =
 # Each compile setting changes the key; together they sit at their sorted
 # positions, `arch`, `pipeline` and `shared_libs` present only when set.
 COMPILE = """ARCH=chip-a AST_PREPROCESSOR=0 DEBUGINFO=1 DRYRUN=1
-KEEPIR_AFTER_PASSES=cse LOC_TRACEBACKS=2 PIPELINE=cse REMARKS=llvm-.*
+ENABLE_TVM_FFI=1 KEEPIR_AFTER_PASSES=cse LOC_TRACEBACKS=2 PIPELINE=cse REMARKS=llvm-.*
 REMARKS_OUTPUT=/r.yaml REMARKS_POLICY=final LIBS=/l.so"""
 for suffix, value in parse(COMPILE).items():
     k = key("T_KEY", **{suffix: value})
@@ -321,6 +321,7 @@ for suffix, value in parse(COMPILE).items():
 # CHECK: AST_PREPROCESSOR -> True ['ast_preprocessor=False']
 # CHECK: DEBUGINFO -> True ['debuginfo=True']
 # CHECK: DRYRUN -> True ['dryrun=True']
+# CHECK: ENABLE_TVM_FFI -> True ['enable_tvm_ffi=True']
 # CHECK: KEEPIR_AFTER_PASSES -> True ["keep_ir_after_passes='cse'"]
 # CHECK: LOC_TRACEBACKS -> True ['loc_tracebacks=2']
 # CHECK: PIPELINE -> True ["pipeline='cse'"]
@@ -329,7 +330,7 @@ for suffix, value in parse(COMPILE).items():
 # CHECK: REMARKS_POLICY -> True ["remarks_policy='final'"]
 # CHECK: LIBS -> True ["shared_libs='/l.so'"]
 print("all:", key("T_KEY", **parse(COMPILE)))
-# CHECK: all: arch='chip-a';ast_preprocessor=False;debug=False;debuginfo=True;dryrun=True;keep_ir_after_passes='cse';loc_tracebacks=2;pipeline='cse';remarks='llvm-.*';remarks_output='/r.yaml';remarks_policy='final';shared_libs='/l.so';
+# CHECK: all: arch='chip-a';ast_preprocessor=False;debug=False;debuginfo=True;dryrun=True;enable_tvm_ffi=True;keep_ir_after_passes='cse';loc_tracebacks=2;pipeline='cse';remarks='llvm-.*';remarks_output='/r.yaml';remarks_policy='final';shared_libs='/l.so';
 # DEBUG enters the key itself and through the default it raises.
 print("debug:", key("T_KEY", DEBUG="1"))
 # CHECK: debug: ast_preprocessor=True;debug=True;debuginfo=True;dryrun=False;
@@ -420,7 +421,7 @@ for env in (a, b, short):
 # CHECK-NEXT: B_DSL False None None 0
 # CHECK-NEXT: A False None None 0
 print("a key:", a.cache_key_str())
-# CHECK: a key: arch='chip-b';ast_preprocessor=True;debug=False;debuginfo=False;dryrun=True;keep_ir_after_passes='';loc_tracebacks=5;pipeline='cse';
+# CHECK: a key: arch='chip-b';ast_preprocessor=True;debug=False;debuginfo=False;dryrun=True;enable_tvm_ffi=False;keep_ir_after_passes='';loc_tracebacks=5;pipeline='cse';
 print("b == short == defaults:", b.cache_key_str() == short.cache_key_str() == base)
 # CHECK: b == short == defaults: True
 d = m.MlirTestDSL().envar
@@ -466,7 +467,7 @@ print("defaults:", sub.dryrun, sub.tile, sub.backend, sub.label, sub.target)
 print("base untouched:", manager("T_SUB").dryrun, "dryrun" in sub.cache_key_str())
 # CHECK: base untouched: False False
 print("key:", sub.cache_key_str())
-# CHECK: key: ast_preprocessor=True;debug=False;debuginfo=False;keep_ir_after_passes='';label='T_SUB-128';loc_tracebacks=0;remarks='';remarks_output='';remarks_policy='all';target='HOST';tile=128;
+# CHECK: key: ast_preprocessor=True;debug=False;debuginfo=False;enable_tvm_ffi=False;keep_ir_after_passes='';label='T_SUB-128';loc_tracebacks=0;remarks='';remarks_output='';remarks_policy='all';target='HOST';tile=128;
 os.environ.update(
     {"T_SUB_TILE": "64", "T_SUB_BACKEND": "cuda", "T_SUB_TARGET": "device"}
 )

@@ -57,6 +57,7 @@ config.environment["MLIR_DSL_CACHE_DIR"] = os.path.join(
     config.test_exec_root, "Output", "mlir_dsl_cache"
 )
 
+
 def have_host_jit_feature_support(feature_name):
     """Whether the host can run the ExecutionEngine (asked of mlir-runner)."""
     mlir_runner_exe = lit.util.which("mlir-runner", config.llvm_tools_dir)
@@ -74,5 +75,31 @@ def have_host_jit_feature_support(feature_name):
     mlir_runner_cmd.wait()
     return "true" in mlir_runner_out
 
+
 if config.enable_execution_engine and have_host_jit_feature_support("jit"):
     config.available_features.add("host-supports-jit")
+
+# The TVM-FFI export test needs the optional ``tvm_ffi`` package of the test
+# interpreter. Probed from a neutral cwd: importing tvm_ffi from inside its own
+# package directory fails on a stdlib name clash.
+try:
+    _probe = subprocess.run(
+        [config.python_executable, "-c", "import tvm_ffi"],
+        capture_output=True,
+        cwd=config.test_exec_root if os.path.isdir(config.test_exec_root) else None,
+        timeout=120,
+    )
+    if _probe.returncode == 0:
+        config.available_features.add("tvm_ffi")
+        # Keyword arguments through the exported function need the package's
+        # ``utils.kwargs_wrapper`` (apache-tvm-ffi 0.1.11 and newer).
+        _probe_kwargs = subprocess.run(
+            [config.python_executable, "-c", "import tvm_ffi.utils.kwargs_wrapper"],
+            capture_output=True,
+            cwd=config.test_exec_root if os.path.isdir(config.test_exec_root) else None,
+            timeout=120,
+        )
+        if _probe_kwargs.returncode == 0:
+            config.available_features.add("tvm_ffi_kwargs")
+except Exception:
+    pass

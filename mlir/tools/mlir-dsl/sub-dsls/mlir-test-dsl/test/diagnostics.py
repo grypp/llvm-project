@@ -49,11 +49,12 @@ from mlir.dsl.core.diagnostics import (
 from mlir.dsl.core.env_manager import EnvironmentVarManager
 from mlir.dsl.core.user_op import dsl_user_op
 from mlir.dsl.plugins.decorators.kernels.gpu_plugin import GpuDiagId, check_arch
+from mlir.dsl.plugins.adapters.tvm_ffi.diagnostics import TvmFfiDiagId
 
 HERE = os.path.abspath(__file__)
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 TMP = tempfile.mkdtemp()
-CATALOGS = (DiagId, WarnId, GpuDiagId)
+CATALOGS = (DiagId, WarnId, GpuDiagId, TvmFfiDiagId)
 with open(HERE, encoding="utf-8") as f:
     SRC = f.read().splitlines()
 
@@ -127,6 +128,7 @@ for cat in CATALOGS:
 # CHECK: DiagId '' | ARG CALL CONFIG CONTAINER PHASE POINTER SCOPE STRUCT TYPE UNSUP | not zero-cost / unsupported / usage
 # CHECK: WarnId '' | TYPE | warning
 # CHECK: GpuDiagId 'gpu' | CONFIG LAUNCH | usage
+# CHECK: TvmFfiDiagId 'tvm_ffi' | CALL UNSUP | unsupported / usage
 # The classification table is keyed by catalog, so two catalogs may share a
 # code name (see Examples/11_custom_dsl.py); every member of each is classified.
 all_codes = {(cat, d.name) for cat in CATALOGS for d in cat}
