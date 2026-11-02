@@ -24,6 +24,7 @@ concrete plugin; it re-exports the bases of ``mlir.dsl.core.plugin``.
 """
 
 from ..core.plugin import (
+    ASTPreprocessorPlugin,
     AdapterPlugin,
     CompilerPlugin,
     DecoratorPlugin,
@@ -34,6 +35,7 @@ from ..core.plugin import (
 )
 
 __all__ = [
+    "ASTPreprocessorPlugin",
     "AdapterPlugin",
     "CompilerPlugin",
     "DecoratorPlugin",

@@ -1184,6 +1184,17 @@ class DiagId(DiagCatalog, enum.Enum):
             "that is not taken does not assign the variables inside it.",
         ),
     )
+    SCOPE_REGION_LOCAL_ESCAPES = (
+        "`{var}` is read here, but it was created inside a {region} body (at "
+        "{birth_file}:{birth_line}) and belongs to that body. The body is compiled "
+        "once, so this read outside it would keep one pass's value even when the body "
+        "runs zero times or takes a different path.",
+        (
+            "Read `{var}` inside the {region} body that creates it.",
+            "Create `{var}` as a {staged} before the {region}, e.g. `{var} = "
+            "Int32(0)`, and assign it inside so the value is carried on every path.",
+        ),
+    )
 
     # --- CONTAINER ---
     CONTAINER_STRUCTURE_CHANGED = (
@@ -1233,6 +1244,26 @@ class DiagId(DiagCatalog, enum.Enum):
             "supported form, or do it in plain Python outside the compiled function "
             "and pass the result in.",
         ),
+    )
+    UNSUP_EARLY_EXIT = (
+        "Early exit ({kind}) is not allowed in {where}. The `{kind}` sits inside a "
+        "for/while/if controlled by a {staged}, and that block always runs to its "
+        "end when the kernel runs, so it cannot leave early. (An `if`/`while` whose "
+        "condition is a {meta} runs in Python and may exit early.)",
+        (
+            "If the condition is decided at compile time, make it a {meta} (a "
+            "plain Python value, not a staged one); the `{kind}` then runs in Python "
+            "and is allowed.",
+            "If the condition is only decided when the kernel runs, replace the "
+            "`{kind}` with a runtime `Boolean` flag: set it where the `{kind}` is "
+            "(e.g. `done = Boolean(True)`) and wrap the code that must be skipped in "
+            "`if not done:`.",
+        ),
+    )
+    UNSUP_NO_SOURCE = (
+        "The source of `{func}` is not available (for example it was defined in a REPL "
+        "or through `exec()`), so it cannot be compiled.",
+        ("Save the function to a `.py` file and import it from there.",),
     )
 
     # --- ARG ---
@@ -1508,6 +1539,7 @@ _classify_error(
     NOT_ZERO_COST,
     "a variable is not set on every path of a runtime for/while/if",
     "SCOPE_UNBOUND_NAME_IN_TRACE",
+    "SCOPE_REGION_LOCAL_ESCAPES",
 )
 _classify_error(
     NOT_ZERO_COST,
@@ -1520,6 +1552,8 @@ _classify_error(
     UNSUPPORTED,
     "a Python construct the DSL does not compile yet",
     "UNSUP_SYNTAX",
+    "UNSUP_EARLY_EXIT",
+    "UNSUP_NO_SOURCE",
 )
 _classify_error(
     USAGE,

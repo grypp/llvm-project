@@ -20,6 +20,7 @@ from ..dialects import emitc
 from ..dsl.core.diagnostics import register_dsl_package
 from ..dsl.core.dsl import BaseDSL
 from ..dsl.core.plugin import Plugins
+from ..dsl.plugins.ast_preprocessor import scf
 from ..dsl.plugins.decorators.jit import func
 from ..dsl.plugins.type_ops import UpstreamDialectTypeOps, arith, llvm, vector
 
@@ -73,6 +74,7 @@ class EmitCTestDSL(BaseDSL):
 
     plugins = Plugins(
         type_ops=EmitCScalarOps(scalars=arith, vectors=vector, memory=llvm),
+        ast_preprocessor=scf.ASTPreprocessor(),
         decorators=[func.Jit()],
     )
 

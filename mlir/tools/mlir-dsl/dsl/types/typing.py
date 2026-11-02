@@ -3523,6 +3523,22 @@ def make_struct(name: str, **fields: Any) -> type:
     return struct(cls)
 
 
+# =============================================================================
+# Dialect-call downcast
+# =============================================================================
+
+
+def as_ir_value(value: Any) -> Any:
+    """Return the ``ir.Value`` of a DSL leaf, or ``value`` itself.
+
+    The preprocessor wraps the arguments of direct dialect calls with this, so
+    a ``Numeric`` or a ``Pointer`` can be passed where an op takes a raw value.
+    """
+    if isinstance(value, (Numeric, Pointer)):
+        return value.ir_value()
+    return value
+
+
 __all__ = [
     "DslType",
     "Numeric",
@@ -3565,6 +3581,7 @@ __all__ = [
     "dtype",
     "from_numpy_dtype",
     "as_numeric",
+    "as_ir_value",
     "cast",
     "align",
     "Pointer",

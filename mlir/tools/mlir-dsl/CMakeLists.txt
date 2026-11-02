@@ -48,6 +48,8 @@ declare_mlir_python_sources(MLIRPythonSources.DSL.astpreprocessor
   ADD_TO_PARENT MLIRPythonSources.DSL.Python
   SOURCES
     dsl/plugins/ast_preprocessor/__init__.py
+    dsl/plugins/ast_preprocessor/helpers.py
+    dsl/plugins/ast_preprocessor/preprocessor.py
 )
 
 declare_mlir_python_sources(MLIRPythonSources.DSL.astpreprocessor.scf

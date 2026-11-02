@@ -6,7 +6,10 @@
 The ``scf`` executors of the ``scf`` AST preprocessor plugin and the logical
 helpers of its rewrites.
 
-Every executor threads
+The preprocessor turns native ``for``/``if``/``while`` statements into region
+functions that follow the write_args protocol; ``BaseDSL.__init__`` installs
+the executors below (``ASTPreprocessor.executors``) through
+``Executor.set_functions``. Every executor threads
 the region's write_args through ``tree_flatten``/``tree_unflatten``: leaves
 become ``scf`` iter_args and results, META slots pass through and must stay
 equal, a reference leaf that is only a store base is not carried, and a slot
@@ -19,13 +22,14 @@ and a ``while`` probes its condition once to choose between a Python loop and
 
 import functools
 from collections.abc import Callable, Sequence
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from ..... import ir
 from .....dialects import scf
 from ....core.common import DSLRuntimeError, DSLUserCodeError
 from ....core.diagnostics import DiagId
 from ....core.staging import is_mlir_op
+from .builders import _promote_loop_bounds
 from ....types.typing import Boolean, as_numeric
 from ....util.logger import log
 from ....util.tree_utils import (
@@ -41,11 +45,43 @@ from ....util.tree_utils import (
     tree_unflatten,
 )
 
-__all__ = ["ScfGenerator", "and_", "or_", "not_", "any_", "all_", "in_"]
+__all__ = ["LoopUnroll", "ScfGenerator", "and_", "or_", "not_", "any_", "all_", "in_"]
 
 # =============================================================================
 # AST Helpers
 # =============================================================================
+
+# The name the SCF lowering copies from ``scf.for`` onto the latch branch.
+_LOOP_ANNOTATION_ATTR = "llvm.loop_annotation"
+
+
+class LoopUnroll(ir.Attribute):
+    """``#llvm.loop_annotation<unroll = <...>>`` built from ``count``/``full``.
+
+    ``count=1`` also sets ``disable = true`` (an unroll count of one asks for
+    no unrolling); other keywords are ignored.
+    """
+
+    def __init__(self, **kwargs: Union[int, bool]) -> None:
+        valid_keys = ("count", "full")
+
+        def to_mlir_attr(val: Union[int, bool]) -> str:
+            if isinstance(val, bool):
+                return "true" if val else "false"
+            elif isinstance(val, int):
+                return f"{val} : i32"
+            else:
+                raise DSLRuntimeError(f"{type(val)} is not supported")
+
+        cfg = {key: to_mlir_attr(kwargs[key]) for key in valid_keys if key in kwargs}
+        if kwargs.get("count", None) == 1:
+            cfg["disable"] = "true"
+
+        unroll = "<" + ", ".join(f"{key} = {value}" for key, value in cfg.items()) + ">"
+
+        super().__init__(
+            ir.Attribute.parse(f"#llvm.loop_annotation<unroll = {unroll}>")
+        )
 
 
 def _meta_equal(lhs: Any, rhs: Any) -> bool:
@@ -113,6 +149,22 @@ def _create_if_op(
     for block, region in zip(blocks, if_op.regions):
         block.append_to(region)
     return if_op
+
+
+def _attr_const_check(attr: object, expected_type: type, attr_name: str) -> None:
+    """Require the loop option ``attr_name`` to be a Python ``expected_type``.
+
+    A staged value raises ``PHASE_REQUIRES_CONSTANT``; the exact type check
+    keeps a ``bool`` out of an ``int`` option and vice versa.
+    """
+    if is_mlir_op(attr):
+        raise DSLUserCodeError(DiagId.PHASE_REQUIRES_CONSTANT, what=f"`{attr_name}`")
+    if type(attr) is not expected_type:
+        raise DSLUserCodeError(
+            f"The loop option `{attr_name}` must be a Python `{expected_type.__name__}`, "
+            f"but got `{attr!r}` of type `{type(attr).__name__}`.",
+            suggestion=f"Pass a compile-time `{expected_type.__name__}` for `{attr_name}`.",
+        )
 
 
 class ScfGenerator:
@@ -336,6 +388,83 @@ class ScfGenerator:
 # =============================================================================
 
 
+def _loop_execute_range_dynamic(
+    func: Callable[..., Any],
+    start: Any,
+    stop: Any,
+    step: Any,
+    *,
+    write_args: Sequence[Any] = (),
+    full_write_args_count: int = 0,
+    write_args_names: Sequence[str] = (),
+    mutated_names: Sequence[str] = (),
+    unroll: int = -1,
+    unroll_full: bool = False,
+    **options: Any,
+) -> Any:
+    """Build an ``scf.for`` over integer bounds, with an optional unroll annotation.
+
+    :param func: The loop body, ``func(iv, *write_args) -> write_args``
+    :param start: The bounds; ``as_numeric``-ed, integer, promoted to one dtype
+        that is also the induction variable's (no ``index``)
+    :param write_args: The region's write_args, seeded from the enclosing scope
+    :param full_write_args_count: The count of leading plain-store write_args
+        (the rest are method-call receivers); part of the protocol, every
+        write_arg is threaded alike
+    :param write_args_names: The write_args' names, for the diagnostics
+    :param mutated_names: The store-base-only write_args (the mutation rule)
+    :param unroll: The unroll count of the ``llvm.loop_annotation``; -1 for none
+    :param unroll_full: Ask for full unrolling instead of a count
+    :param options: Any other keyword is rejected with ``CALL_ARGUMENTS``
+    :return: The write-back value: ``None``, one value, or a list of them
+    """
+    if options:
+        raise DSLUserCodeError(
+            DiagId.CALL_ARGUMENTS,
+            function_name="range",
+            detail=f"no loop option is named `{next(iter(options))}`",
+        )
+    start_, stop_, step_, dtype = _promote_loop_bounds(start, stop, step)
+
+    # The loop options become attributes, so they must be Python values.
+    _attr_const_check(unroll, int, "unroll")
+    _attr_const_check(unroll_full, bool, "unroll_full")
+    unroll_attr = None
+    if unroll_full:
+        unroll_attr = LoopUnroll(full=True)
+    elif unroll != -1:
+        unroll_attr = LoopUnroll(count=unroll)
+
+    scf_gen = ScfGenerator("for", write_args, write_args_names, mutated_names)
+    dyn_yield_ops = scf_gen.unpack(mutated_names)
+    log().debug("Creating scf.ForOp start=%s stop=%s step=%s", start_, stop_, step_)
+    try:
+        for_op = scf.ForOp(
+            start_.ir_value(), stop_.ir_value(), step_.ir_value(), dyn_yield_ops
+        )
+    except Exception as e:
+        yield_ops = "\n".join(
+            f"\t\t{i} => {d} : type : {type(d)}" for i, d in enumerate(dyn_yield_ops)
+        )
+        raise DSLRuntimeError(
+            f"Failed to create dynamic for loop \n\t\tstart={start_}: type : {type(start_)}"
+            f"\n\t\tstop={stop_}: type : {type(stop_)}\n\t\tstep={step_}: type : {type(step_)}"
+            f", \n\tdyn_yield_ops:\n{yield_ops}"
+        ) from e
+    if unroll_attr is not None:
+        for_op.attributes[_LOOP_ANNOTATION_ATTR] = unroll_attr
+
+    with ir.InsertionPoint(for_op.body):
+        # The induction variable takes the promoted dtype; no cast.
+        iv = dtype(for_op.induction_variable)
+        func_args = scf_gen.pack(for_op.inner_iter_args)
+        log().debug("For body builder: %s func_args: %s", iv, func_args)
+        scf.YieldOp(scf_gen.yield_values(func(iv, *func_args)))
+
+    log().debug("Completed scf.for \n[%s]", for_op)
+    return scf_gen.results(for_op.results)
+
+
 def _if_execute_dynamic(
     pred: Any,
     then_block: Callable[..., Any],
@@ -410,6 +539,96 @@ def _if_execute_dynamic(
 
     log().debug("Completed scf.if \n[%s]", if_op)
     return scf_gen.results(if_op.results, then_def)
+
+
+def _while_execute_dynamic(
+    while_before_block: Callable[..., Any],
+    while_after_block: Optional[Callable[..., Any]] = None,
+    write_args: Sequence[Any] = (),
+    full_write_args_count: int = 0,
+    write_args_names: Sequence[str] = (),
+    mutated_names: Sequence[str] = (),
+) -> Any:
+    """Run a Python-bool ``while`` in Python, else build an ``scf.while``.
+
+    The condition is probed once in a detached holder block: a Python-bool
+    condition runs the loop in Python (the holder is erased; if the probe
+    built IR the condition is evaluated again under the live insertion
+    point), a runtime one builds ``scf.while``. The condition's Python side
+    effects may therefore run twice.
+
+    :param while_before_block: ``before(*write_args) -> (condition, write_args)``
+    :param while_after_block: The body, ``after(*write_args) -> write_args``
+    :param write_args: The region's write_args
+    :param full_write_args_count: The count of leading plain-store write_args;
+        part of the protocol, every write_arg is threaded alike
+    :param write_args_names: The write_args' names, for the diagnostics
+    :param mutated_names: The store-base-only write_args (the mutation rule)
+    :return: The write-back value: ``None``, one value, or a list of them
+    """
+    if while_after_block is None:
+        raise DSLRuntimeError("_while_execute_dynamic needs a while_after_block")
+    args = list(write_args)
+
+    holder, block = _detached_block()
+    try:
+        with ir.InsertionPoint(block):
+            cond, before_results = while_before_block(*args)
+        staged = is_mlir_op(cond)
+        probe_is_pure = len(block.operations) == 0
+    finally:
+        holder.erase()
+
+    if not staged:
+        if not probe_is_pure:
+            # The probe built IR the Python loop cannot keep: evaluate it again.
+            cond, before_results = while_before_block(*args)
+        state = ScfGenerator._normalize_region_result_to_list(before_results)
+        while cond:
+            state = ScfGenerator._normalize_region_result_to_list(
+                while_after_block(*state)
+            )
+            cond, before_results = while_before_block(*state)
+            if is_mlir_op(cond):
+                raise DSLUserCodeError(
+                    DiagId.PHASE_DYNAMIC_TO_STATIC_BOOL,
+                    context="the `while` condition was a Python value on the first "
+                    "evaluation and a runtime value on a later one",
+                )
+            state = ScfGenerator._normalize_region_result_to_list(before_results)
+        if not state:
+            return None
+        return state[0] if len(state) == 1 else state
+
+    scf_gen = ScfGenerator("while", args, write_args_names, mutated_names)
+    dyn_yield_ops = scf_gen.unpack(mutated_names)
+    result_types = scf_gen.ir_types
+    try:
+        while_op = scf.WhileOp(result_types, dyn_yield_ops)
+        before = while_op.before.blocks.append(*result_types)
+        after = while_op.after.blocks.append(*result_types)
+    except Exception as e:
+        yield_ops = "\n".join(
+            f"\t\t{i} => {d} : type : {type(d)}" for i, d in enumerate(dyn_yield_ops)
+        )
+        raise DSLRuntimeError(
+            f"Failed to create dynamic while loop with yield_ops:\n{yield_ops}"
+        ) from e
+
+    with ir.InsertionPoint(before):
+        # Build the before (condition) block
+        flat_args = scf_gen.pack(before.arguments)
+        cond, before_results = while_before_block(*flat_args)
+        ir_results_list = scf_gen.yield_values(before_results)
+        scf.ConditionOp(_condition(cond, "while condition").ir_value(), ir_results_list)
+
+    with ir.InsertionPoint(after):
+        # Build the after (body) block
+        flat_args = scf_gen.pack(after.arguments)
+        scf.YieldOp(scf_gen.yield_values(while_after_block(*flat_args)))
+
+    log().debug("Completed scf.while \n[%s]", while_op)
+    return scf_gen.results(while_op.results)
 
 
 def _ifexp_execute_dynamic(

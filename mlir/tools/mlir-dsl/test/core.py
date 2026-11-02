@@ -178,3 +178,34 @@ bind_device_argument(7)
 assert forwarded_options == ["device policy"]
 print("DEVICE BOUNDARY CONTRACT: custom options reach validation")
 # CHECK-NEXT: DEVICE BOUNDARY CONTRACT: custom options reach validation
+
+from mlir.dsl.plugins.ast_preprocessor import scf
+factory_calls = []
+rewrite_mode = ["a"]
+class Factory(scf.ASTPreprocessor):
+    def make_preprocessor(self, dsl, package, *, decorator_names):
+        factory_calls.append(tuple(decorator_names))
+        return super().make_preprocessor(dsl, package, decorator_names=decorator_names)
+
+class KeyedDSL(Concrete):
+    plugins = Plugins(type_ops=UpstreamDialectTypeOps(scalars=arith), ast_preprocessor=Factory(), decorators=[func.Jit()])
+    def preprocess_key(self, function):
+        return super().preprocess_key(function), rewrite_mode[0]
+
+@KeyedDSL.jit
+def keyed(value: Int32):
+    result = value + 1
+
+original = keyed.__wrapped__.__code__
+keyed(3)
+first = keyed.__wrapped__.__code__
+keyed(4)
+assert keyed.__wrapped__.__code__ is first
+rewrite_mode[0] = "b"
+keyed(5)
+assert keyed.__wrapped__.__code__ is not first
+assert first is not original
+assert keyed.__wrapped__._original_code is original
+assert factory_calls == [("jit",)]
+print("PREPROCESS CONTRACT: factory and keyed rewrite from original code")
+# CHECK-NEXT: PREPROCESS CONTRACT: factory and keyed rewrite from original code

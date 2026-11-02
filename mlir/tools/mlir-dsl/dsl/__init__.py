@@ -59,6 +59,7 @@ from .types.typing import (
     dtype,
     from_numpy_dtype,
     as_numeric,
+    as_ir_value,
     cast,
     align,
     Pointer,
@@ -77,6 +78,7 @@ from .types.typing import max_ as max, min_ as min
 # The sub-DSL authoring surface
 from .core.dsl import BaseDSL
 from .core.plugin import (
+    ASTPreprocessorPlugin,
     AdapterPlugin,
     CompilerPlugin,
     DecoratorPlugin,
@@ -86,7 +88,7 @@ from .core.plugin import (
     TypeOpsPlugin,
 )
 from .core.mlir_op import OpEmitter, current_emitter
-from .core.staging import is_mlir_op
+from .core.staging import Executor, is_mlir_op
 from .util.tree_utils import register_container, register_leaf, register_leaf_protocol
 from .core.arguments import JitArgAdapterRegistry
 
@@ -138,6 +140,7 @@ __all__ = [
     "dtype",
     "from_numpy_dtype",
     "as_numeric",
+    "as_ir_value",
     "cast",
     "align",
     "Pointer",
@@ -153,6 +156,7 @@ __all__ = [
     "max",
     "min",
     "BaseDSL",
+    "ASTPreprocessorPlugin",
     "Plugin",
     "Plugins",
     "TypeOpsPlugin",
@@ -162,6 +166,7 @@ __all__ = [
     "AdapterPlugin",
     "OpEmitter",
     "current_emitter",
+    "Executor",
     "is_mlir_op",
     "register_container",
     "register_leaf",

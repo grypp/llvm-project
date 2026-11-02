@@ -23,6 +23,7 @@ from ..dsl.core.common import DSLUserCodeError
 from ..dsl.core.diagnostics import DiagId, register_dsl_package
 from ..dsl.core.dsl import BaseDSL
 from ..dsl.core.plugin import Plugins
+from ..dsl.plugins.ast_preprocessor import scf
 from ..dsl.plugins.compiler import execution_engine
 from ..dsl.plugins.adapters import dlpack
 from ..dsl.plugins.decorators.jit import func
@@ -124,6 +125,7 @@ class MlirTestDSL(BaseDSL):
 
     plugins = Plugins(
         type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),
+        ast_preprocessor=scf.ASTPreprocessor(),
         compiler=execution_engine.Compiler(),
         # @jit over a func.func host entry, then @kernel over gpu.func.
         decorators=[func.Jit(), gpu_plugin.Kernels(chip_option="cubin-chip")],
