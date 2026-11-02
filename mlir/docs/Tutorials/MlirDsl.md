@@ -75,6 +75,8 @@ Optimization remarks can be collected, filtered and written through the compiler
 
 The optional TVM-FFI adapter exports scalar calls through generated ABI wrappers. It is available when the external runtime is installed.
 
+TVM-FFI exports support tensor arguments with shape, stride and dtype validation.
+
 The call keywords `pipeline`, `container_attrs`, `no_cache`, `extra_link_libs`
 and `compile_only` belong to the framework. They do not bind to user Meta
 parameters; use different names for compile-time keyword arguments.

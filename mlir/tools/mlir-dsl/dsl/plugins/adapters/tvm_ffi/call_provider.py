@@ -25,7 +25,7 @@ from .tvm_ffi_builder import CallContext, CallProvider, TVMFFIBuilder, TVMFFITyp
 # The compile-time kinds: asserted by the wrapper, never forwarded.
 _CONST_PARAMS = (spec.ConstNone, spec.ConstInt, spec.ConstBool, spec.ConstFloat)
 # The kinds whose ``var`` holds an opaque handle.
-_HANDLE_PARAMS = ()
+_HANDLE_PARAMS = (spec.DataPointer,)
 
 
 class NopCallProvider(CallProvider):
@@ -97,6 +97,19 @@ class DirectCallProvider(CallProvider, TVMFFIBuilder):
                 operands.append(context.matched_var_binding[param])
             elif isinstance(param, _HANDLE_PARAMS):
                 operands.append(context.matched_var_binding[param.var])
+            elif isinstance(param, spec.Tensor):
+                operands.append(context.matched_var_binding[param.data])
+                for dim in param.shape:
+                    if isinstance(dim, spec.Var):
+                        operands.append(context.matched_var_binding[dim])
+                if param.strides is not None:
+                    for stride in param.strides:
+                        if isinstance(stride, spec.Var):
+                            operands.append(context.matched_var_binding[stride])
+            elif isinstance(param, spec.Shape):
+                for dim in param.shape:
+                    if isinstance(dim, spec.Var):
+                        operands.append(context.matched_var_binding[dim])
             else:
                 raise DSLUserCodeError(
                     TvmFfiDiagId.UNSUP_PARAM,

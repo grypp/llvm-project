@@ -409,6 +409,20 @@ class TvmFfiPlugin(AdapterPlugin):
                 plan.params.append(spec.Var(name, dtype))
                 operand_types.append(str(scalar.mlir_type))
                 continue
+            if isinstance(annotation, t.TypedPointer) or isinstance(arg, t.Pointer):
+                space = (
+                    annotation.space
+                    if isinstance(annotation, t.TypedPointer)
+                    else arg.space
+                )
+                if space != 0:
+                    raise _NotExportable(
+                        f"`{name}` is a pointer in address space {space}"
+                    )
+                plan.params.append(spec.DataPointer(name))
+                plan.pointer_positions.add(position)
+                operand_types.append(str(llvm.PointerType.get()))
+                continue
             raise _NotExportable(f"parameter `{name}` ({type(arg).__name__})")
         entry_types = [str(ty) for ty in input_types]
         if operand_types != entry_types:
