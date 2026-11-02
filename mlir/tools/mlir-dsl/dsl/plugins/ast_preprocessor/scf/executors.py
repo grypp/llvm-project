@@ -47,7 +47,16 @@ from ....util.tree_utils import (
 )
 
 __all__ = [
-    "normalize_range","LoopUnroll", "ScfGenerator", "and_", "or_", "not_", "any_", "all_", "in_"]
+    "LoopUnroll",
+    "ScfGenerator",
+    "and_",
+    "or_",
+    "not_",
+    "any_",
+    "all_",
+    "in_",
+    "normalize_range",
+]
 
 # =============================================================================
 # AST Helpers
@@ -388,6 +397,47 @@ class ScfGenerator:
 # =============================================================================
 # Executors
 # =============================================================================
+
+
+def normalize_range(
+    start: Any, stop: Any, step: Any
+) -> tuple[Any, Any, Any, Callable[[Any], Any]]:
+    """Python ``range`` semantics for a staged loop whose step may be negative.
+
+    ``range(start, stop, step)`` with ``step < 0`` yields ``start + k * step``
+    for the same count of ``k`` as ``range(stop, start, -step)``, so such a
+    loop becomes the positive-step loop over the swapped bounds and the body
+    sees ``iv_of(iv') = start + stop - iv'``, the descending value in the
+    original order.
+
+    :return: ``(start', stop', step', iv_of)``: a positive Python step leaves
+        everything as it is (``iv_of`` is the identity); a negative Python
+        step swaps the bounds and negates the step in Python, so no IR is
+        emitted for the sign; a staged step is tested at run time
+        (``arith.cmpi slt``) and every bound, the step and the induction
+        variable go through ``arith.select``. A Python ``step == 0`` passes
+        through to the bound promotion, which rejects it as Python does.
+    """
+    step_n = as_numeric(step)
+    if isinstance(step_n.value, int):
+        if step_n.value >= 0:
+            return start, stop, step, lambda iv: iv
+        negated = -step if isinstance(step, int) else -step_n
+        return stop, start, negated, lambda iv: start + stop - iv
+
+    start_, stop_, step_, dtype = _promote_loop_bounds(start, stop, step)
+    is_negative = (step_ < 0).ir_value()
+    emitter = current_emitter()
+
+    def select(when_negative: Any, otherwise: Any) -> Any:
+        return dtype(
+            emitter.select(is_negative, when_negative.ir_value(), otherwise.ir_value())
+        )
+
+    def iv_of(iv: Any) -> Any:
+        return select(start_ + stop_ - iv, iv)
+
+    return select(stop_, start_), select(start_, stop_), select(-step_, step_), iv_of
 
 
 def _loop_execute_range_dynamic(
@@ -833,44 +883,3 @@ def _compare_executor(left: Any, comparators: Sequence[Any], ops: Sequence[str])
         current = comparator
 
     return result
-
-
-def normalize_range(
-    start: Any, stop: Any, step: Any
-) -> tuple[Any, Any, Any, Callable[[Any], Any]]:
-    """Python ``range`` semantics for a staged loop whose step may be negative.
-
-    ``range(start, stop, step)`` with ``step < 0`` yields ``start + k * step``
-    for the same count of ``k`` as ``range(stop, start, -step)``, so such a
-    loop becomes the positive-step loop over the swapped bounds and the body
-    sees ``iv_of(iv') = start + stop - iv'``, the descending value in the
-    original order.
-
-    :return: ``(start', stop', step', iv_of)``: a positive Python step leaves
-        everything as it is (``iv_of`` is the identity); a negative Python
-        step swaps the bounds and negates the step in Python, so no IR is
-        emitted for the sign; a staged step is tested at run time
-        (``arith.cmpi slt``) and every bound, the step and the induction
-        variable go through ``arith.select``. A Python ``step == 0`` passes
-        through to the bound promotion, which rejects it as Python does.
-    """
-    step_n = as_numeric(step)
-    if isinstance(step_n.value, int):
-        if step_n.value >= 0:
-            return start, stop, step, lambda iv: iv
-        negated = -step if isinstance(step, int) else -step_n
-        return stop, start, negated, lambda iv: start + stop - iv
-
-    start_, stop_, step_, dtype = _promote_loop_bounds(start, stop, step)
-    is_negative = (step_ < 0).ir_value()
-    emitter = current_emitter()
-
-    def select(when_negative: Any, otherwise: Any) -> Any:
-        return dtype(
-            emitter.select(is_negative, when_negative.ir_value(), otherwise.ir_value())
-        )
-
-    def iv_of(iv: Any) -> Any:
-        return select(start_ + stop_ - iv, iv)
-
-    return select(stop_, start_), select(start_, stop_), select(-step_, step_), iv_of

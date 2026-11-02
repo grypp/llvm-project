@@ -37,24 +37,29 @@ from types import ModuleType
 from typing import Any, ClassVar, TypeVar
 
 from .... import ir
-from ...core.common import DSLRuntimeError, DSLUserCodeError, _user_error as _dsl_user_error
+from ...core.common import (
+    DSLRuntimeError,
+    DSLUserCodeError,
+    _user_error as _dsl_user_error,
+)
 from ...core.diagnostics import DiagId
 from ...util.logger import log
 from .helpers import register_deferred_for_error
 
 __all__ = [
-    "create_module_attribute",
     "ControlFlowPolicy",
     "DSLPreprocessor",
     "OrderedSet",
     "Region",
     "ScopeManager",
     "SessionData",
+    "create_module_attribute",
 ]
 
 _AstNode = TypeVar("_AstNode", bound=ast.AST)
 
-# The module the rewritten code imports as ``__base_dsl__``: every helper the
+# The module the rewritten code imports as ``__base_dsl__`` unless the
+# preprocessor is given another one (``helpers_module``): every helper the
 # rewrite references (selectors, executors, ``materialize_for_iter``, ...)
 # lives in the sibling ``helpers`` module of this package.
 _AST_HELPERS_MODULE = f"{__package__}.helpers"
@@ -140,12 +145,6 @@ class _NativeForLocalRenamer(ast.NodeTransformer):
             return node
         node.id = replacement
         return node
-
-
-# Loop options transform_for_loop understands; any other range keyword keeps the
-# trace-time dispatch (see DSLPreprocessor._literal_for_iter_kind), where the
-# DSL ``range`` collects it into its ``options`` and the staged arm forwards it.
-_STAGED_RANGE_KEYWORDS = frozenset({"unroll", "unroll_full"})
 
 
 def _native_for_local_renames(
@@ -545,6 +544,85 @@ class SessionData:
             self.captured_control_flow_writebacks[-1].add(name)
 
 
+def create_module_attribute(
+    func_name: str,
+    *,
+    use_base_dsl: bool = True,
+    submodule_name: str | None = None,
+    lineno: int | None = None,
+    col_offset: int | None = None,
+) -> ast.Attribute:
+    """Create the AST of a qualified attribute access through a runtime alias.
+
+    The rewritten function imports two aliases: ``__base_dsl__`` is the
+    helpers module (this package's ``helpers`` with the selectors, executors
+    and loop helpers, or the module a DSL names as
+    ``DSLPreprocessor.helpers_module``); ``__module_dsl__`` is the client DSL
+    package named by ``DSLPreprocessor.client_module_name`` (``and_``,
+    ``or_``, ``not_``, ``as_ir_value``), used when ``use_base_dsl`` is False.
+    A preprocessor subclass emitting a helper call of its own builds the
+    callee with this function.
+
+    :param func_name: The attribute or function name to access
+    :param use_base_dsl: Resolve against ``__base_dsl__`` (default) or ``__module_dsl__``
+    :param submodule_name: An optional submodule of the aliased module
+    :param lineno: The line of the source construct the node stands for
+    :param col_offset: The column of that construct
+    :return: The ``ast.Attribute`` node, located at the given point
+    """
+
+    # The location is one point, not the source node's range: copying the
+    # range would make every traceback line of the helper span the construct.
+    def set_location(
+        node: ast.expr, lineno: int | None, col_offset: int | None
+    ) -> None:
+        if lineno is None or col_offset is None:
+            return
+        node.lineno = lineno
+        node.end_lineno = lineno
+        node.col_offset = col_offset
+        node.end_col_offset = col_offset
+
+    base: ast.expr = ast.Name(
+        id="__base_dsl__" if use_base_dsl else "__module_dsl__", ctx=ast.Load()
+    )
+    set_location(base, lineno, col_offset)
+    if submodule_name:
+        base = ast.Attribute(value=base, attr=submodule_name, ctx=ast.Load())
+        set_location(base, lineno, col_offset)
+    result = ast.Attribute(value=base, attr=func_name, ctx=ast.Load())
+    set_location(result, lineno, col_offset)
+    return result
+
+
+# The former private spelling, kept for code built on it.
+_create_module_attribute = create_module_attribute
+
+
+def _while_condition_bound_names(test: ast.expr) -> list[str]:
+    """The names a ``while`` condition binds with ``:=``, in source order.
+
+    A lambda body is skipped: an assignment expression there binds the
+    lambda's own local (PEP 572), not a name of the loop.
+    """
+    names: list[str] = []
+
+    class Collector(ast.NodeVisitor):
+        def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+            self.visit(node.value)
+            if isinstance(node.target, ast.Name) and node.target.id not in names:
+                names.append(node.target.id)
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            return None
+
+    Collector().visit(test)
+    return names
+
+
+_ComprehensionT = TypeVar(
+    "_ComprehensionT", ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp
+)
 
 
 class DSLPreprocessor(ast.NodeTransformer):
@@ -572,6 +650,10 @@ class DSLPreprocessor(ast.NodeTransformer):
     :param decorator_names: The decorators marking a function for the rewrite:
         the ``decorator_name`` of every decorator plugin of the DSL
         (``BaseDSL.__init__`` passes them); ``("jit",)`` by default
+    :param helpers_module: The module the rewritten code imports as
+        ``__base_dsl__``, the one every emitted helper call resolves against;
+        None is this package's ``helpers``. A DSL names a module of its own
+        that re-exports the helpers it keeps and replaces the others
     """
 
     DECORATOR_FOR_STATEMENT = "loop_selector"
@@ -585,6 +667,99 @@ class DSLPreprocessor(ast.NodeTransformer):
     COMPARE_EXECUTOR = "compare_executor"
     BUILTIN_REDIRECTOR = "redirect_builtin_function"
     BOOL_SHORT_CIRCUITS = "bool_short_circuits"
+    COMPREHENSION_CONDITION = "comprehension_condition"
+
+    #: The keywords a range call may carry and still be staged by the rewrite
+    #: alone: ``unroll``/``unroll_full`` become the loop annotation, any other
+    #: member is forwarded to the loop executor as one of its options. A
+    #: keyword outside the set keeps the trace-time dispatch
+    #: (:meth:`_literal_for_iter_kind`), where the DSL ``range`` collects it
+    #: into its ``options`` and the staged arm forwards it. A preprocessor
+    #: subclass whose executor takes more options extends the set.
+    STAGED_RANGE_KEYWORDS: ClassVar[frozenset[str]] = frozenset(
+        {"unroll", "unroll_full"}
+    )
+    #: Whether a bare ``range(...)`` with positional arguments is the staged
+    #: range: False (the default) leaves it to the trace-time dispatch, where
+    #: it stages only when a bound is a staged value; True makes the rewrite
+    #: stage it like ``<module>.range(...)``, bounds known or not.
+    BARE_RANGE_STAGES: ClassVar[bool] = False
+
+    #: The author-facing diagnostics of the rewrite, keyed by the reason a
+    #: construct is rejected: ``(catalog id, fixed fields)``. A raise site
+    #: names the reason and passes the facts of the occurrence
+    #: (:meth:`_user_error`); the entry holds the wording that does not
+    #: change between occurrences. A DSL with a catalog or wording of its own
+    #: overrides one entry in a subclass and leaves the visitors alone.
+    DIAGNOSTICS: ClassVar[dict[str, tuple[Any, dict[str, Any]]]] = {
+        "no_source": (DiagId.UNSUP_NO_SOURCE, {}),
+        "decorator_order": (
+            DiagId.UNSUP_SYNTAX,
+            {
+                "detail": ": it must be the innermost decorator, written directly above `def`"
+            },
+        ),
+        "early_exit": (DiagId.UNSUP_EARLY_EXIT, {}),
+        "region_local_escapes": (DiagId.SCOPE_REGION_LOCAL_ESCAPES, {}),
+        "range_args": (
+            DiagId.UNSUP_SYNTAX,
+            {
+                "what": "`range(...)` with this number of positional arguments",
+                "detail": ": call it as `range(stop)`, `range(start, stop)` or `range(start, stop, step)`, with loop options such as `unroll=` by keyword",
+            },
+        ),
+        "loop_else": (
+            DiagId.UNSUP_SYNTAX,
+            {
+                "what": "A `for`/`while` loop with an `else:` clause",
+                "detail": ": put the `else:` code after the loop",
+            },
+        ),
+        "underscore_read": (
+            DiagId.UNSUP_SYNTAX,
+            {
+                "what": "Reading the throwaway name `_`",
+                "detail": ": give the value a real name",
+            },
+        ),
+        "global": (
+            DiagId.UNSUP_SYNTAX,
+            {
+                "what": "`global`",
+                "detail": ": compiled code cannot assign to a module-level variable; pass the value in as an argument and return the updated value",
+            },
+        ),
+        "nonlocal": (DiagId.UNSUP_SYNTAX, {}),
+        "walrus_in_while": (
+            DiagId.UNSUP_SYNTAX,
+            {
+                "detail": ": the condition runs in its own block, so the body never sees the name it binds; bind the name before the loop and update it in the body"
+            },
+        ),
+    }
+
+    def _user_error(
+        self, reason: str, node: ast.AST | None = None, **fields: Any
+    ) -> DSLUserCodeError:
+        """The error for ``reason`` (a key of :attr:`DIAGNOSTICS`) at ``node``.
+
+        The entry's id with its fixed fields and the ``fields`` of this
+        occurrence, located at ``node`` in the file being rewritten (an
+        explicit ``end_col_offset`` or other location field in ``fields``
+        wins; without a node the error locates itself), built by the DSL
+        being preprocessed: its ``user_error_class`` and ``diag_id_aliases``
+        apply, as at every other raise site of the core.
+        """
+        diag_id, fixed = self.DIAGNOSTICS[reason]
+        location: dict[str, Any] = {}
+        if node is not None:
+            location = dict(
+                filename=self.session_data.file_name,
+                lineno=getattr(node, "lineno", None),
+                col_offset=getattr(node, "col_offset", None),
+                end_col_offset=getattr(node, "end_col_offset", None),
+            )
+        return _dsl_user_error(diag_id, **{**location, **fixed, **fields})
 
     def generic_visit(self, node: ast.AST) -> ast.AST:
         """
@@ -653,7 +828,18 @@ class DSLPreprocessor(ast.NodeTransformer):
         self.if_born_locals_escape: bool = if_born_locals_escape
         self._session_data: SessionData | None = None
 
+    def create_session_data(self) -> SessionData:
+        """The state of one preprocessing session; a subclass with more
+        per-function state returns its own ``SessionData`` subclass."""
+        return SessionData()
 
+    def start_session(self) -> None:
+        """Start a new preprocessing session by initializing session data."""
+        self._session_data = self.create_session_data()
+        # Track processed functions per preprocessing run, not for the entire
+        # lifetime of this preprocessor instance, so a later session never
+        # skips transforming a function entirely.
+        self.processed_functions = set()
 
     def _end_session(self) -> None:
         """End the current preprocessing session and clear session data."""
@@ -764,6 +950,61 @@ class DSLPreprocessor(ast.NodeTransformer):
             source_name = source_names.get(param_name)
             if source_name is not None and source_name not in exec_globals:
                 exec_globals[source_name] = default_val
+
+    def parse_function_source(
+        self, function_pointer: Callable[..., Any]
+    ) -> tuple[ast.Module, str]:
+        """Parse the source of ``function_pointer`` into a module holding its
+        definition, with lines and columns re-based on the source file.
+
+        A sub-DSL that already holds the tree (a parse cache, a tree shared
+        with another pass) overrides this and serves it; the rewrite mutates
+        the tree it is given, so a cached tree is served as a copy.
+
+        :return: ``(tree, file_name)``: the module whose single statement is
+            the function definition, and the file it was read from
+            (``"<unknown>"`` when the file is not known)
+        :raises OSError: When the source cannot be read
+        :raises TypeError: When the function has no retrievable source
+        """
+        file_name = inspect.getsourcefile(function_pointer) or "<unknown>"
+        lines, start_line = inspect.getsourcelines(function_pointer)
+        raw_source = "".join(lines)
+        dedented_source = textwrap.dedent(raw_source)
+        tree = ast.parse(dedented_source, filename=file_name)
+        # Bump the line numbers so they match the real source file
+        ast.increment_lineno(tree, start_line - 1)
+        # ``textwrap.dedent`` stripped a constant leading-whitespace prefix,
+        # so ast column offsets are relative to the dedented source.  Shift
+        # them back to the original file's columns so diagnostics underline
+        # the right place.  The stripped width is identical on every non-blank
+        # line; derive it from the first line that still has content.
+        col_shift = 0
+        for raw_line, dedented_line in zip(
+            raw_source.split("\n"), dedented_source.split("\n")
+        ):
+            if dedented_line.strip():
+                col_shift = (len(raw_line) - len(raw_line.lstrip())) - (
+                    len(dedented_line) - len(dedented_line.lstrip())
+                )
+                break
+        if col_shift:
+            for walked in ast.walk(tree):
+                if getattr(walked, "col_offset", None) is not None:
+                    walked.col_offset += col_shift  # type: ignore[attr-defined]
+                if getattr(walked, "end_col_offset", None) is not None:
+                    walked.end_col_offset += col_shift  # type: ignore[attr-defined]
+        return tree, file_name
+
+    def post_visit_function_body(self, func_def: ast.FunctionDef) -> list[ast.stmt]:
+        """A pass over the fully rewritten function definition.
+
+        Called once the visitors are done and before the runtime alias
+        imports are prepended; the statements returned open the body, right
+        after those imports (none by default). A sub-DSL adds a preamble or
+        inspects the rewritten body here without touching the visitors.
+        """
+        return []
 
     def transform_function(
         self, func_name: str, function_pointer: Callable[..., Any]
@@ -994,6 +1235,25 @@ class DSLPreprocessor(ast.NodeTransformer):
         checker = EarlyExitChecker(kind)
         checker.generic_visit(tree)
         return checker.early_exit
+
+    def _resolve_exception_class(self, expr: ast.expr | None) -> type | None:
+        """The exception class a ``raise``/``except`` expression names, when
+        it is a plain name (or a call of one) bound in the function's globals
+        or the builtins to an exception class; None otherwise."""
+        if isinstance(expr, ast.Call):
+            expr = expr.func
+        if not isinstance(expr, ast.Name):
+            return None
+        function_globals = (
+            self._session_data.function_globals if self._session_data else None
+        ) or {}
+        if expr.id in function_globals:
+            value = function_globals[expr.id]
+        else:
+            value = getattr(builtins, expr.id, None)
+        if isinstance(value, type) and issubclass(value, BaseException):
+            return value
+        return None
 
     def check_early_exit(self, tree: ast.AST, kind: str) -> None:
         """Reject an early exit owned by the given control-flow region."""
@@ -1492,6 +1752,121 @@ class DSLPreprocessor(ast.NodeTransformer):
             node,
         )
 
+    def visit_BoolOp(self, node: ast.BoolOp) -> ast.expr:
+        """Expand ``a and b``/``a or b`` so Python short-circuits and staged values use ``and_``/``or_``."""
+        self.generic_visit(node)
+
+        # The ternary emitted here is evaluated by Python itself (it tests a
+        # Python bool), so it never reaches the staged ternary lowering.
+        if isinstance(node.op, ast.And):
+            # Emitted form (one lhs evaluation, Python short-circuit):
+            # (lambda tmp: tmp if bool_short_circuits(tmp, False) else and_(tmp, rhs))(lhs)
+            short_circuit_value = False
+            helper_name = "and_"
+        elif isinstance(node.op, ast.Or):
+            # Emitted form (one lhs evaluation, Python short-circuit):
+            # (lambda tmp: tmp if bool_short_circuits(tmp, True) else or_(tmp, rhs))(lhs)
+            short_circuit_value = True
+            helper_name = "or_"
+        else:
+            # BoolOp should be either And or Or -- reaching here is a compiler
+            # bug (the AST grammar only produces And/Or), not an author mistake.
+            raise DSLRuntimeError(
+                f"Unsupported boolean operation: {node.op}",
+                filename=self.session_data.file_name,
+                snippet=ast.unparse(node),
+            )
+        self.session_data.import_top_module = True
+
+        def located(expr: _AstNode) -> _AstNode:
+            return ast.copy_location(expr, node)
+
+        # Evaluate-once lowering: the lhs is passed to an immediately called
+        # lambda whose parameter is the synthesized temp, so every synthesized
+        # position reads that one evaluation; a side-effecting or staged lhs
+        # runs once. The test asks ``bool_short_circuits`` whether the temp is
+        # a Python bool equal to the short-circuit value; only the other arm
+        # evaluates the rhs, exactly like Python. A lambda rather than a named
+        # expression: it is legal wherever an expression is, a comprehension's
+        # iterable included, where an assignment expression is a SyntaxError.
+        lhs = node.values[0]
+        for i in range(1, len(node.values)):
+            tmp_name = f"_dsl_bool_{self.session_data.counter}"
+            self.session_data.counter += 1
+            test = located(
+                ast.Call(
+                    func=create_module_attribute(
+                        self.BOOL_SHORT_CIRCUITS,
+                        lineno=node.lineno,
+                        col_offset=node.col_offset,
+                    ),
+                    args=[
+                        located(ast.Name(id=tmp_name, ctx=ast.Load())),
+                        located(ast.Constant(value=short_circuit_value)),
+                    ],
+                    keywords=[],
+                )
+            )
+            select = located(
+                ast.IfExp(
+                    test=test,
+                    body=located(ast.Name(id=tmp_name, ctx=ast.Load())),
+                    orelse=located(
+                        ast.Call(
+                            func=create_module_attribute(
+                                helper_name,
+                                use_base_dsl=False,
+                                lineno=node.lineno,
+                                col_offset=node.col_offset,
+                            ),
+                            args=[
+                                located(ast.Name(id=tmp_name, ctx=ast.Load())),
+                                node.values[i],
+                            ],
+                            keywords=[],
+                        )
+                    ),
+                )
+            )
+            lhs = located(
+                ast.Call(
+                    func=located(
+                        ast.Lambda(
+                            args=ast.arguments(
+                                posonlyargs=[],
+                                args=[ast.arg(arg=tmp_name, annotation=None)],
+                                kwonlyargs=[],
+                                kw_defaults=[],
+                                defaults=[],
+                            ),
+                            body=select,
+                        )
+                    ),
+                    args=[lhs],
+                    keywords=[],
+                )
+            )
+
+        return lhs
+
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> ast.expr:
+        """Rewrite ``not x`` to the DSL's ``not_(x)`` (``__dsl_not__`` on a staged value)."""
+        self.generic_visit(node)
+
+        if isinstance(node.op, ast.Not):
+            func_name = create_module_attribute(
+                "not_",
+                use_base_dsl=False,
+                lineno=node.lineno,
+                col_offset=node.col_offset,
+            )
+            self.session_data.import_top_module = True
+            return ast.copy_location(
+                ast.Call(func=func_name, args=[node.operand], keywords=[]), node
+            )
+
+        return node
+
     def _handle_native_for(self, node: ast.For) -> ast.For | list[ast.stmt]:
         """Visit the body of a loop that runs in Python (the native arm of a
         dispatched loop, a list/tuple display).
@@ -1941,6 +2316,34 @@ class DSLPreprocessor(ast.NodeTransformer):
 
         return exprs
 
+    # =============================================================================
+    # Statements and expressions
+    # =============================================================================
+
+    def visit_Assert(self, node: ast.Assert) -> ast.Expr:
+        """Rewrite ``assert test, msg`` to ``assert_executor(test=..., msg=...)``."""
+        test = self.visit(node.test)
+
+        args = [ast.keyword(arg="test", value=test)]
+        if node.msg:
+            msg = self.visit(node.msg)
+            args.append(ast.keyword(arg="msg", value=msg))
+
+        # Rewrite to assert_executor(test, msg)
+        new_node = ast.Expr(
+            ast.Call(
+                func=create_module_attribute(
+                    self.ASSERT_EXECUTOR, lineno=node.lineno, col_offset=node.col_offset
+                ),
+                args=[],
+                keywords=args,
+            )
+        )
+
+        # Propagate line number from original node to new node
+        ast.copy_location(new_node, node)
+        return new_node
+
     @staticmethod
     def _is_mlir_dialect_module(module: object) -> bool:
         """Whether *module* is one of the MLIR dialect modules (``mlir.dialects.*``)."""
@@ -1968,7 +2371,29 @@ class DSLPreprocessor(ast.NodeTransformer):
             # If `bool` escapes as a symbol, usually it means type check, do not rewrite it
             # Any other call shape has no `bool_cast` spelling, so it is left as a
             # plain `bool` call for Python itself to accept or reject
-            if func.id == "super" and node.args == [] and node.keywords == []:
+            if (
+                func.id == "bool"
+                and len(node.args) == 1
+                and node.keywords == []
+                and not isinstance(node.args[0], ast.Starred)
+            ):
+                return ast.copy_location(
+                    ast.Call(
+                        func=ast.Call(
+                            func=create_module_attribute(
+                                self.BUILTIN_REDIRECTOR,
+                                lineno=node.lineno,
+                                col_offset=node.col_offset,
+                            ),
+                            args=[func],
+                            keywords=[],
+                        ),
+                        args=[node.args[0]],
+                        keywords=[],
+                    ),
+                    node,
+                )
+            elif func.id == "super" and node.args == [] and node.keywords == []:
                 # A zero-argument ``super()`` is spelled out as
                 # ``super(__class__, self)``: inside a generated region
                 # function the implicit form has no class cell to read.
@@ -2318,6 +2743,39 @@ class DSLPreprocessor(ast.NodeTransformer):
 
         return exprs + [func_def] + assign
 
+    def _adopt_while_condition_bound_names(
+        self,
+        node: ast.While,
+        names: list[str],
+        write_args: list[str],
+        full_write_args_count: int,
+    ) -> tuple[list[str], int]:
+        """Decide what a staged ``while`` does with a name its condition first
+        binds with ``:=``.
+
+        The condition is evaluated in the region's before block, so a name it
+        binds is local to that block and the body never sees it: a body read
+        of such a name is refused here (the ``walrus_in_while`` diagnostic
+        names the fix, binding the name before the loop so it is carried); a
+        name the body never reads stays local to the condition. A sub-DSL
+        whose region protocol can carry a condition-bound name overrides
+        this and returns the extended ``(write_args,
+        full_write_args_count)``.
+        """
+        finder = _RegionReadFinder(names, skip=node.test)
+        for stmt in chain(node.body, node.orelse):
+            finder.visit(stmt)
+        for name in names:
+            read = finder.reads.get(name)
+            if read is not None:
+                raise self._user_error(
+                    "walrus_in_while",
+                    read,
+                    what=f"Reading `{name}`, which the `while` condition binds with `:=`, inside the loop body",
+                    name=name,
+                )
+        return write_args, full_write_args_count
+
     def create_cf_call(
         self, func_name: str, yield_args: list[str], node: ast.stmt
     ) -> list[ast.stmt]:
@@ -2350,6 +2808,225 @@ class DSLPreprocessor(ast.NodeTransformer):
                 value=ast.Name(id=func_name, ctx=ast.Load()),
             )
         return [ast.copy_location(assign, node)]
+
+    # =============================================================================
+    # Comprehensions and lambdas
+    # =============================================================================
+
+    def _visit_Comprehension(
+        self, node: _ComprehensionT, ele_visitor: Callable[..., Any]
+    ) -> _ComprehensionT:
+        """Visit a comprehension: its generators, then its element(s) with the
+        generator targets in scope. Every ``if`` clause of a generator is
+        routed through ``comprehension_condition``, which lets a Python test
+        filter and refuses a staged one (``PHASE_REQUIRES_CONSTANT``): the
+        comprehension runs in Python, so a staged test has no meaning there.
+        """
+        node.generators = [self.visit(generator) for generator in node.generators]
+        for generator in node.generators:
+            generator.ifs = [
+                ast.copy_location(
+                    ast.Call(
+                        func=create_module_attribute(
+                            self.COMPREHENSION_CONDITION,
+                            lineno=test.lineno,
+                            col_offset=test.col_offset,
+                        ),
+                        args=[test],
+                        keywords=[],
+                    ),
+                    test,
+                )
+                for test in generator.ifs
+            ]
+
+        targets: list[str] = []
+
+        class NameCollector(ast.NodeVisitor):
+            def visit_Name(self, node: ast.Name) -> None:
+                if isinstance(node.ctx, ast.Store):
+                    targets.append(node.id)
+
+        # Collect generator targets
+        collector = NameCollector()
+        for generator in node.generators:
+            collector.visit(generator)
+
+        # Stack the targets: a comprehension nested in another still sees the
+        # outer generators' names (they are read by its element expression).
+        current_generator_targets = len(self.session_data.generator_targets)
+        self.session_data.generator_targets.extend(targets)
+
+        ele_visitor(node)
+
+        del self.session_data.generator_targets[current_generator_targets:]
+        return node
+
+    def visit_DictComp(self, node: ast.DictComp) -> ast.DictComp:
+        def key_value_visitor(n: ast.DictComp) -> None:
+            n.key = self.visit(n.key)
+            n.value = self.visit(n.value)
+
+        return self._visit_Comprehension(node, key_value_visitor)
+
+    def visit_Lambda(self, node: ast.Lambda) -> ast.Lambda:
+        current_lambda_args = len(self.session_data.lambda_args)
+        for arg in node.args.args:
+            self.session_data.lambda_args.append(arg.arg)
+
+        node.body = self.visit(node.body)
+
+        self.session_data.lambda_args = self.session_data.lambda_args[
+            :current_lambda_args
+        ]
+
+        return node
+
+    def visit_ListComp(self, node: ast.ListComp) -> ast.ListComp:
+        return self._visit_Comprehension(
+            node, lambda n: setattr(n, "elt", self.visit(n.elt))
+        )
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> ast.GeneratorExp:
+        return self._visit_Comprehension(
+            node, lambda n: setattr(n, "elt", self.visit(n.elt))
+        )
+
+    def visit_SetComp(self, node: ast.SetComp) -> ast.SetComp:
+        return self._visit_Comprehension(
+            node, lambda n: setattr(n, "elt", self.visit(n.elt))
+        )
+
+    # =============================================================================
+    # Conditional expressions and comparisons
+    # =============================================================================
+
+    def visit_IfExp(self, node: ast.IfExp) -> ast.Call:
+        """
+        Transforms an inline if-else (ternary) expression into runtime-dispatched
+        control flow using synthesized function definitions for each branch.
+
+        ``x if cond else y`` becomes two local function blocks inserted just
+        before the current statement and a call to the conditional executor
+        that references them and the predicate.
+        """
+        # Create unique names for the then and else branch function blocks
+        then_block_name = f"ifexp_then_block_{self.session_data.counter}"
+        else_block_name = f"ifexp_else_block_{self.session_data.counter}"
+        self.session_data.counter += 1
+
+        def block_args() -> ast.arguments:
+            return ast.arguments(
+                posonlyargs=[],
+                args=[
+                    ast.arg(arg=target, annotation=None)
+                    for target in chain(
+                        self.session_data.generator_targets,
+                        self.session_data.lambda_args,
+                    )
+                ],
+                kwonlyargs=[],
+                kw_defaults=[],
+                defaults=[],
+            )
+
+        # Define the then-block function, returning the visited body
+        then_block_def = ast.FunctionDef(
+            name=then_block_name,
+            args=block_args(),
+            body=[ast.Return(value=self.visit(node.body))],
+            decorator_list=[],
+        )
+        # Define the else-block function, returning the visited orelse
+        else_block_def = ast.FunctionDef(
+            name=else_block_name,
+            args=block_args(),
+            body=[ast.Return(value=self.visit(node.orelse))],
+            decorator_list=[],
+        )
+
+        # Insert the block definitions into the most recent (innermost) region before the statement
+        self.session_data.region_stack[-1].append_new_stmts(
+            [
+                ast.copy_location(then_block_def, node),
+                ast.copy_location(else_block_def, node),
+            ]
+        )
+
+        # Create the executor call node, wiring up the predicate and newly synthesized blocks
+        executor_call = ast.Call(
+            func=create_module_attribute(self.IFEXP_EXECUTOR),
+            args=[],
+            keywords=[
+                ast.keyword(arg="pred", value=self.visit(node.test)),
+                ast.keyword(
+                    arg="block_args",
+                    value=ast.Tuple(
+                        elts=[
+                            ast.Name(id=name, ctx=ast.Load())
+                            for name in chain(
+                                self.session_data.generator_targets,
+                                self.session_data.lambda_args,
+                            )
+                        ],
+                        ctx=ast.Load(),
+                    ),
+                ),
+                ast.keyword(
+                    arg="then_block", value=ast.Name(id=then_block_name, ctx=ast.Load())
+                ),
+                ast.keyword(
+                    arg="else_block", value=ast.Name(id=else_block_name, ctx=ast.Load())
+                ),
+            ],
+        )
+
+        # Return the transformed executor call node at the original location in the AST
+        return ast.copy_location(executor_call, node)
+
+    cmpops = {
+        "Eq": "==",
+        "NotEq": "!=",
+        "Lt": "<",
+        "LtE": "<=",
+        "Gt": ">",
+        "GtE": ">=",
+        "Is": "is",
+        "IsNot": "is not",
+        "In": "in",
+        "NotIn": "not in",
+    }
+
+    def compare_ops_to_str(self, node: ast.Compare) -> ast.List:
+        names: list[ast.expr] = [
+            ast.Constant(value=self.cmpops[op.__class__.__name__]) for op in node.ops
+        ]
+        return ast.List(elts=names, ctx=ast.Load())
+
+    def visit_Compare(self, node: ast.Compare) -> ast.Call:
+        """Rewrite ``a < b <= c`` to ``compare_executor(left=a, comparators=[b, c], ops=['<', '<='])``."""
+        self.generic_visit(node)
+
+        comparator_strs = self.compare_ops_to_str(node)
+
+        keywords = [
+            ast.keyword(arg="left", value=node.left),
+            ast.keyword(
+                arg="comparators", value=ast.List(elts=node.comparators, ctx=ast.Load())
+            ),
+            ast.keyword(arg="ops", value=comparator_strs),
+        ]
+
+        call = ast.copy_location(
+            ast.Call(
+                func=create_module_attribute(self.COMPARE_EXECUTOR),
+                args=[],
+                keywords=keywords,
+            ),
+            node,
+        )
+
+        return call
 
     # =============================================================================
     # If statements
@@ -2804,285 +3481,3 @@ class DSLPreprocessor(ast.NodeTransformer):
             ),
             node,
         )
-
-
-    DIAGNOSTICS: ClassVar[dict[str, tuple[Any, dict[str, Any]]]] = {
-        "no_source": (DiagId.UNSUP_NO_SOURCE, {}),
-        "decorator_order": (
-            DiagId.UNSUP_SYNTAX,
-            {
-                "detail": ": it must be the innermost decorator, written directly above `def`"
-            },
-        ),
-        "early_exit": (DiagId.UNSUP_EARLY_EXIT, {}),
-        "region_local_escapes": (DiagId.SCOPE_REGION_LOCAL_ESCAPES, {}),
-        "range_args": (
-            DiagId.UNSUP_SYNTAX,
-            {
-                "what": "`range(...)` with this number of positional arguments",
-                "detail": ": call it as `range(stop)`, `range(start, stop)` or `range(start, stop, step)`, with loop options such as `unroll=` by keyword",
-            },
-        ),
-        "loop_else": (
-            DiagId.UNSUP_SYNTAX,
-            {
-                "what": "A `for`/`while` loop with an `else:` clause",
-                "detail": ": put the `else:` code after the loop",
-            },
-        ),
-        "underscore_read": (
-            DiagId.UNSUP_SYNTAX,
-            {
-                "what": "Reading the throwaway name `_`",
-                "detail": ": give the value a real name",
-            },
-        ),
-        "global": (
-            DiagId.UNSUP_SYNTAX,
-            {
-                "what": "`global`",
-                "detail": ": compiled code cannot assign to a module-level variable; pass the value in as an argument and return the updated value",
-            },
-        ),
-        "nonlocal": (DiagId.UNSUP_SYNTAX, {}),
-        "walrus_in_while": (
-            DiagId.UNSUP_SYNTAX,
-            {
-                "detail": ": the condition runs in its own block, so the body never sees the name it binds; bind the name before the loop and update it in the body"
-            },
-        ),
-    }
-
-
-    def _user_error(
-        self, reason: str, node: ast.AST | None = None, **fields: Any
-    ) -> DSLUserCodeError:
-        """The error for ``reason`` (a key of :attr:`DIAGNOSTICS`) at ``node``.
-
-        The entry's id with its fixed fields and the ``fields`` of this
-        occurrence, located at ``node`` in the file being rewritten (an
-        explicit ``end_col_offset`` or other location field in ``fields``
-        wins; without a node the error locates itself), built by the DSL
-        being preprocessed: its ``user_error_class`` and ``diag_id_aliases``
-        apply, as at every other raise site of the core.
-        """
-        diag_id, fixed = self.DIAGNOSTICS[reason]
-        location: dict[str, Any] = {}
-        if node is not None:
-            location = dict(
-                filename=self.session_data.file_name,
-                lineno=getattr(node, "lineno", None),
-                col_offset=getattr(node, "col_offset", None),
-                end_col_offset=getattr(node, "end_col_offset", None),
-            )
-        return _dsl_user_error(diag_id, **{**location, **fixed, **fields})
-
-
-    def create_session_data(self) -> SessionData:
-        """The state of one preprocessing session; a subclass with more
-        per-function state returns its own ``SessionData`` subclass."""
-        return SessionData()
-
-
-    def start_session(self) -> None:
-        """Start a new preprocessing session by initializing session data."""
-        self._session_data = self.create_session_data()
-        # Track processed functions per preprocessing run, not for the entire
-        # lifetime of this preprocessor instance, so a later session never
-        # skips transforming a function entirely.
-        self.processed_functions = set()
-
-
-    def parse_function_source(
-        self, function_pointer: Callable[..., Any]
-    ) -> tuple[ast.Module, str]:
-        """Parse the source of ``function_pointer`` into a module holding its
-        definition, with lines and columns re-based on the source file.
-
-        A sub-DSL that already holds the tree (a parse cache, a tree shared
-        with another pass) overrides this and serves it; the rewrite mutates
-        the tree it is given, so a cached tree is served as a copy.
-
-        :return: ``(tree, file_name)``: the module whose single statement is
-            the function definition, and the file it was read from
-            (``"<unknown>"`` when the file is not known)
-        :raises OSError: When the source cannot be read
-        :raises TypeError: When the function has no retrievable source
-        """
-        file_name = inspect.getsourcefile(function_pointer) or "<unknown>"
-        lines, start_line = inspect.getsourcelines(function_pointer)
-        raw_source = "".join(lines)
-        dedented_source = textwrap.dedent(raw_source)
-        tree = ast.parse(dedented_source, filename=file_name)
-        # Bump the line numbers so they match the real source file
-        ast.increment_lineno(tree, start_line - 1)
-        # ``textwrap.dedent`` stripped a constant leading-whitespace prefix,
-        # so ast column offsets are relative to the dedented source.  Shift
-        # them back to the original file's columns so diagnostics underline
-        # the right place.  The stripped width is identical on every non-blank
-        # line; derive it from the first line that still has content.
-        col_shift = 0
-        for raw_line, dedented_line in zip(
-            raw_source.split("\n"), dedented_source.split("\n")
-        ):
-            if dedented_line.strip():
-                col_shift = (len(raw_line) - len(raw_line.lstrip())) - (
-                    len(dedented_line) - len(dedented_line.lstrip())
-                )
-                break
-        if col_shift:
-            for walked in ast.walk(tree):
-                if getattr(walked, "col_offset", None) is not None:
-                    walked.col_offset += col_shift  # type: ignore[attr-defined]
-                if getattr(walked, "end_col_offset", None) is not None:
-                    walked.end_col_offset += col_shift  # type: ignore[attr-defined]
-        return tree, file_name
-
-
-    def post_visit_function_body(self, func_def: ast.FunctionDef) -> list[ast.stmt]:
-        """A pass over the fully rewritten function definition.
-
-        Called once the visitors are done and before the runtime alias
-        imports are prepended; the statements returned open the body, right
-        after those imports (none by default). A sub-DSL adds a preamble or
-        inspects the rewritten body here without touching the visitors.
-        """
-        return []
-
-
-    STAGED_RANGE_KEYWORDS: ClassVar[frozenset[str]] = frozenset(
-        {"unroll", "unroll_full"}
-    )
-
-
-    BARE_RANGE_STAGES: ClassVar[bool] = False
-
-
-    def _resolve_exception_class(self, expr: ast.expr | None) -> type | None:
-        """The exception class a ``raise``/``except`` expression names, when
-        it is a plain name (or a call of one) bound in the function's globals
-        or the builtins to an exception class; None otherwise."""
-        if isinstance(expr, ast.Call):
-            expr = expr.func
-        if not isinstance(expr, ast.Name):
-            return None
-        function_globals = (
-            self._session_data.function_globals if self._session_data else None
-        ) or {}
-        if expr.id in function_globals:
-            value = function_globals[expr.id]
-        else:
-            value = getattr(builtins, expr.id, None)
-        if isinstance(value, type) and issubclass(value, BaseException):
-            return value
-        return None
-
-
-    def _adopt_while_condition_bound_names(
-        self,
-        node: ast.While,
-        names: list[str],
-        write_args: list[str],
-        full_write_args_count: int,
-    ) -> tuple[list[str], int]:
-        """Decide what a staged ``while`` does with a name its condition first
-        binds with ``:=``.
-
-        The condition is evaluated in the region's before block, so a name it
-        binds is local to that block and the body never sees it: a body read
-        of such a name is refused here (the ``walrus_in_while`` diagnostic
-        names the fix, binding the name before the loop so it is carried); a
-        name the body never reads stays local to the condition. A sub-DSL
-        whose region protocol can carry a condition-bound name overrides
-        this and returns the extended ``(write_args,
-        full_write_args_count)``.
-        """
-        finder = _RegionReadFinder(names, skip=node.test)
-        for stmt in chain(node.body, node.orelse):
-            finder.visit(stmt)
-        for name in names:
-            read = finder.reads.get(name)
-            if read is not None:
-                raise self._user_error(
-                    "walrus_in_while",
-                    read,
-                    what=f"Reading `{name}`, which the `while` condition binds with `:=`, inside the loop body",
-                    name=name,
-                )
-        return write_args, full_write_args_count
-
-
-
-def create_module_attribute(
-    func_name: str,
-    *,
-    use_base_dsl: bool = True,
-    submodule_name: str | None = None,
-    lineno: int | None = None,
-    col_offset: int | None = None,
-) -> ast.Attribute:
-    """Create the AST of a qualified attribute access through a runtime alias.
-
-    The rewritten function imports two aliases: ``__base_dsl__`` is the
-    helpers module (this package's ``helpers`` with the selectors, executors
-    and loop helpers, or the module a DSL names as
-    ``DSLPreprocessor.helpers_module``); ``__module_dsl__`` is the client DSL
-    package named by ``DSLPreprocessor.client_module_name`` (``and_``,
-    ``or_``, ``not_``, ``as_ir_value``), used when ``use_base_dsl`` is False.
-    A preprocessor subclass emitting a helper call of its own builds the
-    callee with this function.
-
-    :param func_name: The attribute or function name to access
-    :param use_base_dsl: Resolve against ``__base_dsl__`` (default) or ``__module_dsl__``
-    :param submodule_name: An optional submodule of the aliased module
-    :param lineno: The line of the source construct the node stands for
-    :param col_offset: The column of that construct
-    :return: The ``ast.Attribute`` node, located at the given point
-    """
-
-    # The location is one point, not the source node's range: copying the
-    # range would make every traceback line of the helper span the construct.
-    def set_location(
-        node: ast.expr, lineno: int | None, col_offset: int | None
-    ) -> None:
-        if lineno is None or col_offset is None:
-            return
-        node.lineno = lineno
-        node.end_lineno = lineno
-        node.col_offset = col_offset
-        node.end_col_offset = col_offset
-
-    base: ast.expr = ast.Name(
-        id="__base_dsl__" if use_base_dsl else "__module_dsl__", ctx=ast.Load()
-    )
-    set_location(base, lineno, col_offset)
-    if submodule_name:
-        base = ast.Attribute(value=base, attr=submodule_name, ctx=ast.Load())
-        set_location(base, lineno, col_offset)
-    result = ast.Attribute(value=base, attr=func_name, ctx=ast.Load())
-    set_location(result, lineno, col_offset)
-    return result
-
-
-def _while_condition_bound_names(test: ast.expr) -> list[str]:
-    """The names a ``while`` condition binds with ``:=``, in source order.
-
-    A lambda body is skipped: an assignment expression there binds the
-    lambda's own local (PEP 572), not a name of the loop.
-    """
-    names: list[str] = []
-
-    class Collector(ast.NodeVisitor):
-        def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
-            self.visit(node.value)
-            if isinstance(node.target, ast.Name) and node.target.id not in names:
-                names.append(node.target.id)
-
-        def visit_Lambda(self, node: ast.Lambda) -> None:
-            return None
-
-    Collector().visit(test)
-    return names
-
-
-_create_module_attribute = create_module_attribute

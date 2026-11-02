@@ -18,13 +18,14 @@ loop and a native Python loop.
 """
 
 import builtins
+import functools
 import inspect
 import itertools
 from collections.abc import Callable, Iterator, Sequence
-from types import BuiltinFunctionType
+from types import BuiltinFunctionType, GeneratorType
 from typing import Any, Optional
 
-from ...core.common import DSLUserCodeError, _user_error
+from ...core.common import _user_error
 from ...core.diagnostics import DiagId
 from ...core.staging import (
     Executor,
@@ -42,6 +43,7 @@ __all__ = [
     "while_selector",
     "if_executor",
     "while_executor",
+    "ifexp_executor",
     "range",
     "is_dynamic_range",
     "close_for_iter",
@@ -50,7 +52,11 @@ __all__ = [
     "raise_deferred_for_error",
     "discard_deferred_for_error",
     "is_mlir_op",
+    "assert_executor",
+    "bool_short_circuits",
     "bool_cast",
+    "compare_executor",
+    "comprehension_condition",
     "redirect_builtin_function",
     "get_locals_or_none",
     "closure_check",
@@ -215,6 +221,31 @@ def if_executor(
     )
 
 
+def ifexp_executor(
+    *,
+    pred: Any,
+    block_args: tuple[Any, ...],
+    then_block: Callable[..., Any],
+    else_block: Callable[..., Any],
+    branch_weights: Optional[tuple[int, int]] = None,
+) -> Any:
+    """Evaluate a rewritten ternary ``then if pred else else``.
+
+    A Python predicate runs one arm here; a staged predicate goes to the
+    active ``Executor.ifexp_execute``. ``block_args`` are the comprehension
+    and lambda variables the arms close over.
+    """
+    pred, wrapped_branch_weights = _extract_condition_branch_weights(pred)
+    if branch_weights is None:
+        branch_weights = wrapped_branch_weights
+
+    if not is_mlir_op(pred):
+        return then_block(*block_args) if pred else else_block(*block_args)
+    return executor.ifexp_execute(
+        pred, block_args, then_block, else_block, branch_weights=branch_weights
+    )
+
+
 # =============================================================================
 # Range
 # =============================================================================
@@ -344,6 +375,35 @@ def close_for_iter(iterable: Any) -> None:
         iterable.close()
 
 
+# =============================================================================
+# Assertion & casting
+# =============================================================================
+
+
+def assert_executor(test: Any, msg: str | None = None) -> None:
+    """The rewrite of ``assert test, msg``: a Python assertion on a Python value.
+
+    A staged ``test`` cannot be decided at trace time and raises
+    ``PHASE_REQUIRES_CONSTANT``; a Python ``test`` behaves like ``assert``.
+    """
+    # A staged value must not be converted to bool implicitly, hence the
+    # explicit None check before asking the DSL.
+    if test is not None and is_mlir_op(test):
+        raise _user_error(
+            DiagId.PHASE_REQUIRES_CONSTANT,
+            what="`assert`",
+        )
+    assert test, msg
+
+
+def bool_short_circuits(value: Any, short_circuit_value: bool) -> bool:
+    """True when the and/or LHS *value* short-circuits in Python: it is a
+    plain ``bool`` whose truth equals *short_circuit_value*. A staged or
+    non-bool value answers False, so the rewrite's other arm evaluates (the
+    ``and_``/``or_`` helper)."""
+    return type(value) is bool and value == short_circuit_value
+
+
 def bool_cast(value: Any) -> bool:
     """The rewrite of ``bool(value)``: ``PHASE_REQUIRES_CONSTANT`` on a staged value."""
     if is_mlir_op(value):
@@ -354,29 +414,94 @@ def bool_cast(value: Any) -> bool:
     return bool(value)
 
 
+def comprehension_condition(test: Any) -> Any:
+    """The ``if`` clause of a comprehension generator, as the rewrite emits it.
+
+    A comprehension runs in Python, so its filter must be decidable there: a
+    Python ``test`` is returned for Python to truth-test, a staged one raises
+    ``PHASE_REQUIRES_CONSTANT`` at the clause instead of the bare truth-test
+    error a staged value gives when Python asks it for ``bool()``.
+    """
+    if is_mlir_op(test):
+        raise _user_error(
+            DiagId.PHASE_REQUIRES_CONSTANT,
+            what="The `if` clause of a comprehension",
+        )
+    return test
+
+
+def compare_executor(left: Any, comparators: list[Any], ops: list[Any]) -> Any:
+    """
+    Executes comparison operations with a left operand and a list of comparators.
+
+    :param left: The leftmost value in the comparison chain
+    :param comparators: A list of values to compare against
+    :param ops: A list of comparison operators to apply
+    :return: The result of the comparison chain
+    """
+    return _active_executor()._installed("_compare_executor")(left, comparators, ops)
+
+
 # =============================================================================
 # Builtin redirection
 # =============================================================================
+def _any_all_over_generator(fcn: Any, redirected: Any, generator: Any) -> Any:
+    """``any``/``all`` over a generator: Python's short-circuit over the Python
+    elements, the DSL's reduction once a staged element appears.
+
+    Elements are drawn one at a time. While every element is a Python value
+    the built-in's own rule applies: ``any`` stops at the first true one,
+    ``all`` at the first false one. From the first staged element on, that
+    element and the rest are handed to the redirected ``any``/``all`` (the
+    DSL's ``any_``/``all_``), which reduces them to a staged Boolean.
+    """
+    stop_value = fcn is builtins.any
+    for item in generator:
+        if is_mlir_op(item):
+            return redirected((item, *generator))
+        if bool(item) is stop_value:
+            return stop_value
+    return not stop_value
+
+
+def _call_redirected_builtin(
+    fcn: Any, redirected: Any, *args: Any, **kwargs: Any
+) -> Any:
+    """Call the DSL's replacement of a built-in, a generator argument made
+    visible first.
+
+    A single generator argument hides its elements from the staged check
+    (``is_mlir_op`` of a generator is False), so ``max``/``min`` receive it
+    materialised as a tuple, and ``any``/``all`` fold it lazily
+    (:func:`_any_all_over_generator`). Everything else is passed as written.
+    """
+    if len(args) == 1 and isinstance(args[0], GeneratorType):
+        if fcn in (builtins.max, builtins.min):
+            return redirected(tuple(args[0]), **kwargs)
+        if fcn in (builtins.any, builtins.all) and not kwargs:
+            return _any_all_over_generator(fcn, redirected, args[0])
+    return redirected(*args, **kwargs)
+
+
 def redirect_builtin_function(fcn: Any) -> Any:
     """Map a builtin the rewritten code calls to the DSL's replacement.
 
-    ``bool`` becomes :func:`bool_cast`; ``exec``/``eval`` are rejected
-    (``UNSUP_SYNTAX``); any other builtin function goes through the active
-    DSL's ``builtin_redirector``; anything else is returned unchanged.
+    ``exec``/``eval`` are rejected (``UNSUP_SYNTAX``); ``bool`` and any other
+    builtin function go through the active DSL's ``builtin_redirector`` (the
+    shipped one maps ``bool`` to :func:`bool_cast`), with a generator
+    argument handled by :func:`_call_redirected_builtin`; anything else is
+    returned unchanged.
     """
-    if fcn is builtins.bool:
-        return bool_cast
-
-    if isinstance(fcn, BuiltinFunctionType):
+    if fcn is builtins.bool or isinstance(fcn, BuiltinFunctionType):
         if fcn in (builtins.exec, builtins.eval):
-            raise DSLUserCodeError(
+            raise _user_error(
                 DiagId.UNSUP_SYNTAX,
                 what=f"The built-in function `{fcn.__name__}`",
                 detail=": do that work in plain Python before the call and pass the result in",
             )
         redirector = executor._builtin_redirector
         if redirector is not None:
-            return redirector(fcn)
+            return functools.partial(_call_redirected_builtin, fcn, redirector(fcn))
     return fcn
 
 

@@ -35,7 +35,7 @@ import mlir.mlir_dsl as m
 def axpy_kernel(
     n: m.Int32, a: m.Float32, x: m.Pointer[m.Float32], y: m.Pointer[m.Float32]
 ):
-    for i in m.for_(n):  # scf.for inside the gpu.func: the host's loop, unchanged
+    for i in range(n):  # scf.for inside the gpu.func: the host's loop, unchanged
         y[i] = a * x[i] + y[i]
 
 
@@ -48,7 +48,7 @@ def axpy(n: m.Int32, a: m.Float32, x: m.Pointer[m.Float32], y: m.Pointer[m.Float
 
 @m.kernel
 def relu_kernel(n: m.Int32, x: m.Pointer[m.Float32], out: m.Pointer[m.Float32]):
-    for i in m.for_(n):  # the loop stops at `n`: the padding behind it is untouched
+    for i in range(n):  # the loop stops at `n`: the padding behind it is untouched
         out[i] = m.max(x[i], 0.0)
 
 

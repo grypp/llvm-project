@@ -24,6 +24,7 @@ from ....core.dsl import BaseDSL
 from ....core.plugin import ASTPreprocessorPlugin
 from ....types.typing import as_ir_value, max_ as max, min_ as min
 from ....core.staging import is_mlir_op
+from ..helpers import bool_cast
 from ..preprocessor import DSLPreprocessor
 from .builders import WhileLoopContext, for_, if_, while_, yield_
 from .executors import (
@@ -60,11 +61,15 @@ __all__ = [
 
 
 def _builtin_redirector(fcn: Callable[..., Any]) -> Callable[..., Any]:
-    """Route ``max``/``min``/``any``/``all`` to the DSL's versions when an argument is staged."""
+    """Route ``max``/``min``/``any``/``all`` to the DSL's versions when an
+    argument is staged; ``bool`` of a staged value is ``bool_cast`` (an
+    error: the conversion needs a Python value)."""
 
     def builtin_wrapper(fcn: Any, *args: Any, **kwargs: Any) -> Any:
         if not is_mlir_op(args):
             return fcn(*args, **kwargs)
+        if fcn is builtins.bool:
+            return bool_cast(*args, **kwargs)
         if kwargs:
             # Redirected built-ins do not support keyword arguments
             raise DSLUserCodeError(
@@ -97,10 +102,27 @@ class ASTPreprocessor(ASTPreprocessorPlugin):
 
     :param closure_check: Reject nested functions capturing variables inside
         staged regions (the default; see ``ASTPreprocessorPlugin.closure_check``)
+    :param helpers_module: The module the rewritten code imports as
+        ``__base_dsl__`` in place of the shipped helpers (see
+        ``ASTPreprocessorPlugin.helpers_module``); None keeps the shipped ones
     """
 
     name = "scf"
     preprocessor_class = DSLPreprocessor
+    # The region functions ``DSLPreprocessor`` generates for a rewritten
+    # ``for``, ``if``, ``while`` and conditional expression.
+    generated_frame_names = (
+        "loop_body",
+        "if_region",
+        "then_block",
+        "else_block",
+        "elif_region",
+        "while_region",
+        "while_before_block",
+        "while_after_block",
+        "ifexp_then_block",
+        "ifexp_else_block",
+    )
 
     def __init__(
         self, *, closure_check: bool = True, helpers_module: str | None = None
@@ -120,17 +142,3 @@ class ASTPreprocessor(ASTPreprocessorPlugin):
             builtin_redirector=_builtin_redirector,
             ifexp_dynamic=_ifexp_execute_dynamic,
         )
-
-
-    generated_frame_names = (
-        "loop_body",
-        "if_region",
-        "then_block",
-        "else_block",
-        "elif_region",
-        "while_region",
-        "while_before_block",
-        "while_after_block",
-        "ifexp_then_block",
-        "ifexp_else_block",
-    )

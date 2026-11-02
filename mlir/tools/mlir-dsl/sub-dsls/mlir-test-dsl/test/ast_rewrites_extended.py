@@ -267,6 +267,138 @@ def try_uncovered(c: m.Int32) -> m.Int32:
 
 # CHECK: ERROR: try_uncovered UNSUP_EARLY_EXIT
 report(try_uncovered, 3)
+
+
+# A comprehension runs in Python, so its `if` clause must be a Python value:
+# a staged one is refused at the clause, a Python one filters as usual.
+@m.jit
+def comp_filter_staged(n: m.Int32) -> m.Int32:
+    xs = [1, 2, 3]
+    ys = [x for x in xs if x > n]
+    return m.Int32(len(ys))
+
+
+# CHECK: ERROR: comp_filter_staged PHASE_REQUIRES_CONSTANT
+# CHECK: error[PHASE_REQUIRES_CONSTANT]:{{.*}}The `if` clause of a comprehension requires a value known at compile time
+report(comp_filter_staged, 1)
+
+
+@m.jit
+def comp_filter_python(n: m.Int32) -> m.Int32:
+    xs = [1, 2, 3]
+    ys = [n + x for x in xs if x > 1]
+    return ys[0] * ys[1]
+
+
+# CHECK-LABEL: func.func @comp_filter_python(
+# CHECK:         arith.muli
+# EXEC:          COMP_FILTER: 12
+print("COMP_FILTER:", comp_filter_python(1))
+
+
+# --- `and`/`or` where an assignment expression is not allowed ---------------
+# The lowering evaluates the left operand once through an immediately called
+# lambda, which is legal in a comprehension's iterable (a `:=` there is a
+# SyntaxError); a `for` over `a or b` keeps working.
+@m.jit
+def comp_or(a: m.Int32) -> m.Int32:
+    xs = []
+    ys = [1, 2]
+    vals = [a + v for v in (xs or ys)]
+    return vals[0] * vals[1]
+
+
+# CHECK-LABEL: func.func @comp_or(
+# CHECK:         arith.addi
+# CHECK:         arith.addi
+# CHECK:         arith.muli
+# EXEC:          COMP_OR: 12
+print("COMP_OR:", comp_or(2))
+
+
+@m.jit
+def for_or(a: m.Int32) -> m.Int32:
+    xs = []
+    ys = [1, 2, 3]
+    acc = a
+    for v in xs or ys:
+        acc = acc + v
+    return acc
+
+
+# CHECK-LABEL: func.func @for_or(
+# CHECK:         arith.addi
+# EXEC:          FOR_OR: 7
+print("FOR_OR:", for_or(1))
+
+
+# --- Generator arguments of the redirected built-ins, `bool()` --------------
+# A generator hides its elements from the staged check: `max`/`min` receive it
+# materialised, `any`/`all` fold it element by element (Python's short-circuit
+# over Python elements, the DSL's reduction from the first staged one).
+@m.jit
+def max_gen(a: m.Int32, b: m.Int32) -> m.Int32:
+    return max(x for x in (a, b))
+
+
+# CHECK-LABEL: func.func @max_gen(
+# CHECK:         arith.maxsi
+# EXEC:          MAX_GEN: 7
+print("MAX_GEN:", max_gen(3, 7))
+
+
+@m.jit
+def any_all_gen(a: m.Int32, b: m.Int32) -> m.Int32:
+    r = m.Int32(0)
+    if any(x > 0 for x in (a, b)):
+        r = r + 1
+    if all(x > 0 for x in (1, a)):  # `1 > 0` is Python's; the rest is staged
+        r = r + 2
+    if any(x > 0 for x in (1, b)):  # decided by Python at the first element
+        r = r + 4
+    return r
+
+
+# The DSL's `any_` joins its elements with `__dsl_or__` (a select), `all_`
+# with `__dsl_and__` (an `andi`); the third `any` is Python's `True`.
+# CHECK-LABEL: func.func @any_all_gen(
+# CHECK:         arith.cmpi sgt
+# CHECK:         arith.cmpi sgt
+# CHECK:         arith.select
+# CHECK:         scf.if
+# CHECK:         arith.andi
+# CHECK:         scf.if
+# CHECK-NOT:     scf.if
+# CHECK:         return
+# EXEC:          ANY_ALL_GEN: 7 4 5
+print("ANY_ALL_GEN:", any_all_gen(3, -3), any_all_gen(-3, -3), any_all_gen(-3, 3))
+
+
+@m.jit
+def bool_staged(x: m.Int32) -> m.Int32:
+    if bool(x):
+        return m.Int32(1)
+    return m.Int32(0)
+
+
+# `bool()` goes through the DSL's builtin redirector; the shipped one keeps
+# the conversion of a staged value an error.
+# CHECK: ERROR: bool_staged PHASE_REQUIRES_CONSTANT
+report(bool_staged, 3)
+
+
+@m.jit
+def bool_python(n: m.Int32, k) -> m.Int32:
+    if bool(k):
+        return n + 1
+    return n
+
+
+# CHECK-LABEL: func.func @bool_python
+# EXEC:          BOOL_PYTHON: 4 3
+print("BOOL_PYTHON:", bool_python(3, 1), bool_python(3, 0))
+
+
 # --- The range rules of a preprocessor subclass -----------------------------
 # A loop option the executor understands is named in `STAGED_RANGE_KEYWORDS`:
 # the rewrite then stages the loop itself (no trace-time dispatch between a
