@@ -26,13 +26,16 @@ executor through the module-level ``executor`` proxy.
 """
 
 import dataclasses
+import inspect
 from inspect import Parameter
 from typing import Annotated, get_args, get_origin
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from functools import wraps
 from typing import Any, Optional
 
 from ... import ir
 from .common import DSLRuntimeError, _user_error, get_current_dsl
+from .diagnostics import DiagId
 from ..util.logger import log
 from ..types.typing import NumericMeta
 from ..util.tree_utils import (
@@ -49,6 +52,7 @@ __all__ = [
     "is_reserved_python_func_arg",
     "is_type_argument",
 ]
+
 
 # =============================================================================
 # The boundary: which arguments of a @jit call are Python values

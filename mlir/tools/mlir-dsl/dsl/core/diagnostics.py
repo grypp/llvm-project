@@ -94,6 +94,12 @@ _COMPILER_CONTEXT_LINES = 2
 # The name of the environment prefix quoted in the internal-error envelope when
 # the error carries no env manager (``active_dsl`` attaches the DSL's).
 _DEFAULT_ENV_PREFIX = "MLIR_DSL"
+# The ``{prefix}_`` setting that attaches source locations to the ops, quoted
+# by the envelope when a verifier error lacks them; the attached env manager
+# names its own through ``LOCATION_INFO_SETTING`` (``EnvironmentVarManager``
+# declares this default, a sub-DSL whose setting is named differently
+# overrides it). Not imported from ``env_manager``, which imports this module.
+_DEFAULT_LOCATION_INFO_SETTING = "DEBUGINFO"
 
 
 # =============================================================================
@@ -414,6 +420,9 @@ def _format_internal_error_diagnostic(
     # diagnostics so backend failures and internal DSL failures are scannable in
     # the same way.
     is_verifier_error = _is_internal_verifier_error(err.message, cause_text)
+    # One verifier failure is the author's after all: a value created inside a
+    # staged region that is used outside it (see ``_is_dominance_escape_cause``).
+    is_dominance_escape = is_verifier_error and _is_dominance_escape_cause(cause_text)
     headline = (
         "The compiler could not build valid IR for this code."
         if is_verifier_error
@@ -453,8 +462,50 @@ def _format_internal_error_diagnostic(
         if cause_text:
             parts.extend(_format_internal_cause(cause_text))
 
+    if is_dominance_escape:
+        parts.extend(
+            _format_labeled_text(
+                "note",
+                "a runtime value created inside a for/while/if body is used "
+                "outside that body. A value leaves a loop or branch only as a "
+                "result of that region (a plain local variable rebound in the "
+                "body, or a yielded value); the DSL cannot see rebinds made "
+                "through other channels: object attributes assigned inside "
+                "helper methods, values stashed in module-level or aliased "
+                "containers, and closure captures.",
+            )
+        )
+        def_frame = _dominance_escape_def_frame(cause_text)
+        if def_frame:
+            parts.extend(
+                _format_labeled_text("note", "the escaping value is created here:")
+            )
+            parts.extend(def_frame)
+        parts.extend(
+            _format_labeled_text(
+                "suggestion",
+                "Carry the value out as a result of the loop or branch (rebind a "
+                "plain local variable in the body, or yield it), or re-derive it "
+                "at the point of use instead of reusing a value captured inside "
+                "the region.",
+            )
+        )
+        if not def_frame:
+            setting = (
+                getattr(env_manager, "LOCATION_INFO_SETTING", None)
+                or _DEFAULT_LOCATION_INFO_SETTING
+            )
+            parts.extend(
+                _format_labeled_text(
+                    "suggestion",
+                    f"Re-run with {prefix}_{setting}=1 to see where the escaping "
+                    "value is created.",
+                )
+            )
+
     # What the raise site attached (``context`` and ``suggestion``), before
-    # the generic advice.
+    # the generic advice; the dominance explanation above replaces the
+    # verifier's.
     parts.extend(_format_error_details(err))
 
     if not is_verifier_error:
@@ -464,7 +515,7 @@ def _format_internal_error_diagnostic(
                 "Please report this with the snippet above and your kernel.",
             )
         )
-    else:
+    elif not is_dominance_escape:
         parts.extend(
             _format_labeled_text(
                 "suggestion",
@@ -487,6 +538,33 @@ def _format_internal_error_diagnostic(
 def _is_internal_verifier_error(message: str, cause_text: str) -> bool:
     """Whether an internal error is the MLIR verifier rejecting the built IR."""
     return "IR verification failed" in message or "Verification failed:" in cause_text
+
+
+def _is_dominance_escape_cause(cause_text: str) -> bool:
+    """Whether a verifier failure is a use of a value outside the region that
+    defines it: a runtime value created in a staged for/while/if body and
+    carried out through a channel the tracer does not follow (an object
+    attribute, a container, a closure) instead of as a result of the region.
+    The tracer cannot see it, so the verifier reports it."""
+    return "does not dominate this use" in cause_text
+
+
+def _dominance_escape_def_frame(cause_text: str) -> list[str] | None:
+    """The compiler source frame of the escaping value's definition: the
+    ``"file.py":line:col`` location on the verifier's ``operand defined here``
+    note, present when the ops carry source locations.  ``None`` without one;
+    the envelope then names the setting that attaches them."""
+    for line in cause_text.splitlines():
+        if "operand defined here" not in line:
+            continue
+        loc_match = _PY_LOC_RE.search(line)
+        if loc_match:
+            return _format_compiler_source_frame(
+                loc_match.group("file"),
+                int(loc_match.group("line")),
+                int(loc_match.group("col")),
+            )
+    return None
 
 
 def _brief_internal_error(message: str) -> str:
@@ -969,6 +1047,18 @@ class DiagId(DiagCatalog, enum.Enum):
     """
 
     # --- PHASE ---
+    PHASE_MUTATE_PYTHON = (
+        "`{var}` is a {meta}, but it is changed inside a for/while/if controlled by a "
+        "{staged}{detail}. Only a {staged} can change there: the code inside "
+        "is compiled once, not run once per iteration or per taken branch.",
+        (
+            "Create `{var}` as a {staged} of the matching type before the "
+            "for/while/if, e.g. `{var} = Int32(0)`, `Float32(0.0)`, or "
+            "`Boolean(False)`, and update it inside.",
+            "If `{var}` is a fixed setting, assign it once before the for/while/if and "
+            "do not change it inside.",
+        ),
+    )
     PHASE_DYNAMIC_INDEX = (
         "Cannot use a {staged} as a list index or for loop range in plain Python code; "
         "only a Python `int` works there.",
@@ -1004,6 +1094,40 @@ class DiagId(DiagCatalog, enum.Enum):
     )
 
     # --- TYPE ---
+    TYPE_UNSTABLE_JOIN = (
+        "`{var}` has type `{old_type}` on one path and `{new_type}` on "
+        "another{detail}. `{var}` must have one type wherever these paths come back "
+        "together.",
+        (
+            "Make every assignment to `{var}` produce the same type.",
+            "If a conversion is needed, convert explicitly in each branch, e.g. `{var} "
+            "= Float32({var})`, or change the type before the for/while/if so every "
+            "path has the new type.",
+            "If one path sets `{var}` to `None`, a tuple, or an object, use a number "
+            "or `Boolean` flag instead, or decide the branch at compile time with an "
+            "`if` on a {meta}.",
+        ),
+    )
+    TYPE_CONDITIONAL_BRANCH_MISMATCH = (
+        "The two branches of this `x if cond else y` expression produce different "
+        "types. The compiler cannot know at compile time which branch runs, so both "
+        "branches must produce the same type.",
+        (
+            "Convert one branch so both produce the same type, e.g. `Float32(x) if "
+            "cond else y`.",
+        ),
+    )
+    TYPE_LOOP_BOUND_NOT_INT = (
+        "The loop's `{name}` is a `{dtype}`, but a loop's start, stop, and step must "
+        "all be integers.",
+        (
+            "Use an integer for `{name}`, e.g. `2` instead of `2.0`.",
+            "Convert the value to an integer before the loop, e.g. `int(x)` for a "
+            "Python value.",
+            "For a fractional step, loop over an integer count and scale inside the "
+            "body, e.g. `for i in range(n): x = i * 0.5`.",
+        ),
+    )
     TYPE_RETURN_MISMATCH = (
         "This function returns {got}, which a compiled function cannot return{detail}.",
         (
@@ -1062,6 +1186,17 @@ class DiagId(DiagCatalog, enum.Enum):
     )
 
     # --- CONTAINER ---
+    CONTAINER_STRUCTURE_CHANGED = (
+        "`{var}` has a different structure at the end of this `{op_type}` than at the "
+        "start{detail}. Every path through the `{op_type}` must leave `{var}` with the "
+        "same type and structure (same fields, same number of parts).",
+        (
+            "Assign `{var}` a value of the same type and structure on every branch and "
+            "every iteration of the `{op_type}`.",
+            "If `{var}` is meant to change structure, do it in a compile-time for/if "
+            "(one whose bounds or condition are {meta}s).",
+        ),
+    )
     CONTAINER_UNSUPPORTED = (
         "`{var}` is a `{type}` holding DSL values, but compiled code carries DSL "
         "values only in tuples, lists and frozen dataclasses.",
@@ -1086,6 +1221,17 @@ class DiagId(DiagCatalog, enum.Enum):
         (
             "Flatten the value yourself or raise `sys.setrecursionlimit`; a container "
             "that refers back to itself is not supported.",
+        ),
+    )
+
+    # --- UNSUP: constructs the DSL does not compile (found by the AST
+    # preprocessor) ---
+    UNSUP_SYNTAX = (
+        "{what} is not supported in a compiled function{detail}.",
+        (
+            "Compiled functions accept a subset of Python: rewrite this part with a "
+            "supported form, or do it in plain Python outside the compiled function "
+            "and pass the result in.",
         ),
     )
 
@@ -1289,7 +1435,15 @@ _classify_warning = functools.partial(classify, WarnId)
 
 _classify_error(
     NOT_ZERO_COST,
+    "a Python value changes inside a runtime for/while/if",
+    "PHASE_MUTATE_PYTHON",
+)
+_classify_error(
+    NOT_ZERO_COST,
     "a type or structure differs between paths of a runtime for/while/if",
+    "TYPE_UNSTABLE_JOIN",
+    "TYPE_CONDITIONAL_BRANCH_MISMATCH",
+    "CONTAINER_STRUCTURE_CHANGED",
     "CONTAINER_UNSUPPORTED",
     "CONTAINER_INVALID_RECORD",
     "CONTAINER_TOO_DEEP",
@@ -1307,6 +1461,11 @@ _classify_error(
     "PHASE_DYNAMIC_TO_STATIC_BOOL",
 )
 _classify_error(
+    UNSUPPORTED,
+    "a Python construct the DSL does not compile yet",
+    "UNSUP_SYNTAX",
+)
+_classify_error(
     USAGE,
     "arguments",
     "ARG_ANNOTATION_MISMATCH",
@@ -1314,6 +1473,7 @@ _classify_error(
     "ARG_NOT_NUMERIC",
     "ARG_REJECTED_BY_OP",
     "CALL_ARGUMENTS",
+    "TYPE_LOOP_BOUND_NOT_INT",
 )
 _classify_error(
     USAGE,

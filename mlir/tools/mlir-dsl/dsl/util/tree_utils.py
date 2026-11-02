@@ -37,10 +37,12 @@ __all__ = [
     "Leaf",
     "LeafEntry",
     "PyTreeDef",
+    "check_tree_equal",
     "contains_leaf",
     "describe_tree_difference",
     "is_frozen_dataclass",
     "is_leaf",
+    "is_reference_leaf",
     "is_staged_leaf",
     "leaf_attributes",
     "leaf_entry",
@@ -223,6 +225,12 @@ def is_leaf(obj_or_cls: Any) -> bool:
     """True if ``obj_or_cls`` is a registered leaf class or an instance of one."""
     cls = obj_or_cls if isinstance(obj_or_cls, type) else type(obj_or_cls)
     return leaf_entry(cls) is not None
+
+
+def is_reference_leaf(value: Any) -> bool:
+    """True if ``value`` is an instance of a reference leaf class."""
+    entry = leaf_entry(type(value))
+    return entry is not None and entry.reference
 
 
 def is_staged_leaf(value: Any) -> bool:
@@ -901,6 +909,29 @@ def describe_tree_difference(
         f"`{path}` changed from {_tree_value_description(lhs)} "
         f"to {_tree_value_description(rhs)}"
     )
+
+
+def check_tree_equal(lhs: PyTreeDef, rhs: PyTreeDef) -> int:
+    """
+    Check if two tree definitions are equal and return the index of first difference.
+
+    The two trees must have the same number of children (the write_args of
+    one region); the result is the index of the first child that differs, or
+    -1 if they are completely equal.
+    """
+    _require_tree(lhs, "check_tree_equal")
+    _require_tree(rhs, "check_tree_equal")
+    if isinstance(lhs, Leaf) or isinstance(rhs, Leaf):
+        return -1 if trees_equal(lhs, rhs) else 0
+    if len(lhs.child_treedefs) != len(rhs.child_treedefs):
+        raise DSLRuntimeError(
+            "check_tree_equal expects trees with the same number of children, "
+            f"got {len(lhs.child_treedefs)} and {len(rhs.child_treedefs)}"
+        )
+    for index, (l, r) in enumerate(zip(lhs.child_treedefs, rhs.child_treedefs)):
+        if not trees_equal(l, r):
+            return index
+    return -1
 
 
 # =============================================================================

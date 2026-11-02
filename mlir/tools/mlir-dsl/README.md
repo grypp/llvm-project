@@ -42,3 +42,5 @@ The scalar catalogue includes signed and unsigned integers, standard floating-po
 Tuples, lists, frozen dataclasses and `@struct` records flatten at argument and result boundaries. Registered leaves allow downstream value classes to participate.
 
 `dsl_user_op` preserves source locations around user operations. Diagnostics show source context, and per-DSL environment settings control tracing and logging.
+
+`for_`, `if_`, `while_` and `yield_` construct structured control flow explicitly. Callback executors validate loop carries and branch results.

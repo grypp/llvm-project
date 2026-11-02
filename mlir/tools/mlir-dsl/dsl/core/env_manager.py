@@ -25,7 +25,7 @@ import os
 import types
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Callable, Union, get_args, get_origin
+from typing import Any, Callable, ClassVar, Union, get_args, get_origin
 
 from ..util.logger import setup_log
 from .common import DSLRuntimeError, DSLUserCodeValueError, DSLWarning
@@ -361,6 +361,8 @@ class EnvironmentVarManager(LogEnvironmentManager):
     - [DSL_NAME]_REMARKS_POLICY: Remark policy, "all" or "final" (default: "all")
     - [DSL_NAME]_REMARKS_OUTPUT: File the remarks stream to; ".yaml" or ".bitstream" picks the format (default: "")
     """
+
+    LOCATION_INFO_SETTING: ClassVar[str] = "DEBUGINFO"
 
     # Master switch for DSL developers: raises the default of a curated set of
     # diagnostic settings below, each still overridable by its own variable.

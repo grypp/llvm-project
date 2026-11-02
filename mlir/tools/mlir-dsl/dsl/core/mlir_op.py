@@ -120,6 +120,9 @@ class OpEmitter:
     def cmp(self, *args: Any, **kwargs: Any) -> Any:
         return self._unsupported("cmp")
 
+    def select(self, *args: Any, **kwargs: Any) -> Any:
+        return self._unsupported("select")
+
     def bitcast(self, *args: Any, **kwargs: Any) -> Any:
         return self._unsupported("bitcast")
 
