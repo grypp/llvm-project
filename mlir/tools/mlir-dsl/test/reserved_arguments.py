@@ -31,21 +31,33 @@ entered = []
 
 
 @TestDSL.jit
-def takes_reserved(
-    *,
-    pipeline=None,
-    container_attrs=None,
-    no_cache=None,
-    extra_link_libs=None,
-    compile_only=None,
-):
-    entered.append("reserved")
+def takes_pipeline(*, pipeline):
+    entered.append("pipeline")
 
 
-def rejected(name, value):
+@TestDSL.jit
+def takes_container_attrs(*, container_attrs):
+    entered.append("container_attrs")
+
+
+@TestDSL.jit
+def takes_no_cache(*, no_cache):
+    entered.append("no_cache")
+
+
+@TestDSL.jit
+def takes_extra_link_libs(*, extra_link_libs):
+    entered.append("extra_link_libs")
+
+
+@TestDSL.jit
+def takes_compile_only(*, compile_only):
+    entered.append("compile_only")
+
+
+def rejected(name, function, value):
     try:
-        # Defaults keep missing arguments from masking reserved-name failures.
-        takes_reserved(**{name: value})
+        function(**{name: value})
     except DSLUserCodeError as error:
         assert error.diag_id.name == "CALL_ARGUMENTS"
         print("RESERVED:", name, repr(value))
@@ -55,13 +67,13 @@ def rejected(name, value):
     assert get_current_dsl() is None
 
 
-rejected("pipeline", None)
-rejected("container_attrs", {})
-rejected("no_cache", False)
-rejected("extra_link_libs", ())
-rejected("compile_only", False)
-rejected("no_cache", None)
-rejected("compile_only", None)
+rejected("pipeline", takes_pipeline, None)
+rejected("container_attrs", takes_container_attrs, {})
+rejected("no_cache", takes_no_cache, False)
+rejected("extra_link_libs", takes_extra_link_libs, ())
+rejected("compile_only", takes_compile_only, False)
+rejected("no_cache", takes_no_cache, None)
+rejected("compile_only", takes_compile_only, None)
 # CHECK: RESERVED: pipeline None
 # CHECK-NEXT: RESERVED: container_attrs {}
 # CHECK-NEXT: RESERVED: no_cache False

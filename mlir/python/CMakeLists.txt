@@ -998,6 +998,13 @@ add_mlir_python_modules(MLIRPythonModules
   COMMON_CAPI_LINK_LIBS
     MLIRPythonCAPI
 )
+if(TARGET MLIRPythonModulesMlirTestDSL)
+  add_dependencies(MLIRPythonModules MLIRPythonModulesMlirTestDSL)
+endif()
+if(TARGET MLIRPythonModulesEmitCTestDSL)
+  add_dependencies(MLIRPythonModules MLIRPythonModulesEmitCTestDSL)
+endif()
+
 if(MLIR_PYTHON_STUBGEN_ENABLED)
   add_dependencies(MLIRPythonModules "${_mlir_typestub_gen_target}")
   if(MLIR_INCLUDE_TESTS)

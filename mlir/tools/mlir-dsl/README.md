@@ -28,13 +28,15 @@ Run with `PRINT_DSL_PRINT_IR=1` to print the verified module. The call traces
 `hello` into a zero-argument `func.func` containing two `gpu.printf`
 operations. The Python argument specializes IR construction. Calls to other
 decorated functions inside the body inline their builders into the active
-trace. Functions currently return `None`; no runtime arguments, compiler or
-execution engine are required. Emitting a print operation does not execute it.
+trace. Additional capabilities are introduced below. Emitting a print operation does not execute it.
 
 Enable `MLIR_ENABLE_BINDINGS_PYTHON` and `MLIR_ENABLE_PYTHON_DSL` when building
 MLIR, then run `check-mlir-dsl` to exercise the tracing tests.
 
+## Available capabilities
+
+Typed scalar parameters become SSA block arguments. Numeric operators dispatch through the selected `type_ops` emitter, so the same Python expression can target different dialects.
+
 The call keywords `pipeline`, `container_attrs`, `no_cache`, `extra_link_libs`
-and `compile_only` are reserved for the framework's compilation interface.
-The tracing interface rejects these keywords, including values of `None` or
-`False`; use different names for compile-time keyword arguments.
+and `compile_only` belong to the framework. They do not bind to user Meta
+parameters; use different names for compile-time keyword arguments.

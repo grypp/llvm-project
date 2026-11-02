@@ -2,28 +2,62 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""Trace Python functions containing MLIR builders into verified modules.
+"""
+The DSL base class :class:`BaseDSL`.
 
-Python arguments specialize IR construction: the body receives them unchanged
-and returns None. A decorator plugin supplies the function op and terminator;
-builders in the body use the normal MLIR bindings and active insertion point.
+A sub-DSL inherits :class:`BaseDSL` and names its plugins in one ``Plugins``
+record on the class. The base owns what is the same for every DSL: the
+decorator machinery every decorator plugin builds on
+(:meth:`BaseDSL.make_decorator`, :meth:`BaseDSL.jit_runner`; ``@jit`` itself
+is the ``func.Jit`` plugin's), the AST
+preprocessor run, the host argument boundary, tracing the body into the entry
+the decorator plugin builds, the pass pipeline, the in-memory and on-disk
+compile caches and the invocation through the ``compiler`` plugin, and the
+services a decorator plugin traces with (:meth:`BaseDSL.bind_arguments`,
+:meth:`BaseDSL.trace_body`).
 """
 
 import inspect
 import os
 import re
 import threading
-from collections.abc import Callable
+import warnings
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import wraps
-from typing import Any, ClassVar
+from typing import Annotated, Any, ClassVar, get_args, get_origin
 
 from ... import ir
-from .common import DSLRuntimeError, DSLUserCodeError, active_dsl, in_trace
+from ..types import typing as t
+from ..util import tree_utils
+from .common import (
+    DSLBaseError,
+    DSLRuntimeError,
+    DSLUserCodeError,
+    active_dsl,
+    in_trace,
+)
 from .diagnostics import DiagId
-from .plugin import DecoratorPlugin, Plugins
+from .env_manager import EnvironmentVarManager
+from .plugin import DecoratorPlugin, Plugins, _NoRemarkSession
+from .staging import is_argument_meta
 
+__all__ = [
+    "BaseDSL",
+    "DSLLocation",
+    "DSLSingletonMeta",
+    "JitFuncArgs",
+]
+
+# ===----------------------------------------------------------------------===
+# Global Variables
+# ===----------------------------------------------------------------------===
+
+# Characters stripped from a mangled function name, and the precomputed
+# translation table (mangle_name runs per compile, plus once per kernel trace).
+_MANGLE_UNWANTED_CHARS = r"'-![]#,.<>()\":{}=%?@;"
+_MANGLE_TRANSLATION_TABLE = str.maketrans("", "", _MANGLE_UNWANTED_CHARS)
 
 # ===----------------------------------------------------------------------===
 # DSL Class Construction
@@ -91,6 +125,35 @@ class DSLLocation:
     function_name: str
 
 
+@dataclass(frozen=True)
+class JitFuncArgs:
+    """Arguments related to a compiled function.
+
+    ``values`` are the marshalled runtime values, ``types`` and ``attributes``
+    the MLIR argument types and attribute dicts; ``adapted_python_args`` holds,
+    per Python argument in signature order, ``None`` when the argument was
+    used as is or the value the annotation cast, the ``Pointer[T]`` address
+    adaptation or a JitArgAdapter produced.
+    """
+
+    values: list[Any]
+    types: list[Any]
+    attributes: list[Any]
+    adapted_python_args: list[Any]
+
+
+@dataclass(frozen=True)
+class _ResultSpec:
+    """How the result of a compiled function maps back to Python: the flattened
+    shape of the traced return, the host-side slot descriptor the decorator
+    plugin built for it (opaque to the core; the shipped ``func.Jit`` uses a
+    ``ctypes`` type) and that plugin, which reads the slot back."""
+
+    treedef: Any
+    slot: Any
+    entry: Any
+
+
 class _PluginDecorator:
     """Bind a decorator to the DSL class it is accessed through.
 
@@ -135,12 +198,29 @@ class _PluginDecorator:
 
 
 class BaseDSL(metaclass=DSLSingletonMeta):
-    """A DSL's decorator lifecycle and dialect-independent tracing services."""
+    """The base of every DSL: one singleton instance per concrete subclass.
+
+    The class attributes below are the sub-DSL knobs; the instance attributes
+    set in ``__init__`` are the per-DSL state (environment manager, caches,
+    executors, installed plugins). Every decorator, ``@MyDSL.jit`` included,
+    comes from a decorator plugin of the record and is installed on the class
+    by ``__init_subclass__``; all dispatch through :meth:`jit_runner` to the
+    plugin's ``call`` (from Python) or ``launch`` (inside a trace).
+    """
 
     _abstract_dsl_base: ClassVar[bool] = True
 
-    plugins: ClassVar[Plugins] = Plugins()
+    _env_class: type[EnvironmentVarManager] = EnvironmentVarManager
+    # Optional compiler-recognized component inserted by a DSL's name mangler.
     _name_mangling_prefix: ClassVar[str] = ""
+    #: What the DSL is made of: one plugin per role (``type_ops``,
+    #: ``ast_preprocessor``, ``compiler``) and
+    #: the families (``decorators``, ``adapters``). ``__init__``
+    #: resolves the record once per
+    #: instance: a plugin whose ``available()`` is False is dropped (and listed
+    #: in ``unavailable_plugins``), the rest are copied and installed in record
+    #: order. The base names nothing; a sub-DSL assembles itself here.
+    plugins: ClassVar[Plugins] = Plugins()
 
     def __init_subclass__(cls, *, abstract: bool = False, **kwargs: Any) -> None:
         """Install decorators from a record defined on this class.
@@ -180,21 +260,101 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                         )
                     setattr(cls, name, decorator)
 
-    def __init__(self, *, name: str) -> None:
+    def _remark_session(self, context: ir.Context) -> Any:
+        """The compiler plugin's remark session for ``context`` under the
+        ``REMARKS``/``REMARKS_POLICY``/``REMARKS_OUTPUT`` settings; a session
+        collecting nothing for a DSL without a compiler (a trace-only DSL)."""
+        compiler = self.plugins.compiler
+        if compiler is None:
+            return _NoRemarkSession()
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        dsl_package_name: list[str] | None = None,
+    ) -> None:
+        """
+        Initialize the DSL with its providers and environment settings.
+
+        :param name: Name of the DSL; the environment variable prefix
+            (``<name>_DRYRUN``, ...) and the logging label
+        :param dsl_package_name: The package the AST rewrite imports
+            ``and_``/``or_``/``not_``/``as_ir_value`` from, as path parts; None
+            means the ``ast_preprocessor`` plugin's own package. Only a DSL
+            that re-exports those helpers under its own namespace names it.
+
+        Reads the environment through ``EnvironmentVarManager``, configures
+        warnings and logging, and installs the class's ``plugins`` record last,
+        so the subclass's own ``__init__`` still runs after them and wins. The
+        DSL rewrites native control flow exactly when its record names an
+        ``ast_preprocessor`` plugin with a preprocessor (and
+        ``<PREFIX>_AST_PREPROCESSOR`` is not 0); there is no other switch.
+        """
+        # Enforcing initialization of instance variables
         if not name:
             raise DSLRuntimeError("a DSL needs a name: its environment prefix")
-        self.name = name
+
+        self.name: str = name
         self.decorator_location: DSLLocation | None = None
+        # Read environment variables
+        self.envar: EnvironmentVarManager = self._create_environment_manager()
+        # Set once the plugins are installed: True exactly when the record
+        # names an ``ast_preprocessor`` plugin with a preprocessor and the
+        # environment does not turn the rewrite off.
+        self.enable_preprocessor: bool = False
+        self.preprocessor: Any = None
+
+        # set warning
+        if self.envar.warnings_ignore:
+            warnings.filterwarnings("ignore")
+
+        # The function being traced; set on every path that reaches the
+        # argument boundary (``_prepare_compilation``, ``bind_arguments``).
+        self.traced_function: Callable[..., Any] | None = None
+
+        # Resolve the class's plugin record for this instance: a copy of every
+        # available plugin, installed in record order (roles, then families), so
+        # the subclass's own ``__init__`` resumes after them and wins.
         self.plugins, self.unavailable_plugins = type(self).plugins.resolve()
         for plugin in self.plugins:
             plugin.install(self)
+        for adapter in self.plugins.adapters:
+            adapter.register(self)
+
+    @property
+    def _compiler(self) -> Any:
+        """The compiler plugin of this DSL; an error when it names none."""
+        compiler = self.plugins.compiler
+        if compiler is None:
+            raise DSLRuntimeError(
+                "this DSL has no compiler: name one in its plugins, e.g. "
+                "`plugins = Plugins(compiler=execution_engine.Compiler())`",
+                context={"dsl": self.name, **self._unavailable_context()},
+            )
+        return compiler
+
+    def _unavailable_context(self) -> dict[str, Any]:
+        """The plugins the class named but ``available()`` rejected, for a
+        diagnostic's context; empty when none."""
+        if not self.unavailable_plugins:
+            return {}
+        return {"unavailable plugins": dict(self.unavailable_plugins)}
+
+    def _create_environment_manager(self) -> EnvironmentVarManager:
+        """Create the environment manager for this DSL's prefix."""
+        return self._env_class(self.name)
 
     @classmethod
     def _get_dsl(cls) -> Any:
-        return cls()
+        """The instance of ``cls``; the singleton metaclass builds it once."""
+        return cls()  # type: ignore[call-arg]
 
     def register_dialects(self, context: ir.Context) -> None:
-        """Register any out-of-tree dialects used by the DSL's builders."""
+        """Register the DSL's dialects on the trace ``context``, before any op
+        is built. Upstream dialects are on every context already, so the
+        default does nothing; a sub-DSL on an out-of-tree dialect registers it
+        here (``mynewdialect.register_dialect(context)``)."""
 
     # ===------------------------------------------------------------------===
     # Decorator Lifecycle
@@ -206,6 +366,22 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         if hasattr(func, "_dsl_cls"):
             func._dsl_object = func._dsl_cls._get_dsl()
             delattr(func, "_dsl_cls")
+
+    @staticmethod
+    def _preprocess_and_replace_code(func: Any) -> None:
+        """
+        Run ast transformation and replace the function's code object
+        """
+        # Ensure the DSL instance is materialized before touching _dsl_object
+        BaseDSL._lazy_initialize_dsl(func)
+        # Update the decorator location to the new function
+        func._dsl_object.decorator_location = func._decorator_location
+
+        if getattr(func, "_preprocessed", False) is True:
+            return
+        if not func._dsl_object.enable_preprocessor:
+            func._preprocessed = True
+            return
 
     @staticmethod
     def jit_runner(
@@ -235,6 +411,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                     got=f"a `{type(func).__name__}`",
                 )
             func._dsl_cls = cls
+            # The decorator the function carries ("jit", "kernel", ...).
             func._decorator_kind = kind
             func._decorator_location = location
             if plugin is not None:
@@ -266,7 +443,8 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         if len(decorator_args) == 1 and callable(decorator_args[0]):
             return jit_runner_decorator(decorator_args[0])  # bare `@jit`
         if decorator_args:
-            # Decorator options must be keyword arguments.
+            # `@jit(3)`: the options are keywords, so a value here is a
+            # mistake, not a configuration.
             raise DSLUserCodeError(
                 DiagId.CALL_ARGUMENTS,
                 function_name=f"@{kind}",
@@ -329,6 +507,351 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         return nullcontext()
 
     # ===------------------------------------------------------------------===
+    # Pipeline
+    # ===------------------------------------------------------------------===
+
+    def pipeline(self) -> list[str]:
+        """The pass list of this DSL, in order: what lowers the ops its plugins
+        emit. The base lists nothing (the core emits no dialect); a sub-DSL
+        returns its own, spelled against the dialects its plugins emit. Wrapped
+        as ``builtin.module(...)`` by :meth:`_get_pipeline`; a ``pipeline=``
+        call keyword or ``<PREFIX>_PIPELINE`` replaces it."""
+        return []
+
+    def _get_pipeline(self, pipeline: str | None) -> str:
+        """The pipeline string of a compile: an explicit ``pipeline`` (a call
+        keyword) as given, else the ``<PREFIX>_PIPELINE`` environment variable
+        with the plugins' ``pipeline_options()`` appended, else
+        :meth:`pipeline` wrapped as ``builtin.module(...)``."""
+        if pipeline is not None:
+            return pipeline
+        if self.envar.pipeline is not None:
+            options: dict[str, str] = {}
+            for plugin in self.plugins:
+                options.update(plugin.pipeline_options())
+            return self.preprocess_pipeline(self.envar.pipeline, options)
+        return "builtin.module(" + ",".join(self.pipeline()) + ")"
+
+    def preprocess_pipeline(self, pipeline: str, options: dict[str, str]) -> str:
+        """Append ``options`` (``name=value`` pairs, the plugins'
+        ``pipeline_options()``) to the ``<PREFIX>_PIPELINE`` string, merging
+        into an existing ``{...}`` option block when the pipeline has one; no
+        options leave it as given."""
+        opt_str = ""
+        for k, v in options.items():
+            if v:
+                opt_str += f"{k}={v} "
+
+        if opt_str:
+            # Automatically append the pipeline options if any is specified through env var
+            match = re.compile(r"{(.+)}").search(pipeline)
+            if match:
+                opt_str = f"{{{match[1]} {opt_str}}}"
+                # A callable replacement substitutes opt_str verbatim: a string
+                # replacement is a template, so backslashes in option values
+                # (e.g. a Windows path C:\...) would be parsed as escapes.
+                pipeline = re.sub(r"{.+}", lambda _: opt_str, pipeline)
+            else:
+                pipeline = pipeline.rstrip(")") + f"{{{opt_str}}})"
+        return pipeline
+
+    # ===------------------------------------------------------------------===
+    # Name mangling
+    # ===------------------------------------------------------------------===
+
+    def _is_meta_argument(self, arg: Any, spec_ty: Any) -> bool:
+        """True if the boundary will treat ``arg`` as a compile-time value: no
+        DSL annotation, no leaf inside it and no registered adapter for it."""
+        if isinstance(arg, (ir.Type, ir.Value)) or isinstance(
+            spec_ty, (ir.Type, ir.Value)
+        ):
+            return False
+        annotation = spec_ty
+        if get_origin(annotation) is Annotated:
+            annotation = get_args(annotation)[0]
+        if isinstance(annotation, (t.NumericMeta)):
+            return False
+        if (
+            isinstance(annotation, type)
+            and tree_utils.leaf_entry(annotation) is not None
+        ):
+            return False
+        if tree_utils.contains_leaf(arg):
+            return False
+        if isinstance(arg, (list, tuple)):
+            # The sequence adapter adapts per element, so a sequence is a Meta
+            # value iff every element is one (and is then folded element-wise).
+            return all(
+                self._is_meta_argument(elem, inspect.Parameter.empty) for elem in arg
+            )
+        return True
+
+    def mangle_name(
+        self, function_name: str, args: tuple[Any, ...], sig: inspect.Signature
+    ) -> str:
+        """Does simple name mangling: the Meta arguments are folded into the
+        symbol, so every specialisation of a function gets its own name."""
+
+        # sig.parameters maybe longer than args, but since canonicalized_args
+        # only contains positional arguments, we can rely on zip to truncate
+        for param, arg in zip(sig.parameters.values(), args):
+            if not self._is_meta_argument(arg, param.annotation):
+                continue
+            if isinstance(arg, type):
+                function_name = f"{function_name}_{arg.__name__}"
+            elif isinstance(arg, (list, tuple)):
+                function_name = f"{function_name}_{'_'.join(map(str, arg))}"
+            else:
+                function_name = f"{function_name}_{arg}"
+        function_name = function_name.translate(_MANGLE_TRANSLATION_TABLE)
+        # Identify addresses and drop them. Match upper-case hex too: Windows
+        # (MSVC %p) id() reprs are upper-case zero-padded.
+        function_name = re.sub(r"0x[a-fA-F0-9]{8,16}", "", function_name)
+        function_name = re.sub(r"\s+", "_", function_name).replace("/", "_")
+        # max fname is 256 character, leave space
+        function_name = function_name[:180]
+        if self._name_mangling_prefix:
+            function_name = f"{self._name_mangling_prefix}_{function_name}"
+        return function_name
+
+    # ===------------------------------------------------------------------===
+    # Block arguments -> traced Python arguments
+    # ===------------------------------------------------------------------===
+
+    @staticmethod
+    def _restore_tree(treedef: Any, restore_leaf: Callable[[Any], Any]) -> Any:
+        """Rebuild the container described by ``treedef``, restoring every
+        leaf through ``restore_leaf(leaf)`` and writing META slots back verbatim."""
+        if isinstance(treedef, tree_utils.Leaf):
+            if treedef.is_none:
+                return None
+            if treedef.is_meta:
+                return treedef.meta
+            return restore_leaf(treedef)
+        children = [
+            BaseDSL._restore_tree(child, restore_leaf)
+            for child in treedef.child_treedefs
+        ]
+        return treedef.node_type.from_iterable(treedef.node_metadata, children)
+
+    @staticmethod
+    def _restore_from_block_args(treedef: Any, block_args: Sequence[Any]) -> Any:
+        """Rebuild a traced argument from the block arguments of its leaves."""
+        values = iter(block_args)
+
+        def restore_leaf(leaf: Any) -> Any:
+            entry = tree_utils.leaf_entry(leaf.node_metadata.cls)
+            leaf_values = [next(values) for _ in tree_utils.leaf_ir_types(leaf)]
+            return entry.from_ir_values(leaf.prototype, leaf_values)
+
+        return BaseDSL._restore_tree(treedef, restore_leaf)
+
+    def generate_execution_arguments(
+        self,
+        args: tuple[Any, ...],
+        kwonlyargs: dict[str, Any],
+        fop: Any,
+        sig: inspect.Signature,
+    ) -> tuple[list[Any], dict[str, Any]]:
+        """Create list of arguments that will be passed to the traced function body"""
+
+        def gen_exec_arg(
+            idx: int,
+            arg: Any,
+            parameter: inspect.Parameter,
+            fop_args: list[Any],
+            iv_block_args: int,
+        ) -> tuple[Any, int]:
+            arg_name = parameter.name
+            arg_spec = parameter.annotation
+
+            # A Python value is handed to the body as is; ``traced_function``
+            # supplies the owning-function context ``is_argument_meta`` uses to
+            # detect reserved ``self``/``cls`` parameters.
+            if is_argument_meta(arg, arg_spec, arg_name, idx, self.traced_function):
+                ir_arg: Any = arg
+            else:
+                if True:
+                    base_spec = (
+                        get_args(arg_spec)[0]
+                        if get_origin(arg_spec) is Annotated
+                        else arg_spec
+                    )
+                    if isinstance(base_spec, t.NumericMeta) and not isinstance(
+                        arg, base_spec
+                    ):
+                        # Numeric type coercion for a staged argument: the block arg
+                        # already has the target MLIR type. Wrap it directly
+                        # instead of casting the caller's value, which would
+                        # emit casts referencing SSA values from an outer region.
+                        # An abstract annotation (``Numeric``) is no type to wrap
+                        # in: the block argument's type, fixed at the boundary,
+                        # names the dtype (a kernel is traced with the raw call
+                        # arguments, so the Python number is still here).
+                        block_arg = fop_args[iv_block_args]
+                        dtype = (
+                            t.Numeric.from_mlir_type(block_arg.type)
+                            if base_spec.is_abstract
+                            else base_spec
+                        )
+                        ir_arg = dtype(block_arg)
+                        iv_block_args += 1
+                    else:
+                        _, _, treedef = tree_utils.tree_flatten(
+                            arg, return_ir_values=False
+                        )
+                        n_args = sum(
+                            len(tree_utils.leaf_ir_types(leaf))
+                            for _, leaf in tree_utils.tree_leaves(treedef)
+                        )
+                        blk_args = fop_args[iv_block_args : iv_block_args + n_args]
+                        ir_arg = self._restore_from_block_args(treedef, blk_args)
+                        iv_block_args += n_args
+
+            return ir_arg, iv_block_args
+
+        block = fop if isinstance(fop, ir.Block) else fop.regions[0].blocks[0]
+        fop_args = list(block.arguments)
+        ir_args = []
+        ir_kwargs = {}
+        iv_block_args = 0
+        for i, (arg, param) in enumerate(zip(args, sig.parameters.values())):
+            ir_arg, iv_block_args = gen_exec_arg(i, arg, param, fop_args, iv_block_args)
+            ir_args.append(ir_arg)
+
+        for i, (name, arg) in enumerate(kwonlyargs.items()):
+            ir_arg, iv_block_args = gen_exec_arg(
+                i, arg, sig.parameters[name], fop_args, iv_block_args
+            )
+            ir_kwargs[name] = ir_arg
+
+        return ir_args, ir_kwargs
+
+    # ===------------------------------------------------------------------===
+    # Host argument boundary
+    # ===------------------------------------------------------------------===
+
+    def _flatten_jit_arg(
+        self,
+        arg: Any,
+        arg_name: str,
+        arg_index: int,
+        function_name: str,
+        *,
+        is_host: bool,
+    ) -> tuple[list[Any], list[Any], list[Any]]:
+        """Flatten one runtime argument into its execution values, SSA types
+        and per-value attribute dicts.
+
+        On the host side the leaves are marshalled into owning ``c_void_p``
+        slots; at the kernel launch boundary they are already staged and their
+        ``ir.Value`` s become the launch operands.
+        """
+        values, attrs, treedef = tree_utils.tree_flatten(
+            arg, return_ir_values=not is_host, root=arg_name
+        )
+
+        exec_args: list[Any] = []
+        arg_types: list[Any] = []
+        for _, leaf in tree_utils.tree_leaves(treedef):
+            if leaf.is_none or leaf.is_meta:
+                continue
+            arg_types.extend(tree_utils.leaf_ir_types(leaf))
+        return exec_args, arg_types, [ir.DictAttr.get({})] * len(arg_types)
+
+    def _generate_jit_func_args(
+        self,
+        func: Any,
+        function_name: str,
+        args: tuple[Any, ...] | list[Any],
+        kwonlyargs: dict[str, Any],
+        sig: inspect.Signature,
+        *,
+        is_host: bool = True,
+    ) -> JitFuncArgs:
+        """Generate JIT function arguments."""
+        positional_names = []
+        kwonly_names = []
+        for name, param in sig.parameters.items():
+            if param.kind == inspect.Parameter.KEYWORD_ONLY:
+                kwonly_names.append(name)
+            else:
+                positional_names.append(name)
+
+        jit_arg_types: list[Any] = []
+        jit_arg_attrs: list[Any] = []
+        jit_exec_args: list[Any] = []
+
+        input_args = [*args, *kwonlyargs.values()]
+        input_arg_names = [*positional_names, *kwonly_names]
+        jit_adapted_args: list[Any] = [None] * len(input_args)
+        for i, (arg_name, arg) in enumerate(zip(input_arg_names, input_args)):
+            spec_ty = sig.parameters[arg_name].annotation
+
+            cast_ty = (
+                get_args(spec_ty)[0] if get_origin(spec_ty) is Annotated else spec_ty
+            )
+            # Implicitly convert into Numeric type if possible
+            if isinstance(cast_ty, t.NumericMeta) and not isinstance(arg, cast_ty):
+                try:
+                    arg = t.cast(arg, cast_ty)  # type: ignore[arg-type]
+                except DSLBaseError as exc:
+                    raise DSLUserCodeError(
+                        DiagId.ARG_ANNOTATION_MISMATCH,
+                        num=i + 1,
+                        arg_name=arg_name,
+                        expected=f"a `{cast_ty.__name__}`",
+                        got=f"a `{type(arg).__name__}`",
+                        cause=exc,
+                    ) from exc
+                jit_adapted_args[i] = arg
+
+            # Adapt the argument before the Meta test, so the test sees the
+            # adapted value. Keep the scope active through nested adaptations.
+            if True:
+                # A Python value (``None`` triple) is specialised on by the
+                # trace; an MLIR op gets its types, attributes and values.
+                jit_exec_arg: list[Any] | None = []
+                jit_arg_type: list[Any] | None = []
+                jit_arg_attr: list[Any] | None = []
+                if is_argument_meta(arg, spec_ty, arg_name, i, func):
+                    jit_exec_arg = jit_arg_type = jit_arg_attr = None
+
+                if jit_arg_type is not None and len(jit_arg_type) == 0:
+                    exec_args, arg_types, arg_attrs = self._flatten_jit_arg(
+                        arg, arg_name, i, function_name, is_host=is_host
+                    )
+                    jit_exec_arg.extend(exec_args)  # type: ignore[union-attr]
+                    jit_arg_type.extend(arg_types)
+                    jit_arg_attr.extend(arg_attrs)  # type: ignore[union-attr]
+
+            if jit_arg_type is not None:
+                jit_exec_args.extend(jit_exec_arg)  # type: ignore[arg-type]
+                jit_arg_types.extend(jit_arg_type)
+                jit_arg_attrs.extend(jit_arg_attr)  # type: ignore[arg-type]
+
+        return JitFuncArgs(
+            jit_exec_args, jit_arg_types, jit_arg_attrs, jit_adapted_args
+        )
+
+    def generate_mlir_function_types(
+        self,
+        func: Any,
+        function_name: str,
+        args: tuple[Any, ...] | list[Any],
+        kwonlyargs: dict[str, Any],
+        sig: inspect.Signature,
+    ) -> JitFuncArgs:
+        """Convert input arguments to the MLIR function signature and the
+        marshalled execution arguments."""
+
+        result = self._generate_jit_func_args(
+            func, function_name, args, kwonlyargs, sig, is_host=True
+        )
+
+        return result
+
+    # ===------------------------------------------------------------------===
     # Source Locations
     # ===------------------------------------------------------------------===
 
@@ -353,6 +876,259 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             location.filename, location.lineno, location.col_offset
         )
         return ir.Location.name(location.function_name, childLoc=file_loc)
+
+    def build_module(self, module: ir.Module, function_name: str) -> ir.Module:
+        """
+        Build the MLIR module, verify and return the module
+        """
+
+        if self.envar.print_ir:
+            print("\n//===--- ------ Generated IR ------ ---====\n")
+            module.operation.print(enable_debug_info=self.envar.debuginfo)
+            print("\n//===--- --- End of Generated IR -- ---====\n")
+
+        # Verify the module
+        try:
+            module.operation.verify()
+        except Exception as e:
+            raise DSLRuntimeError("IR verification failed", cause=e) from e
+
+        return module
+
+    # ===------------------------------------------------------------------===
+    # Return values
+    # ===------------------------------------------------------------------===
+
+    def _return_values(
+        self, entry: DecoratorPlugin, result: Any, sig: inspect.Signature, loc: Any
+    ) -> tuple[list[ir.Value], _ResultSpec | None]:
+        """Turn the traced return value into what the entry returns.
+        Numeric leaves and frozen records/tuples/``@struct``s of them are
+        accepted; the decorator plugin's ``pack_results`` decides how the
+        leaves travel (the shipped ``func.Jit`` packs several into one struct).
+        """
+        if result is None:
+            if sig.return_annotation not in (inspect.Signature.empty, None):
+                raise DSLUserCodeError(
+                    DiagId.TYPE_RETURN_MISMATCH,
+                    got="`None`",
+                    detail=" while it declares a return type",
+                )
+            return [], None
+        if isinstance(result, (bool, int, float)):
+            result = t.Numeric._from_python_value(result)
+
+        _, _, treedef = tree_utils.tree_flatten(result, return_ir_values=False)
+        leaves = [
+            leaf
+            for _, leaf in tree_utils.tree_leaves(treedef)
+            if not leaf.is_none and not leaf.is_meta
+        ]
+        for leaf in leaves:
+            cls = leaf.node_metadata.cls
+            if not issubclass(cls, t.Numeric):
+                raise DSLUserCodeError(
+                    DiagId.TYPE_RETURN_MISMATCH,
+                    got=f"a `{cls.__name__}`",
+                )
+        if not leaves:
+            raise DSLUserCodeError(
+                DiagId.TYPE_RETURN_MISMATCH, got=f"a `{type(result).__name__}`"
+            )
+        values, _, _ = tree_utils.tree_flatten(result, return_ir_values=True)
+        ret_values, slot = entry.pack_results(
+            values, [leaf.prototype for leaf in leaves], loc=loc
+        )
+        return ret_values, _ResultSpec(treedef, slot, entry)
+
+    # ===------------------------------------------------------------------===
+    # IR Tracing
+    # ===------------------------------------------------------------------===
+
+    def generate_original_ir(
+        self,
+        entry: DecoratorPlugin,
+        func: Callable[..., Any],
+        function_name: str,
+        func_types: list[Any],
+        arg_attrs: list[Any],
+        container_attrs: dict[str, Any],
+        args: tuple[Any, ...],
+        kwonlyargs: dict[str, Any],
+        sig: inspect.Signature,
+        location: DSLLocation | None = None,
+        *,
+        no_cache: bool = False,
+        pipeline: str = "",
+        extra_link_libs: tuple[str, ...] = (),
+    ) -> tuple[ir.Module, str | None, Any, _ResultSpec | None]:
+        """Trace ``func`` into the op the decorator plugin ``entry`` builds, in
+        a fresh module. This runs with the DSL active (``run``), so a decorated
+        function called inside the body is launched into this trace, not
+        called.
+
+        :return: The verified module, its hash (None under ``no_cache``), the
+            trace's Python result and the result slot description
+        """
+
+        def build_ir_module() -> tuple[ir.Module, Any, _ResultSpec | None]:
+            loc = self.get_ir_location(location)
+            module = ir.Module.create(loc=loc)
+
+            self._deferred_calls = []
+            try:
+                with ir.InsertionPoint(module.body):
+                    return build_in_module(module, loc)
+            finally:
+                self._deferred_calls = None
+
+        def build_in_module(
+            module: ir.Module, loc: Any
+        ) -> tuple[ir.Module, Any, _ResultSpec | None]:
+            if True:  # the body of the trace, inside the module's insertion point
+                # A plugin with per-trace state (a kernel container, the
+                # launches it expects) sets it up before the entry is built.
+                for plugin in self.plugins.decorators:
+                    plugin.before_trace(self, module, loc=loc, attrs=container_attrs)
+
+                # The entry is the decorator plugin's (``func.Jit``: a
+                # ``func.func`` with the C interface); its result types are set
+                # after the trace.
+                func_op, entry_block, result = self.trace_body(
+                    entry,
+                    function_name,
+                    func,
+                    args,
+                    kwonlyargs,
+                    sig,
+                    func_types,
+                    arg_attrs,
+                    loc=loc,
+                )
+                with ir.InsertionPoint(entry_block):
+                    ret_values, result_spec = self._return_values(
+                        entry, result, sig, loc
+                    )
+                    entry.generate_return(func_op, ret_values, loc=loc)
+                for plugin in self.plugins.decorators:
+                    plugin.after_trace(self, module)
+
+            return module, result, result_spec
+
+        # Build IR module, then finalize it (hash, verify). The whole closure
+        # is one unit so the profiler's build phase covers the finalize steps
+        # too, not just the trace.
+        def build_and_finalize() -> (
+            tuple[ir.Module, str | None, Any, _ResultSpec | None]
+        ):
+            module, result, result_spec = build_ir_module()
+            # Plugins add to the module before the hash, so what they add is
+            # part of the cached artifact.
+            for plugin in self.plugins.adapters:
+                plugin.attach_to_module(
+                    self, module, function_name, sig, args, kwonlyargs
+                )
+            module_hash = None
+            return (
+                self.build_module(module, function_name),
+                module_hash,
+                result,
+                result_spec,
+            )
+
+        return build_and_finalize()
+
+    def post_compilation_cleanup(self) -> None:
+        """Clean up some internal state after one compilation is completed."""
+        self.decorator_location = None
+
+    def generate_mlir(
+        self,
+        entry: DecoratorPlugin,
+        func: Callable[..., Any],
+        function_name: str,
+        container_attrs: dict[str, Any],
+        args: tuple[Any, ...],
+        kwonlyargs: dict[str, Any],
+        sig: inspect.Signature,
+        pipeline: str | None,
+        no_cache: bool,
+        compile_only: bool,
+        location: DSLLocation | None = None,
+        extra_link_libs: tuple[str, ...] = (),
+    ) -> Any:
+        """Trace ``func`` into the op the decorator plugin ``entry`` builds in
+        an MLIR module, compile it through the compiler plugin (or take the
+        cached function) and run it.
+
+        :return: The trace's Python result under ``<PREFIX>_DRYRUN`` or on a
+            DSL without a compiler, the compiled function under
+            ``compile_only``, else the call's result
+        """
+        # The remark session owns the context's remark engine for the whole
+        # call, so trace-time remarks and the passes' remarks share one stream.
+        with ir.Context() as ctx, self.get_ir_location(location), self._remark_session(
+            ctx
+        ) as remark_session:
+            # Each MLIR context keeps a thread pool alive; cached compilations
+            # keep their context, so threading is disabled to bound the count.
+            ctx.enable_multithreading(False)
+            self.register_dialects(ctx)
+            for plugin in self.plugins:
+                plugin.register_dialects(ctx)
+            try:
+                # Convert input arguments to MLIR arguments
+                mlir_func_args = self.generate_mlir_function_types(
+                    func, function_name, args, kwonlyargs, sig
+                )
+                adapted_args = mlir_func_args.adapted_python_args
+                # The body is traced with the adapted values, so an adapter runs once.
+                n_positional = len(args)
+                trace_args = tuple(
+                    original if adapted is None else adapted
+                    for original, adapted in zip(args, adapted_args[:n_positional])
+                )
+                trace_kwargs = {
+                    name: (original if adapted is None else adapted)
+                    for (name, original), adapted in zip(
+                        kwonlyargs.items(), adapted_args[n_positional:]
+                    )
+                }
+                pipeline = self._get_pipeline(pipeline)
+
+                # Generate original ir module and its hash value.
+                module, module_hash, result, result_spec = self.generate_original_ir(
+                    entry,
+                    func,
+                    function_name,
+                    mlir_func_args.types,
+                    mlir_func_args.attributes,
+                    container_attrs,
+                    trace_args,
+                    trace_kwargs,
+                    sig,
+                    location=location,
+                    no_cache=no_cache,
+                    pipeline=pipeline,
+                    extra_link_libs=extra_link_libs,
+                )
+                for plugin in self.plugins.decorators:
+                    plugin.check_arguments(
+                        self, sig, args, kwonlyargs, adapted_args, function_name
+                    )
+
+                # A dry run generates the IR and stops; so does a call on a DSL
+                # without a compiler plugin (trace-only: the IR is the product).
+                # An explicit ``compile()`` on such a DSL falls through to the
+                # missing-compiler error below.
+                if self.envar.dryrun or (
+                    self.plugins.compiler is None and not compile_only
+                ):
+                    return result
+
+                self._compiler
+            finally:
+                self.post_compilation_cleanup()
 
     # ===------------------------------------------------------------------===
     # Argument Binding
@@ -422,28 +1198,175 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 cause=e,
             ) from e
 
-    def mangle_name(
-        self, function_name: str, args: tuple[Any, ...], sig: inspect.Signature
-    ) -> str:
-        """Include compile-time positional arguments in the function symbol."""
-        for _, arg in zip(sig.parameters.values(), args):
-            if isinstance(arg, type):
-                function_name = f"{function_name}_{arg.__name__}"
-            elif isinstance(arg, (list, tuple)):
-                function_name = f"{function_name}_{'_'.join(map(str, arg))}"
+    @staticmethod
+    def _expand_varargs_varkw(
+        canonicalized_args: tuple,
+        canonicalized_kwargs: dict,
+        signature: inspect.Signature,
+    ) -> inspect.Signature:
+        """
+        Expands ``*args`` and ``**kwargs`` into concrete named parameters in the function's signature.
+
+        Extra positional arguments get synthetic names ``_vararg_<i>``; extra
+        keyword arguments become keyword-only parameters, so downstream
+        components expecting fixed-arity signatures can function as usual.
+        Order: positional -> *args -> keyword-only/default -> **kwargs.
+        """
+        new_params = []
+        visited_kwonly_args = set()
+        for idx, (name, param) in enumerate(signature.parameters.items()):
+            if param.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                new_params.append(param)
+            elif param.kind == inspect.Parameter.VAR_POSITIONAL:
+                for vararg_idx in range(idx, len(canonicalized_args)):
+                    new_params.append(
+                        inspect.Parameter(
+                            name=f"_vararg_{vararg_idx}",
+                            kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        )
+                    )
+            elif param.kind == inspect.Parameter.KEYWORD_ONLY:
+                new_params.append(param)
+                visited_kwonly_args.add(name)
+            elif param.kind == inspect.Parameter.VAR_KEYWORD:
+                for kwarg_name in canonicalized_kwargs:
+                    if kwarg_name not in visited_kwonly_args:
+                        new_params.append(
+                            inspect.Parameter(
+                                name=kwarg_name, kind=inspect.Parameter.KEYWORD_ONLY
+                            )
+                        )
             else:
-                function_name = f"{function_name}_{arg}"
-        function_name = re.sub(r"0x[a-fA-F0-9]{8,16}", "", function_name)
-        function_name = re.sub(r"[^a-zA-Z0-9_$.-]", "_", function_name)[:180]
-        return self._name_mangling_prefix + function_name
+                raise DSLRuntimeError(f"Invalid parameter kind: {param.kind}")
+
+        return signature.replace(parameters=new_params)
 
     # ===------------------------------------------------------------------===
-    # IR Tracing
+    # The call pipeline (DecoratorPlugin.call)
+    # ===------------------------------------------------------------------===
+
+    @dataclass
+    class _CompilationSetup:
+        """Shared pre-IR-generation state of a host compilation."""
+
+        function_name: str
+        pipeline: str | None
+        container_attrs: dict[str, Any]
+        no_cache: bool
+        extra_link_libs: tuple[str, ...]
+        compile_only: bool
+        canonicalized_args: tuple[Any, ...]
+        canonicalized_kwargs: dict[str, Any]
+        sig: inspect.Signature
+        location: DSLLocation | None
+
+    def _prepare_compilation(
+        self, func: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> "_CompilationSetup":
+        """Extract kwargs, canonicalize args and mangle the name.
+
+        The call keywords ``pipeline``, ``container_attrs``, ``no_cache``,
+        ``extra_link_libs`` and ``compile_only`` are the DSL's, popped before
+        the remaining arguments bind to the function's signature.
+        """
+        function_name = func.__name__
+        self.traced_function = func
+
+        pipeline = kwargs.pop("pipeline", None)
+        container_attrs = kwargs.pop("container_attrs", {})
+        no_cache = kwargs.pop("no_cache", False) or self.envar.no_cache
+        extra_link_libs_arg = kwargs.pop("extra_link_libs", ())
+        if isinstance(extra_link_libs_arg, (str, bytes, os.PathLike)):
+            extra_link_libs_arg = (extra_link_libs_arg,)
+        extra_link_libs = tuple(extra_link_libs_arg)
+        compile_only = kwargs.pop("compile_only", False)
+
+        if not no_cache and compile_only:
+            no_cache = True
+
+        # Get signature of the function
+        sig = self._get_signature(func)
+
+        # Get bound arguments
+        bound_args = self._get_function_bound_args(sig, function_name, *args, **kwargs)
+
+        # Check the number of arguments
+        has_varargs = self._check_arg_count(sig, bound_args, function_name)
+
+        # Canonicalize the input arguments
+        canonicalized_args, canonicalized_kwargs = self._canonicalize_args(bound_args)
+
+        # Expand *args/**kwargs into concrete named parameters
+        if has_varargs:
+            sig = self._expand_varargs_varkw(
+                canonicalized_args, canonicalized_kwargs, sig
+            )
+        function_name = self.mangle_name(function_name, canonicalized_args, sig)
+
+        if not self.envar.debuginfo:
+            self.decorator_location = None
+
+        return self._CompilationSetup(
+            function_name=function_name,
+            pipeline=pipeline,
+            container_attrs=container_attrs,
+            no_cache=no_cache,
+            extra_link_libs=extra_link_libs,
+            compile_only=compile_only,
+            canonicalized_args=canonicalized_args,
+            canonicalized_kwargs=canonicalized_kwargs,
+            sig=sig,
+            location=self.decorator_location,
+        )
+
+    def run(
+        self,
+        entry: DecoratorPlugin,
+        func: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """The pipeline of a call from Python (``DecoratorPlugin.call``): one
+        call of the decorated ``func``, with the DSL already active.
+
+        1. Translates the arguments (host buffers -> ``Pointer`` through the
+           adapter plugins, ``float`` -> ``f32``, ...) and traces the body into
+           the op ``entry`` builds
+        2. Compiles and JITs the MLIR module through the compiler role (cached);
+           a DSL without one, or a dry run, returns the trace result here
+        3. Invokes the compiled function and rebuilds its result
+        """
+        # The DSL is active for the whole call: its types emit, its settings
+        # are read, and a decorated function called inside the trace sees an
+        # open trace (``in_trace``) and is launched into it.
+        with active_dsl(self):
+            setup = self._prepare_compilation(func, *args, **kwargs)
+
+            return self.generate_mlir(
+                entry,
+                func,
+                setup.function_name,
+                setup.container_attrs,
+                setup.canonicalized_args,
+                setup.canonicalized_kwargs,
+                setup.sig,
+                setup.pipeline,
+                setup.no_cache,
+                setup.compile_only,
+                location=setup.location,
+                extra_link_libs=setup.extra_link_libs,
+            )
+
+    # ===------------------------------------------------------------------===
+    # Services for the decorators plugins add
     # ===------------------------------------------------------------------===
 
     def trace_body(
         self,
-        entry: DecoratorPlugin,
+        entry: Any,
         name: str,
         func: Callable[..., Any],
         args: tuple[Any, ...],
@@ -454,11 +1377,26 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         *,
         loc: Any = None,
     ) -> tuple[Any, ir.Block, Any]:
-        """Build the entry op and run the Python body at its insertion point."""
+        """Build the function op ``entry`` describes and trace ``func`` into it.
+
+        ``entry`` is the decorator plugin whose function is traced, through
+        its ``generate_func_op(name, arg_types, arg_attrs, loc) -> (op,
+        entry_block)``: ``func.Jit`` for ``@jit``, a kernels plugin for
+        ``@kernel``. The body runs
+        with the insertion point in the entry block and the block arguments
+        bound to the Python parameters; the caller appends the terminator. An
+        entry with a ``body_scope(dsl, func, *, signature)`` context manager
+        (optional) has the body run inside it, with the arguments bound.
+
+        :return: The op, its entry block and the trace's Python result
+        """
         func_op, entry_block = entry.generate_func_op(
             name, list(arg_types), list(arg_attrs), loc=loc
         )
         with ir.InsertionPoint(entry_block):
+            ir_args, ir_kwargs = self.generate_execution_arguments(
+                args, kwonlyargs, entry_block, sig
+            )
             body_scope = getattr(entry, "body_scope", None)
             scope = (
                 nullcontext()
@@ -466,93 +1404,5 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 else body_scope(self, func, signature=sig)
             )
             with scope:
-                result = func(*args, **kwonlyargs)
+                result = func(*ir_args, **ir_kwargs)
         return func_op, entry_block, result
-
-    def generate_original_ir(
-        self,
-        entry: DecoratorPlugin,
-        func: Callable[..., Any],
-        function_name: str,
-        args: tuple[Any, ...],
-        kwonlyargs: dict[str, Any],
-        sig: inspect.Signature,
-        location: DSLLocation | None = None,
-    ) -> ir.Module:
-        """Trace one function into a fresh module and verify the completed IR."""
-        loc = self.get_ir_location(location)
-        module = ir.Module.create(loc=loc)
-        with ir.InsertionPoint(module.body):
-            func_op, entry_block, result = self.trace_body(
-                entry, function_name, func, args, kwonlyargs, sig, [], [], loc=loc
-            )
-            if result is not None or sig.return_annotation not in (
-                inspect.Signature.empty,
-                None,
-            ):
-                raise DSLUserCodeError(
-                    DiagId.TYPE_RETURN_MISMATCH,
-                    got=f"a `{type(result).__name__}`",
-                    detail=" (only functions returning None are supported)",
-                )
-            with ir.InsertionPoint(entry_block):
-                entry.generate_return(func_op, [], loc=loc)
-        module.operation.verify()
-        return module
-
-    def run(
-        self,
-        entry: DecoratorPlugin,
-        func: Callable[..., Any],
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        """Bind Python arguments, trace the function, and optionally print its IR."""
-        # Reject reserved framework keywords before binding, including None
-        # and False values. They are never Python specialization arguments.
-        reserved = sorted(
-            {
-                "pipeline",
-                "container_attrs",
-                "no_cache",
-                "extra_link_libs",
-                "compile_only",
-            }.intersection(kwargs)
-        )
-        if reserved:
-            raise DSLUserCodeError(
-                DiagId.CALL_ARGUMENTS,
-                function_name=func.__name__,
-                detail=f"`{reserved[0]}` is a reserved framework keyword; "
-                "compilation options are not supported by this tracing interface",
-            )
-        sig = self._get_signature(func)
-        bound = self._get_function_bound_args(sig, func.__name__, *args, **kwargs)
-        self._check_arg_count(sig, bound, func.__name__)
-        args, kwargs = self._canonicalize_args(bound)
-        # An SSA value from another context is not a Python specialization.
-        # SSA operands passed between helpers inside a trace bypass this entry.
-        if any(isinstance(arg, ir.Value) for arg in (*args, *kwargs.values())):
-            raise DSLUserCodeError(
-                DiagId.CALL_ARGUMENTS,
-                function_name=func.__name__,
-                detail="the host entry accepts only compile-time Python arguments",
-            )
-        function_name = self.mangle_name(func.__name__, args, sig)
-        with active_dsl(self), ir.Context() as ctx:
-            ctx.enable_multithreading(False)
-            self.register_dialects(ctx)
-            for plugin in self.plugins:
-                plugin.register_dialects(ctx)
-            with self.get_ir_location(func._decorator_location):
-                module = self.generate_original_ir(
-                    entry,
-                    func,
-                    function_name,
-                    args,
-                    kwargs,
-                    sig,
-                    location=func._decorator_location,
-                )
-                if os.environ.get(f"{self.name}_PRINT_IR", "0") == "1":
-                    print(module)
