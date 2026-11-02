@@ -60,12 +60,16 @@ from .types.typing import (
     from_numpy_dtype,
     as_numeric,
     cast,
+    Struct,
+    struct,
+    make_struct,
 )
 from .types.typing import max_ as max, min_ as min
 
 # The sub-DSL authoring surface
 from .core.dsl import BaseDSL
 from .core.plugin import (
+    AdapterPlugin,
     CompilerPlugin,
     DecoratorPlugin,
     Plugin,
@@ -74,6 +78,10 @@ from .core.plugin import (
 )
 from .core.mlir_op import OpEmitter, current_emitter
 from .core.staging import is_mlir_op
+from .util.tree_utils import register_container, register_leaf, register_leaf_protocol
+from .core.arguments import JitArgAdapterRegistry
+
+register_jit_arg_adapter = JitArgAdapterRegistry.register_jit_arg_adapter
 
 # Diagnostics
 from .core.common import DSLRuntimeError, DSLUserCodeError
@@ -122,6 +130,9 @@ __all__ = [
     "from_numpy_dtype",
     "as_numeric",
     "cast",
+    "Struct",
+    "struct",
+    "make_struct",
     "max",
     "min",
     "BaseDSL",
@@ -130,9 +141,14 @@ __all__ = [
     "TypeOpsPlugin",
     "CompilerPlugin",
     "DecoratorPlugin",
+    "AdapterPlugin",
     "OpEmitter",
     "current_emitter",
     "is_mlir_op",
+    "register_container",
+    "register_leaf",
+    "register_leaf_protocol",
+    "register_jit_arg_adapter",
     "DSLRuntimeError",
     "DSLUserCodeError",
     "DiagId",

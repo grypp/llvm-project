@@ -39,12 +39,14 @@ from ..util.tree_utils import (
     is_frozen_dataclass,
     is_leaf,
     is_staged_leaf,
+    registered_container,
 )
 
 __all__ = [
     "is_argument_meta",
     "is_mlir_op",
     "is_reserved_python_func_arg",
+    "is_type_argument",
 ]
 
 # =============================================================================
@@ -72,7 +74,7 @@ def is_reserved_python_func_arg(
     return False
 
 
-def _is_type_argument(arg: Any, arg_annotation: Any) -> bool:
+def is_type_argument(arg: Any, arg_annotation: Any) -> bool:
     """True if ``arg`` is a class passed where the annotation is absent or
     ``type[X]``: a type is always a Python value."""
 
@@ -88,7 +90,7 @@ def _is_dsl_type_annotation(annotation: Any) -> bool:
     annotations (their arguments are Python values)."""
     if get_origin(annotation) is Annotated:
         annotation = get_args(annotation)[0]
-    if isinstance(annotation, (NumericMeta)):
+    if isinstance(annotation, (NumericMeta,)):
         return True
     return isinstance(annotation, type) and is_leaf(annotation)
 
@@ -113,7 +115,7 @@ def is_argument_meta(
     """
     if (
         is_reserved_python_func_arg(arg_index, arg_name, owning_func)
-        or _is_type_argument(arg, arg_annotation)
+        or is_type_argument(arg, arg_annotation)
         or arg is None
     ):
         return True
@@ -128,9 +130,14 @@ def _is_mlir_op_leaf(value: Any) -> bool:
 
 
 def _any_leaf(value: Any, judge: Callable[[Any], bool]) -> bool:
-    """Walk tuples, lists and frozen records; ``judge`` decides each leaf."""
+    """Walk tuples, lists, registered containers and frozen records; ``judge``
+    decides each leaf."""
     if isinstance(value, (tuple, list)):
         return any(_any_leaf(x, judge) for x in value)
+    node = registered_container(value)
+    if node is not None:
+        _, children = node.to_iterable(value, "")
+        return any(_any_leaf(x, judge) for x in children)
     if is_frozen_dataclass(value) and not isinstance(value, type):
         return any(
             _any_leaf(getattr(value, f.name, None), judge)

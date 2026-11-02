@@ -11,13 +11,36 @@ The decorator, the call pipeline and the inline launch are
 
 from __future__ import annotations
 
+import ctypes
 from typing import Any
 
 from ..... import ir
 from .....dialects import func, llvm
+from ....core.common import DSLUserCodeError
+from ....core.diagnostics import DiagId
 from ....core.plugin import DecoratorPlugin
 
 __all__ = ["Jit"]
+
+
+def _result_ctype(prototypes: list[Any]) -> type:
+    """The ``ctypes`` type of the result slot for the given result dtypes."""
+    ctypes_types: list[type] = []
+    for prototype in prototypes:
+        if prototype.ctype is None:
+            raise DSLUserCodeError(
+                DiagId.TYPE_RETURN_MISMATCH,
+                got=f"a `{prototype.__name__}`",
+                detail=" (that type has no host representation)",
+            )
+        ctypes_types.append(prototype.ctype)
+    if len(ctypes_types) == 1:
+        return ctypes_types[0]
+    return type(
+        "_Result",
+        (ctypes.Structure,),
+        {"_fields_": [(f"f{i}", ct) for i, ct in enumerate(ctypes_types)]},
+    )
 
 
 class Jit(DecoratorPlugin):
@@ -51,7 +74,7 @@ class Jit(DecoratorPlugin):
     ) -> tuple[list[Any], Any]:
         if not values:
             return [], None
-        slot = None
+        slot = _result_ctype(prototypes)
         if len(values) == 1:
             return [values[0]], slot
         struct_type = llvm.StructType.get_literal([v.type for v in values])

@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from .dsl import BaseDSL
 
 __all__ = [
+    "AdapterPlugin",
     "CompilerPlugin",
     "DecoratorPlugin",
     "Plugin",
@@ -240,6 +241,10 @@ class DecoratorPlugin(Plugin):
             return [], None
         return self._unsupported("pack_results")
 
+    def unpack_result(self, slot: Any, raw: Any, prototypes: list[Any]) -> list[Any]:
+        """The Python value of each result leaf from the filled slot ``raw``."""
+        return self._unsupported("unpack_result")
+
     def decorate(self, func: Any, **options: Any) -> Any:
         """Process decorator options and return the function to wrap.
 
@@ -261,6 +266,50 @@ class DecoratorPlugin(Plugin):
         return wrapper
 
 
+class AdapterPlugin(Plugin):
+    """The ``adapters`` family: the host boundary, in both directions.
+
+    Inbound, ``register`` adds the plugin's argument adapters to the registry
+    when the DSL is constructed; from then on a host object of the adapted
+    type (a ``torch.Tensor``, anything speaking DLPack) meets a ``Pointer[T]``
+    parameter like a NumPy array does, and the plugin's dependency is imported
+    only when such an object arrives. Outbound, a plugin exposing the compiled
+    entry through another ABI sees the traced module before it is
+    hashed (``attach_to_module``), the lowered module before the engine is
+    built (``after_lowering``) and the compiled function before it is cached
+    (``wrap_compiled_function``); what it adds to a module is part of the
+    cached artifact, and a file cache hit skips the pipeline and
+    ``after_lowering`` alike. A plugin implements the half it needs.
+    """
+
+    role: ClassVar[str] = "adapters"
+
+    def register(self, dsl: BaseDSL) -> None:
+        """Register the plugin's argument adapters with ``JitArgAdapterRegistry``."""
+
+    def attach_to_module(
+        self,
+        dsl: BaseDSL,
+        module: ir.Module,
+        function_name: str,
+        sig: Any,
+        trace_args: tuple[Any, ...],
+        trace_kwargs: dict[str, Any],
+    ) -> None:
+        """Add to the traced ``module`` once the host entry ``function_name``
+        is built, given the Python signature and the trace arguments (Meta
+        values, or the adapted leaves) it was built for."""
+
+    def after_lowering(self, dsl: BaseDSL, module: ir.Module) -> None:
+        """Edit the lowered ``module`` after the pass pipeline, before the
+        engine is built."""
+
+    def wrap_compiled_function(self, dsl: BaseDSL, jit_function: Any) -> Any:
+        """Replace or decorate the compiled function before it is cached; the
+        default returns it unchanged."""
+        return jit_function
+
+
 # ===----------------------------------------------------------------------===
 # Plugin Configuration
 # ===----------------------------------------------------------------------===
@@ -271,6 +320,7 @@ _ROLE_TYPES: dict[str, type[Plugin]] = {
 }
 _FAMILY_TYPES: dict[str, type[Plugin]] = {
     "decorators": DecoratorPlugin,
+    "adapters": AdapterPlugin,
 }
 
 
@@ -287,7 +337,9 @@ def _misplaced(plugin: Plugin, field_name: str) -> str:
     elif where in _FAMILY_TYPES:
         hint = f"list it under `{where}`"
     else:
-        hint = "a bare `Plugin` fits no field: subclass DecoratorPlugin"
+        hint = (
+            "a bare `Plugin` fits no field: subclass DecoratorPlugin or AdapterPlugin"
+        )
     return (
         f"`{type(plugin).__name__}` does not belong in `Plugins.{field_name}`: {hint}"
     )
@@ -310,6 +362,7 @@ class Plugins:
     type_ops: TypeOpsPlugin | None = None
     compiler: CompilerPlugin | None = None
     decorators: Sequence[DecoratorPlugin] = ()
+    adapters: Sequence[AdapterPlugin] = ()
 
     ROLES: ClassVar[tuple[str, ...]] = tuple(_ROLE_TYPES)
     FAMILIES: ClassVar[tuple[str, ...]] = tuple(_FAMILY_TYPES)
