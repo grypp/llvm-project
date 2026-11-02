@@ -348,8 +348,6 @@ bad_args = [
 ]
 for label, arg in bad_args:
     err(f"arg {label}", lambda: addr_of(arg))
-
-
 # CHECK: arg negative: ARG_ANNOTATION_MISMATCH
 # CHECK: arg float64 array: ARG_ANNOTATION_MISMATCH
 # CHECK: arg other space: ARG_ANNOTATION_MISMATCH
@@ -357,6 +355,54 @@ for label, arg in bad_args:
 # CHECK: arg device on host: ARG_BUFFER_INVALID
 # CHECK: arg str: ARG_ANNOTATION_MISMATCH
 # CHECK: arg bool: ARG_ANNOTATION_MISMATCH
+
+
+# A Pointer is a reference leaf: a store base alone adds no iter_arg; a
+# rebound pointer is carried as one `!llvm.ptr`; a join of two prototypes
+# (dtype, space) is `TYPE_UNSTABLE_JOIN`.
+@m.jit
+def carry(out: P[I32], n: I32):
+    for i in range(n):
+        out[i] = i  # store only: no carry
+    p = out
+    for i in range(n):
+        p[0] = p[0] * 10
+        p += 1  # rebinding: one !llvm.ptr iter_arg
+    if n > 2:
+        p = p - n  # an `if` arm rebinding: scf.if yields the pointer
+    p[0] = 7
+
+
+# CHECK-LABEL: func.func @carry(
+# CHECK-SAME:    %[[OUT:[^:]+]]: !llvm.ptr, %[[N:[^:]+]]: i32)
+# CHECK:         scf.for %[[I:.+]] = %{{.+}} to %[[N]] step %{{.+}} : i32 {
+# CHECK-NOT:     iter_args
+# CHECK:         scf.for %{{.+}} = %{{.+}} to %[[N]] step %{{.+}} iter_args(%[[P:.+]] = %[[OUT]]) -> (!llvm.ptr) : i32 {
+# CHECK:           %[[NEXT:.+]] = llvm.getelementptr %[[P]][1] : (!llvm.ptr) -> !llvm.ptr, i32
+# CHECK:           scf.yield %[[NEXT]] : !llvm.ptr
+# CHECK:         scf.if %{{.+}} -> (!llvm.ptr) {
+# CHECK:           scf.yield %{{.+}} : !llvm.ptr
+# CHECK:         } else {
+# CHECK:           scf.yield %{{.+}} : !llvm.ptr
+# EXEC:          RESULT: [7, 10, 20, 0] [0, 10, 7, 0]
+a4, b4 = np.zeros(4, np.int32), np.zeros(4, np.int32)
+carry(a4, 3)
+carry(b4, 2)
+print("RESULT:", a4.tolist(), b4.tolist())
+
+
+@m.jit
+def join_dtype(p: P[F32], q: P[I32], n: I32):
+    r = p
+    if n > 2:
+        r = q  # another (dtype, space) prototype
+    r[0] = 1
+
+
+err("join dtype", lambda: join_dtype(buf, a4, 3))
+# CHECK: join dtype: TYPE_UNSTABLE_JOIN
+
+
 # ===== Structs ============================================================
 # `@struct` is a frozen record of DSL-typed fields and a pytree, not an SSA
 # aggregate: a struct argument arrives as one block argument per field, a
@@ -442,6 +488,44 @@ show("HOST fields", Vec2._field_names, tuple(pair), hasattr(v1, "scale"))
 # CHECK: HOST: Vec2(x=Int32(1), y=Float32(0.0)) Inner(x=Int32(0), y=Float32(0.0)) 0
 # CHECK: HOST class: True True ['lo', 'hi']
 # CHECK: HOST fields: ['x', 'y'] (Int32(1), Int32(2)) False
+
+
+# A struct rebound in a region is carried leaf by leaf; another class at a
+# join changes the carried structure (`CONTAINER_STRUCTURE_CHANGED`).
+@m.jit
+def struct_carry(n: I32) -> I32:
+    acc = Vec2(x=0, y=0.0)
+    for i in range(n):
+        acc = acc.replace(x=acc.x + i)
+    if n > 2:
+        acc = Vec2(x=acc.x * 10, y=1.0)  # a fresh instance of the same class
+    return acc.x * 3
+
+
+# CHECK-LABEL: func.func @struct_carry(
+# CHECK:         scf.for {{.*}} iter_args(%[[AX:.+]] = %{{.+}}, %{{.+}} = %{{.+}}) -> (i32, f32) : i32 {
+# CHECK:           arith.addi %[[AX]], %{{.+}} : i32
+# CHECK:           scf.yield %{{.+}}, %{{.+}} : i32, f32
+# CHECK:         scf.if %{{.+}} -> (i32, f32) {
+# CHECK:           scf.yield %{{.+}}, %{{.+}} : i32, f32
+# CHECK:         } else {
+# CHECK:           scf.yield %{{.+}}, %{{.+}} : i32, f32
+# CHECK-NOT:     llvm.{{(insert|extract)}}value
+# EXEC:          RESULT: 180 3
+print("RESULT:", struct_carry(4), struct_carry(2))  # 6*10*3, 1*3
+
+
+@m.jit
+def class_changes(n: I32) -> I32:
+    acc = Vec2(x=n, y=0.0)
+    if n > 2:
+        acc = Inner(x=n, y=0.0)  # same fields, another class
+    return acc.x
+
+
+err("class changes", lambda: class_changes(3))
+# CHECK: class changes: CONTAINER_STRUCTURE_CHANGED
+
 # Declaration, construction and field coercion mistakes.
 err("no fields", lambda: m.make_struct("E"))
 err("python field", lambda: m.make_struct("E", n=int))
@@ -521,6 +605,49 @@ def vectors(a: F32, i: I32, u: U32) -> F32:
 # CHECK:         vector.extract %[[V]][2] : f32 from vector<3xf32>
 # EXEC:          RESULT: 1.0
 print("RESULT:", vectors(1.5, 3, 8))  # -7.5 + 4 + 2 + 1 + 1.5
+
+
+# A Vector is a registered leaf: rebound in a region it is carried as one
+# `vector<NxT>` (`load(count=)` wraps into one); joins need equal MLIR types;
+# it has no host representation.
+@m.jit
+def vector_carry(n: I32, a: F32, p: P[F32]) -> F32:
+    acc = V.splat(a, 4)
+    for i in range(n):
+        acc = acc + (p + i * 4).load(count=4)
+    if n > 2:
+        acc = acc * 2.0
+    return acc.sum()
+
+
+# CHECK-LABEL: func.func @vector_carry(
+# CHECK:         scf.for {{.*}} iter_args(%[[ACC:.+]] = %{{.+}}) -> (vector<4xf32>) : i32 {
+# CHECK:           %[[L:.+]] = llvm.load %{{.+}} <alignment = 4> : !llvm.ptr -> vector<4xf32>
+# CHECK:           arith.addf %[[ACC]], %[[L]] : vector<4xf32>
+# CHECK:           scf.yield %{{.+}} : vector<4xf32>
+# CHECK:         scf.if %{{.+}} -> (vector<4xf32>) {
+# EXEC:          RESULT: 140.0
+arr = np.arange(12, dtype=np.float32)
+print("RESULT:", vector_carry(3, 1.0, arr))  # (4 + 66) * 2
+
+
+@m.jit
+def join_lanes(n: I32, a: F32) -> F32:
+    v = V.splat(a, 4)
+    if n > 2:
+        v = V.splat(a, 2)  # vector<2xf32> vs vector<4xf32>
+    return v.sum()
+
+
+@m.jit
+def return_vector(a: F32):
+    return V.splat(a, 2)  # no host representation
+
+
+err("join lanes", lambda: join_lanes(3, 1.0))
+err("return vector", lambda: return_vector(1.0))
+# CHECK: join lanes: TYPE_UNSTABLE_JOIN
+# CHECK: return vector: TYPE_RETURN_MISMATCH
 
 
 def staged_vec(label, body):

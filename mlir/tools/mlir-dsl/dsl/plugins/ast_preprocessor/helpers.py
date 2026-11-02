@@ -5,9 +5,10 @@
 """
 Trace-time helpers referenced by the code the AST preprocessor generates.
 
-``DSLPreprocessor`` rewrites native ``for`` statements into
-region functions decorated with the selectors below (``loop_selector``).
-The selectors forward to the :class:`Executor` of
+``DSLPreprocessor`` rewrites native ``for``/``if`` statements into
+region functions decorated with the selectors below (``loop_selector``,
+``if_selector``) and routes expressions through the
+executors (``if_executor``). The selectors forward to the :class:`Executor` of
 the DSL that is tracing, which the DSL fills through
 :meth:`Executor.set_functions`. The module also holds the loop
 iterables (``range``) and the trace-time dispatch helpers
@@ -20,7 +21,7 @@ import inspect
 import itertools
 from collections.abc import Callable, Iterator, Sequence
 from types import BuiltinFunctionType
-from typing import Any
+from typing import Any, Optional
 
 from ...core.common import DSLUserCodeError, _user_error
 from ...core.diagnostics import DiagId
@@ -35,6 +36,8 @@ __all__ = [
     "Executor",
     "executor",
     "loop_selector",
+    "if_selector",
+    "if_executor",
     "range",
     "is_dynamic_range",
     "close_for_iter",
@@ -46,7 +49,32 @@ __all__ = [
     "redirect_builtin_function",
     "get_locals_or_none",
     "closure_check",
+    "early_exit_predicate",
 ]
+
+_DSL_CONDITION_ATTR = "_dsl_condition"
+_DSL_BRANCH_WEIGHTS_ATTR = "_dsl_branch_weights"
+
+
+def _extract_condition_branch_weights(
+    pred: Any,
+) -> tuple[Any, Optional[tuple[int, int]]]:
+    """Unwrap a sub-DSL's weighted condition into ``(condition, weights)``.
+
+    A predicate object carrying ``_dsl_condition`` and a two-element
+    ``_dsl_branch_weights`` is unwrapped; any other predicate is returned as is
+    with ``None`` weights.
+    """
+    branch_weights = getattr(pred, _DSL_BRANCH_WEIGHTS_ATTR, None)
+    if branch_weights is None:
+        return pred, None
+
+    weights = tuple(branch_weights)
+    if len(weights) != 2:
+        return pred, None
+
+    return getattr(pred, _DSL_CONDITION_ATTR), (weights[0], weights[1])
+
 
 # =============================================================================
 # Decorator
@@ -104,6 +132,50 @@ def loop_selector(
         )
 
     return ir_loop
+
+
+def if_selector(pred: Any, write_args: Sequence[Any] = ()) -> Callable[..., Any]:
+    """Decorator on a generated ``if`` region: calls it as ``region(pred, *write_args)``.
+
+    The region function defines the arm blocks and returns ``if_executor(...)``.
+    """
+    log().debug("pred [%s] write_args [%s]", pred, write_args)
+
+    def ir_if(func: Callable[..., Any]) -> Any:
+        return func(pred, *write_args)
+
+    return ir_if
+
+
+def if_executor(
+    pred: Any,
+    then_block: Callable[..., Any],
+    else_block: Callable[..., Any] | None = None,
+    write_args: Sequence[Any] = (),
+    full_write_args_count: int = 0,
+    write_args_names: Sequence[str] = (),
+    mutated_names: tuple[str, ...] = (),
+    branch_weights: Optional[tuple[int, int]] = None,
+) -> Any:
+    """Forward a generated ``if`` region to the active ``Executor.if_execute``.
+
+    A weighted condition object (a sub-DSL wrapper) is unwrapped first; an
+    explicit ``branch_weights`` wins over the wrapper's.
+    """
+    pred, wrapped_branch_weights = _extract_condition_branch_weights(pred)
+    if branch_weights is None:
+        branch_weights = wrapped_branch_weights
+
+    return executor.if_execute(
+        pred,
+        then_block,
+        else_block,
+        write_args,
+        full_write_args_count,
+        write_args_names,
+        mutated_names=mutated_names,
+        branch_weights=branch_weights,
+    )
 
 
 # =============================================================================
@@ -265,6 +337,40 @@ def get_locals_or_none(locals: dict[str, Any], symbols: list[str]) -> list[Any]:
     first bound inside the region enters as ``None``.
     """
     return [locals.get(symbol) for symbol in symbols]
+
+
+def early_exit_predicate(
+    predicate: Any,
+    *,
+    kind: str,
+    where: str,
+    filename: str | None = None,
+    lineno: int | None = None,
+    col_offset: int | None = None,
+    end_col_offset: int | None = None,
+) -> bool:
+    """The test of a native ``if``/``while`` that owns an early exit.
+
+    The preprocessor keeps such a statement in Python (its ``return``, ``raise``,
+    ``break`` or ``continue`` cannot leave an outlined region) and routes the
+    test through here: a Meta value is returned as Python's ``bool`` of it, a
+    staged value raises ``UNSUP_EARLY_EXIT`` pointing at the exit statement.
+
+    :param predicate: The evaluated test expression
+    :param kind: ``"return"``, ``"raise"``, ``"break"`` or ``"continue"``
+    :param where: The function the exit would leave, for the message
+    """
+    if is_mlir_op(predicate):
+        raise _user_error(
+            DiagId.UNSUP_EARLY_EXIT,
+            filename=filename,
+            lineno=lineno,
+            col_offset=col_offset,
+            end_col_offset=end_col_offset,
+            kind=kind,
+            where=where,
+        )
+    return bool(predicate)
 
 
 def closure_check(

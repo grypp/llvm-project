@@ -121,4 +121,10 @@ class ASTPreprocessor(ASTPreprocessorPlugin):
         )
 
 
-    generated_frame_names = ("loop_body",)
+    generated_frame_names = (
+        "loop_body",
+        "if_region",
+        "then_block",
+        "else_block",
+        "elif_region",
+    )

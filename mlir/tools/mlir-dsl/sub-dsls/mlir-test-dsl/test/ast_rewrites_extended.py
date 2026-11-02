@@ -186,6 +186,40 @@ def zero_step(n: m.Int32) -> m.Int32:
 report(zero_step, 4)
 
 
+
+# --- Early exits guarded by `try`, comprehension filters --------------------
+# A `raise` that its own `try` catches never leaves the region, so the `if`
+# is staged; a `raise` the handlers do not cover is still an early exit.
+@m.jit
+def try_guarded(c: m.Int32) -> m.Int32:
+    r = m.Int32(0)
+    if c > 0:
+        try:
+            raise ValueError("handled at trace time")
+        except ValueError:
+            r = c + 1
+    return r
+
+
+# CHECK-LABEL: func.func @try_guarded(
+# CHECK:         scf.if
+# EXEC:          TRY_GUARDED: 4 0
+print("TRY_GUARDED:", try_guarded(3), try_guarded(-3))
+
+
+@m.jit
+def try_uncovered(c: m.Int32) -> m.Int32:
+    r = m.Int32(0)
+    if c > 0:
+        try:
+            raise ValueError("not handled here")
+        except TypeError:
+            r = c + 1
+    return r
+
+
+# CHECK: ERROR: try_uncovered UNSUP_EARLY_EXIT
+report(try_uncovered, 3)
 # --- The range rules of a preprocessor subclass -----------------------------
 # A loop option the executor understands is named in `STAGED_RANGE_KEYWORDS`:
 # the rewrite then stages the loop itself (no trace-time dispatch between a
