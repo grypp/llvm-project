@@ -18,10 +18,12 @@ declare_mlir_python_sources(MLIRPythonSources.DSL.Core
     dsl/core/mlir_op.py
     dsl/core/plugin.py
     dsl/core/staging.py
+    dsl/core/user_op.py
     dsl/plugins/__init__.py
     dsl/types/__init__.py
     dsl/types/typing.py
     dsl/util/__init__.py
+    dsl/util/logger.py
     dsl/util/tree_utils.py
 )
 

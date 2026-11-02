@@ -125,3 +125,33 @@ runtime_argument(7)
 assert RuntimeDefaults().mangle_name("f", (7,), inspect.signature(lambda value: None)) == "f_selected"
 print("BOUNDARY CONTRACT: runtime default, restoration and symbol policy")
 # CHECK-NEXT: BOUNDARY CONTRACT: runtime default, restoration and symbol policy
+
+from mlir.dsl.core.common import DSLUserCodeError
+class DomainError(DSLUserCodeError):
+    pass
+class DomainDSL(Concrete):
+    user_error_class = DomainError
+    def on_trace_name_error(self, function, error, filename, lineno):
+        raise LookupError("domain name policy") from error
+
+@DomainDSL.jit
+def needs_argument(value):
+    pass
+try:
+    needs_argument()
+except DomainError:
+    pass
+else:
+    raise AssertionError("the core bypassed the DSL error class")
+
+@DomainDSL.jit
+def missing_name():
+    unresolved_core_contract_name
+try:
+    missing_name()
+except LookupError as error:
+    assert str(error) == "domain name policy"
+else:
+    raise AssertionError("the core bypassed the trace error hook")
+print("ERROR CONTRACT: custom class and trace name policy")
+# CHECK-NEXT: ERROR CONTRACT: custom class and trace name policy

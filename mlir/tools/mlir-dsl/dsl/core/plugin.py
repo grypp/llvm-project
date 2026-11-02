@@ -320,7 +320,7 @@ class DecoratorPlugin(Plugin):
         """
         if options:
             unknown = sorted(options)
-            raise DSLUserCodeError(
+            raise func._dsl_cls.user_error(
                 DiagId.CALL_ARGUMENTS,
                 function_name=f"@{func._decorator_kind}",
                 detail=f"no option is named `{unknown[0]}`",

@@ -25,11 +25,17 @@ from .diagnostics import (
 from .diagnostics import (
     render_user_diagnostic as _render_user_diagnostic,
 )
+from .diagnostics import (
+    user_warning_stacklevel as _user_warning_stacklevel,
+)
 
 __all__ = [
     "DSLBaseError",
     "DSLRuntimeError",
     "DSLUserCodeError",
+    "DSLUserCodeRuntimeError",
+    "DSLUserCodeTypeError",
+    "DSLUserCodeValueError",
     "DSLWarning",
     "report_warning",
     "get_current_env_manager",
@@ -253,6 +259,55 @@ class DSLUserCodeError(DSLBaseError):
         )
 
 
+class DSLUserCodeRuntimeError(DSLUserCodeError, RuntimeError):
+    """``DSLUserCodeError`` that is also catchable as ``RuntimeError``.
+
+    Raise this (instead of plain ``DSLUserCodeError``) when replacing a raw
+    ``RuntimeError`` that user code may already catch -- e.g. the MLIR
+    bindings' "requires a Context" error, which trace-time helpers probe
+    with ``except RuntimeError:`` to detect that no context is active.
+    """
+
+
+class DSLUserCodeTypeError(DSLUserCodeError, TypeError):
+    """``DSLUserCodeError`` that is also catchable as ``TypeError``.
+
+    Raise this when replacing a raw ``TypeError`` that user code may already
+    catch -- e.g. nanobind overload-resolution failures caused by a missing
+    default MLIR context.
+    """
+
+
+class DSLUserCodeValueError(DSLUserCodeError, ValueError):
+    """``DSLUserCodeError`` that is also catchable as ``ValueError``.
+
+    Raise this where the value, not the kind, of what the author passed is
+    wrong -- an ``align()`` that is not a power of two, a setting outside its
+    range -- mirroring Python's own split between ``TypeError`` and
+    ``ValueError``, so an ``except ValueError`` in user code keeps working.
+    """
+
+
+def _user_error(diag_id: Any, dsl: Any = None, /, **fields: Any) -> DSLUserCodeError:
+    """The error a raise site raises for ``diag_id``, built for ``dsl``.
+
+    ``dsl`` is a DSL class or instance, the active one when omitted: the error
+    is an instance of its ``user_error_class`` and carries the id its
+    ``diag_id_aliases`` map ``diag_id`` to (a DSL with a catalog of its own
+    substitutes its member, which must be a catalog member too). Outside a
+    DSL call, or for a DSL that sets neither, this is exactly
+    ``DSLUserCodeError(diag_id, **fields)``. ``BaseDSL.user_error`` is the
+    same with the DSL given; the core raise sites use one or the other, so a
+    DSL decides the class and the codes of every error the core raises for
+    the author's mistakes.
+    """
+    if dsl is None:
+        dsl = get_current_dsl()
+    error_class = getattr(dsl, "user_error_class", None) or DSLUserCodeError
+    aliases = getattr(dsl, "diag_id_aliases", None) or {}
+    return error_class(aliases.get(diag_id, diag_id), **fields)
+
+
 class DSLWarning(UserWarning):
     """A non-fatal author-facing warning, rendered like a ``DSLUserCodeError``.
 
@@ -324,7 +379,7 @@ def report_warning(
     *,
     filename: str | None = None,
     lineno: int | None = None,
-    stacklevel: int = 2,
+    stacklevel: int | None = None,
     **fields: Any,
 ) -> None:
     """Emit *warn_id* as a non-fatal :class:`DSLWarning` (does not raise).
@@ -332,8 +387,13 @@ def report_warning(
     The warning analogue of ``raise DSLUserCodeError(DiagId.X, ...)``: it
     renders through the one shared diagnostic block (yellow ``warning``
     header) and flows through the standard ``warnings`` module so it is
-    filterable and deduplicated.
+    filterable and deduplicated.  The ``warnings`` module attributes it to
+    the author's frame (``user_warning_stacklevel``), through however many
+    DSL frames sit between the author's line and the call; an explicit
+    ``stacklevel`` is used as given.
     """
+    if stacklevel is None:
+        stacklevel = _user_warning_stacklevel()
     warnings.warn(
         DSLWarning(warn_id, filename=filename, lineno=lineno, **fields),
         stacklevel=stacklevel,

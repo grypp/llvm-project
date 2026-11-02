@@ -48,6 +48,7 @@ from ..core.common import (
 )
 from ..core.diagnostics import DiagId, WarnId
 from ..core.mlir_op import current_emitter as _emitter
+from ..core.user_op import dsl_user_op
 
 
 # =============================================================================
@@ -1068,6 +1069,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
 
     # -- Binary operators ----------------------------------------------------
 
+    @dsl_user_op
     def __add__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1077,6 +1079,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
     ) -> "Numeric":
         return _binary_op(operator.add, promote_bool=True)(self, other, loc=loc, ip=ip)
 
+    @dsl_user_op
     def __sub__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1086,6 +1089,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
     ) -> "Numeric":
         return _binary_op(operator.sub, promote_bool=True)(self, other, loc=loc, ip=ip)
 
+    @dsl_user_op
     def __mul__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1095,6 +1099,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
     ) -> "Numeric":
         return _binary_op(operator.mul, promote_bool=True)(self, other, loc=loc, ip=ip)
 
+    @dsl_user_op
     def __floordiv__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1106,6 +1111,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
             self, other, loc=loc, ip=ip
         )
 
+    @dsl_user_op
     def __truediv__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1117,6 +1123,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
             self, other, loc=loc, ip=ip
         )
 
+    @dsl_user_op
     def __mod__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1126,6 +1133,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
     ) -> "Numeric":
         return _binary_op(operator.mod, promote_bool=True)(self, other, loc=loc, ip=ip)
 
+    @dsl_user_op
     def __radd__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1135,6 +1143,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
     ) -> "Numeric":
         return self.__add__(other, loc=loc, ip=ip)
 
+    @dsl_user_op
     def __rsub__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1146,6 +1155,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
             self, other, loc=loc, ip=ip
         )
 
+    @dsl_user_op
     def __rmul__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1155,6 +1165,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
     ) -> "Numeric":
         return self.__mul__(other, loc=loc, ip=ip)
 
+    @dsl_user_op
     def __rfloordiv__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1166,6 +1177,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
             self, other, loc=loc, ip=ip
         )
 
+    @dsl_user_op
     def __rtruediv__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1177,6 +1189,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
             self, other, loc=loc, ip=ip
         )
 
+    @dsl_user_op
     def __rmod__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1188,6 +1201,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
             self, other, loc=loc, ip=ip
         )
 
+    @dsl_user_op
     def __eq__(  # type: ignore[override]
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1197,6 +1211,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
     ) -> "Boolean":
         return _binary_op(operator.eq)(self, other, loc=loc, ip=ip)
 
+    @dsl_user_op
     def __ne__(  # type: ignore[override]
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1206,6 +1221,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
     ) -> "Boolean":
         return _binary_op(operator.ne)(self, other, loc=loc, ip=ip)
 
+    @dsl_user_op
     def __lt__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1215,6 +1231,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
     ) -> "Boolean":
         return _binary_op(operator.lt)(self, other, loc=loc, ip=ip)
 
+    @dsl_user_op
     def __le__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1224,6 +1241,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
     ) -> "Boolean":
         return _binary_op(operator.le)(self, other, loc=loc, ip=ip)
 
+    @dsl_user_op
     def __gt__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1233,6 +1251,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
     ) -> "Boolean":
         return _binary_op(operator.gt)(self, other, loc=loc, ip=ip)
 
+    @dsl_user_op
     def __ge__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1242,6 +1261,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
     ) -> "Boolean":
         return _binary_op(operator.ge)(self, other, loc=loc, ip=ip)
 
+    @dsl_user_op
     def __pow__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1255,6 +1275,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
             return NotImplemented
         return _binary_op(operator.pow)(self, other, loc=loc, ip=ip)
 
+    @dsl_user_op
     def __rpow__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1403,7 +1424,7 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
                     if isinstance(x, float):
                         report_warning(
                             WarnId.TYPE_FLOAT_TO_INT_OUT_OF_RANGE,
-                            stacklevel=3,
+
                             value=x,
                             type=ty.__name__,
                             min=ty.min,
@@ -1413,7 +1434,7 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
                     else:
                         report_warning(
                             WarnId.TYPE_INT_LITERAL_OUT_OF_RANGE,
-                            stacklevel=3,
+
                             value=int_val,
                             type=ty.__name__,
                             min=ty.min,
@@ -1462,6 +1483,7 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
 
         super().__init__(x_val)
 
+    @dsl_user_op
     def __invert__(
         self,
         *,
@@ -1475,6 +1497,7 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
             return res_type(res, loc=loc, ip=ip)
         return res_type(~int(self.value))
 
+    @dsl_user_op
     def __lshift__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1496,6 +1519,7 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
             return NotImplemented
         return other_.__lshift__(self, loc=loc, ip=ip)  # type: ignore[call-arg]
 
+    @dsl_user_op
     def __rshift__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1517,6 +1541,7 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
             return NotImplemented
         return other_.__rshift__(self, loc=loc, ip=ip)  # type: ignore[call-arg]
 
+    @dsl_user_op
     def __and__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1535,6 +1560,7 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
     ) -> "Numeric":
         return self.__and__(other, loc=loc, ip=ip)  # type: ignore[call-arg]
 
+    @dsl_user_op
     def __or__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1553,6 +1579,7 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
     ) -> "Numeric":
         return self.__or__(other, loc=loc, ip=ip)  # type: ignore[call-arg]
 
+    @dsl_user_op
     def __xor__(
         self,
         other: Union[int, float, bool, "Numeric"],
@@ -1636,7 +1663,7 @@ class Float(Numeric, metaclass=FloatMeta, mlir_type=T.f32, is_abstract=True):
                 if math.isinf(narrowed):
                     report_warning(
                         WarnId.TYPE_FLOAT_LITERAL_OVERFLOW,
-                        stacklevel=3,
+
                         value=fx,
                         type=ty.__name__,
                         max=max_finite,
@@ -1645,7 +1672,7 @@ class Float(Numeric, metaclass=FloatMeta, mlir_type=T.f32, is_abstract=True):
                 elif narrowed == 0.0:
                     report_warning(
                         WarnId.TYPE_FLOAT_LITERAL_UNDERFLOW,
-                        stacklevel=3,
+
                         value=fx,
                         type=ty.__name__,
                         tiny=min_subnormal,
@@ -2152,11 +2179,13 @@ def _minmax(is_min: bool, *args: Any, loc: Any = None, ip: Any = None) -> Any:
     return functools.reduce(minmax_op, values[1:], values[0])
 
 
+@dsl_user_op
 def max_(*args: Any, loc: Any = None, ip: Any = None) -> Any:
     """The DSL's ``max``: the result type follows the operand types, not the values."""
     return _minmax(False, *args, loc=loc, ip=ip)
 
 
+@dsl_user_op
 def min_(*args: Any, loc: Any = None, ip: Any = None) -> Any:
     """The DSL's ``min``: the result type follows the operand types, not the values."""
     return _minmax(True, *args, loc=loc, ip=ip)
@@ -2204,6 +2233,7 @@ class Struct:
         for name in type(self)._field_names:
             yield getattr(self, name)
 
+    @dsl_user_op
     def replace(
         self,
         *args: Any,
@@ -2356,6 +2386,7 @@ def struct(cls: Optional[type] = None) -> Any:
             field_annotations[name] = ann
         cls_name = cls.__name__
 
+        @dsl_user_op
         def __init__(
             self: Any,
             *args: Any,

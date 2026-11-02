@@ -27,23 +27,28 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import wraps
 from types import UnionType
-from typing import Annotated, Any, ClassVar, Union, get_args, get_origin
+from typing import Annotated, Any, ClassVar, NoReturn, Union, get_args, get_origin
 
 from ... import ir
 from ..types import typing as t
 from ..util import tree_utils
+from ..util.logger import log
 from .arguments import JitArgAdapterRegistry
 from .common import (
     DSLBaseError,
     DSLRuntimeError,
     DSLUserCodeError,
+    DSLUserCodeValueError,
+    DSLWarning,
+    _user_error,
     active_dsl,
     in_trace,
 )
-from .diagnostics import DiagId
+from .diagnostics import DiagId, filter_traceback
 from .env_manager import EnvironmentVarManager
 from .plugin import DecoratorPlugin, Plugins, _NoRemarkSession
 from .staging import _is_mlir_op_leaf, is_argument_meta
+from .user_op import enter_traceback_locations
 
 __all__ = [
     "BaseDSL",
@@ -77,6 +82,7 @@ class DSLSingletonMeta(type):
 
     def __call__(cls, *args: Any, **kwargs: Any) -> Any:
         with cls._lock:
+            log().info("DSLSingletonMeta __call__ for %s", cls)
             if cls.__dict__.get("_abstract_dsl_base"):
                 for instance in cls._instances.values():
                     if isinstance(instance, cls):
@@ -88,10 +94,12 @@ class DSLSingletonMeta(type):
             if cls not in cls._instances:
                 instance = super().__call__(*args, **kwargs)
                 cls._instances[cls] = instance
+            log().info("Active DSL singleton instances: %s", cls._instances)
             return cls._instances[cls]
 
     def clear_instances(cls) -> None:
         """Forget the instance of ``cls`` so the next ``cls()`` builds a new one."""
+        log().info("Clearing DSL singleton instances for %s", cls)
         if cls in cls._instances:
             del cls._instances[cls]
 
@@ -210,6 +218,10 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     plugin's ``call`` (from Python) or ``launch`` (inside a trace).
     """
 
+    user_error_class: ClassVar[type[DSLUserCodeError]] = DSLUserCodeError
+    diag_id_aliases: ClassVar[dict[Any, Any]] = {}
+    _warning_category: ClassVar[type[Warning]] = DSLWarning
+
     _abstract_dsl_base: ClassVar[bool] = True
 
     _env_class: type[EnvironmentVarManager] = EnvironmentVarManager
@@ -310,11 +322,12 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
         # set warning
         if self.envar.warnings_ignore:
-            warnings.filterwarnings("ignore")
+            warnings.filterwarnings("ignore", category=self._warning_category)
 
         # The function being traced; set on every path that reaches the
         # argument boundary (``_prepare_compilation``, ``bind_arguments``).
         self.traced_function: Callable[..., Any] | None = None
+        log().info("Initializing %s DSL", name)
 
         # Resolve the class's plugin record for this instance: a copy of every
         # available plugin, installed in record order (roles, then families), so
@@ -403,12 +416,13 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         Capture the decorator's source location, not its frame: the wrapper
         outlives the decorating call.
         """
+        log().info("jit_runner")
         # The record's plugin, found on the class: the instance is still lazy.
         plugin = cls._decorator_plugin(kind)
 
         def jit_runner_decorator(func: Any) -> Any:
             if not inspect.isfunction(func):
-                raise DSLUserCodeError(
+                raise cls.user_error(
                     DiagId.CALL_NOT_CALLABLE,
                     decorator=f"@{kind}",
                     got=f"a `{type(func).__name__}`",
@@ -421,7 +435,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 func = plugin.decorate(func, **decorator_kwargs)
             elif decorator_kwargs:
                 unknown = sorted(decorator_kwargs)
-                raise DSLUserCodeError(
+                raise cls.user_error(
                     DiagId.CALL_ARGUMENTS,
                     function_name=f"@{kind}",
                     detail=f"no option is named `{unknown[0]}`",
@@ -429,15 +443,19 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
             @wraps(func)
             def jit_wrapper(*args: Any, **kwargs: Any) -> Any:
-                # Resolve the instance plugin at call time; retain no bound method.
-                if in_trace():
-                    cls._lazy_initialize_dsl(func)
-                    func._dsl_object.decorator_location = func._decorator_location
-                    return cls._dispatch_decorated(func, *args, **kwargs)
-                with cls.call_scope(func):
-                    cls._lazy_initialize_dsl(func)
-                    func._dsl_object.decorator_location = func._decorator_location
-                    return cls._dispatch_decorated(func, *args, **kwargs)
+                try:
+                    # Resolve the instance plugin at call time; retain no bound method.
+                    if in_trace():
+                        cls._lazy_initialize_dsl(func)
+                        func._dsl_object.decorator_location = func._decorator_location
+                        return cls._dispatch_decorated(func, *args, **kwargs)
+                    with cls.call_scope(func):
+                        cls._lazy_initialize_dsl(func)
+                        func._dsl_object.decorator_location = func._decorator_location
+                        return cls._dispatch_decorated(func, *args, **kwargs)
+                except Exception as exc:
+                    cls._filter_call_traceback(func, exc)
+                    raise
 
             if plugin is not None:
                 return plugin.wrap(func, jit_wrapper)
@@ -448,7 +466,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         if decorator_args:
             # `@jit(3)`: the options are keywords, so a value here is a
             # mistake, not a configuration.
-            raise DSLUserCodeError(
+            raise cls.user_error(
                 DiagId.CALL_ARGUMENTS,
                 function_name=f"@{kind}",
                 detail=f"it takes no option, but {len(decorator_args)} positional "
@@ -487,7 +505,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             plugin_name = (
                 "DecoratorPlugin" if installed is None else type(installed).__name__
             )
-            raise DSLUserCodeError(
+            raise dsl.user_error(
                 DiagId.CALL_PLUGIN_REQUIRED,
                 name=f"@{kind}",
                 plugin=f"the `{plugin_name}` plugin",
@@ -632,6 +650,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         function_name = function_name[:180]
         if self._name_mangling_prefix:
             function_name = f"{self._name_mangling_prefix}_{function_name}"
+        log().info("Final mangled function name: %s", function_name)
         return function_name
 
     # ===------------------------------------------------------------------===
@@ -684,6 +703,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         ) -> tuple[Any, int]:
             arg_name = parameter.name
             arg_spec = parameter.annotation
+            log().debug("Processing [%d] Argument [%s : %s]", idx, arg_name, arg_spec)
 
             # A Python value is handed to the body as is; ``traced_function``
             # supplies the owning-function context the meta test uses to
@@ -784,7 +804,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         if jit_arg_type and (jit_exec_arg or not is_host):
             return
 
-        raise DSLUserCodeError(
+        raise self.user_error(
             DiagId.ARG_UNSUPPORTED_TYPE,
             num=arg_index + 1,
             arg_name=arg_name,
@@ -830,7 +850,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             value = next(leaf_values)
             entry = tree_utils.leaf_entry(type(value))
             if tree_utils.is_staged_leaf(value):
-                raise DSLUserCodeError(
+                raise self.user_error(
                     DiagId.ARG_UNSUPPORTED_TYPE,
                     num=arg_index + 1,
                     arg_name=arg_name,
@@ -838,7 +858,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                     function_name=function_name,
                 )
             if entry is None or entry.marshal is None:
-                raise DSLUserCodeError(
+                raise self.user_error(
                     DiagId.ARG_UNSUPPORTED_TYPE,
                     num=arg_index + 1,
                     arg_name=arg_name,
@@ -894,6 +914,8 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             # Retrieve markers from the annotated type that matches the arg
             annotation_markers = self._extract_annotation_markers(spec_ty, arg)
 
+            log().debug("Processing [%d] Argument [%s : %s]", i, arg_name, spec_ty)
+
             cast_ty = (
                 get_args(spec_ty)[0] if get_origin(spec_ty) is Annotated else spec_ty
             )
@@ -902,7 +924,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 try:
                     arg = t.cast(arg, cast_ty)  # type: ignore[arg-type]
                 except DSLBaseError as exc:
-                    raise DSLUserCodeError(
+                    raise self.user_error(
                         DiagId.ARG_ANNOTATION_MISMATCH,
                         num=i + 1,
                         arg_name=arg_name,
@@ -1013,16 +1035,27 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         )
 
     def get_ir_location(self, location: DSLLocation | None = None) -> Any:
-        """Convert a Python source location to a named MLIR location."""
+        """The MLIR location of ``location`` (the decorator's by default): a
+        plain file location, so that the NameLoc wrapping of traceback
+        locations (``enter_traceback_locations``) carries only the names a DSL
+        puts in ``ir.Location.current`` itself."""
         if location is None:
             location = self.decorator_location
         if location is None:
             return ir.Location.unknown()
+        return ir.Location.file(location.filename, location.lineno, location.col_offset)
 
-        file_loc = ir.Location.file(
-            location.filename, location.lineno, location.col_offset
+    def _enter_loc_tracebacks(self) -> Any:
+        """Turn on MLIR's traceback locations for the trace when ``debuginfo``
+        is set (the user's line) or ``<PREFIX>_LOC_TRACEBACKS=N`` asks for a
+        call chain of N frames; ``debug`` keeps the DSL's own frames. Returns
+        the context manager to exit, or None."""
+        depth = self.envar.loc_tracebacks
+        if depth <= 0 and self.envar.debuginfo:
+            depth = 1
+        return enter_traceback_locations(
+            depth, include_dsl_frames=bool(self.envar.debug)
         )
-        return ir.Location.name(location.function_name, childLoc=file_loc)
 
     def build_module(self, module: ir.Module, function_name: str) -> ir.Module:
         """
@@ -1056,7 +1089,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         """
         if result is None:
             if sig.return_annotation not in (inspect.Signature.empty, None):
-                raise DSLUserCodeError(
+                raise self.user_error(
                     DiagId.TYPE_RETURN_MISMATCH,
                     got="`None`",
                     detail=" while it declares a return type",
@@ -1074,12 +1107,12 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         for leaf in leaves:
             cls = leaf.node_metadata.cls
             if not issubclass(cls, t.Numeric):
-                raise DSLUserCodeError(
+                raise self.user_error(
                     DiagId.TYPE_RETURN_MISMATCH,
                     got=f"a `{cls.__name__}`",
                 )
         if not leaves:
-            raise DSLUserCodeError(
+            raise self.user_error(
                 DiagId.TYPE_RETURN_MISMATCH, got=f"a `{type(result).__name__}`"
             )
         values, _, _ = tree_utils.tree_flatten(result, return_ir_values=True)
@@ -1223,6 +1256,9 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             self.register_dialects(ctx)
             for plugin in self.plugins:
                 plugin.register_dialects(ctx)
+            # Optional: capture full Python call stacks on every MLIR op.
+            loc_tracebacks = self._enter_loc_tracebacks()
+
             try:
                 # Convert input arguments to MLIR arguments
                 mlir_func_args = self.generate_mlir_function_types(
@@ -1276,6 +1312,11 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
                 self._compiler
             finally:
+                if loc_tracebacks is not None:
+                    try:
+                        loc_tracebacks.__exit__(None, None, None)
+                    except Exception:
+                        pass
                 self.post_compilation_cleanup()
 
     # ===------------------------------------------------------------------===
@@ -1290,7 +1331,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             bound_args = sig.bind_partial(*args, **kwargs)
             bound_args.apply_defaults()
         except TypeError as e:
-            raise DSLUserCodeError(
+            raise self.user_error(
                 DiagId.CALL_ARGUMENTS,
                 function_name=function_name,
                 detail=f"{len(args)} positional and {len(kwargs)} keyword argument(s) do not bind to its runtime parameters ({e})",
@@ -1327,7 +1368,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 param.default is inspect.Parameter.empty
                 and param.name not in bound_args.arguments
             ):
-                raise DSLUserCodeError(
+                raise self.user_error(
                     DiagId.CALL_ARGUMENTS,
                     function_name=function_name,
                     detail=f"no value for `{param.name}`",
@@ -1339,7 +1380,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         try:
             return inspect.signature(func, eval_str=True)
         except NameError as e:
-            raise DSLUserCodeError(
+            raise self.user_error(
                 DiagId.SCOPE_UNBOUND_NAME_IN_TRACE,
                 var=getattr(e, "name", None) or "<annotation>",
                 function_name=getattr(func, "__name__", "<function>"),
@@ -1434,6 +1475,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
         if not no_cache and compile_only:
             no_cache = True
+            log().info("Cache is disabled as user wants to compile only.")
 
         # Get signature of the function
         sig = self._get_signature(func)
@@ -1494,6 +1536,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         with active_dsl(self):
             setup = self._prepare_compilation(func, *args, **kwargs)
 
+            log().debug("Generating MLIR for function '%s'", setup.function_name)
             return self.generate_mlir(
                 entry,
                 func,
@@ -1542,6 +1585,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         func_op, entry_block = entry.generate_func_op(
             name, list(arg_types), list(arg_attrs), loc=loc
         )
+        log().debug("Generated function op [%s]", func_op)
         with ir.InsertionPoint(entry_block):
             ir_args, ir_kwargs = self.generate_execution_arguments(
                 args, kwonlyargs, entry_block, sig
@@ -1552,8 +1596,19 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 if body_scope is None
                 else body_scope(self, func, signature=sig)
             )
-            with scope:
-                result = func(*ir_args, **ir_kwargs)
+            try:
+                with scope:
+                    result = func(*ir_args, **ir_kwargs)
+            except NameError as name_error:
+                # The innermost frame of the traceback is the user's line.
+                tb = name_error.__traceback__
+                err_filename = err_lineno = None
+                while tb is not None:
+                    err_filename = tb.tb_frame.f_code.co_filename
+                    err_lineno = tb.tb_lineno
+                    tb = tb.tb_next
+                self.on_trace_name_error(func, name_error, err_filename, err_lineno)
+                raise
         return func_op, entry_block, result
 
     def _is_meta_at_boundary(
@@ -1626,3 +1681,55 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         if isinstance(arg, (list, tuple)):
             return "_".join(map(str, arg))
         return str(arg)
+
+    @classmethod
+    def user_error(cls, diag_id: Any, **fields: Any) -> DSLUserCodeError:
+        """The error this DSL raises for ``diag_id``: an instance of
+        :attr:`user_error_class` carrying the id :attr:`diag_id_aliases` maps
+        ``diag_id`` to, with ``fields`` as ``DSLUserCodeError`` takes them.
+        The core's raise sites call it on the DSL (or DSL class) in hand;
+        ``common._user_error`` is the same for the active DSL."""
+        return _user_error(diag_id, cls, **fields)
+
+    def on_trace_name_error(
+        self,
+        func: Callable[..., Any],
+        error: NameError,
+        filename: str | None,
+        lineno: int | None,
+    ) -> NoReturn:
+        """What a ``NameError`` met while tracing ``func`` becomes.
+
+        ``trace_body`` calls it with the error and the user's line that raised
+        it (the innermost frame of its traceback). The default reports
+        ``SCOPE_UNBOUND_NAME_IN_TRACE`` there through :meth:`user_error`: a
+        name read on a path that never set it, the usual cause once the
+        rewrite has outlined a branch. A DSL whose rewrite introduces names of
+        its own overrides this to tell its unbound reads apart; a hook that
+        returns lets the ``NameError`` propagate as it is."""
+        raise self.user_error(
+            DiagId.SCOPE_UNBOUND_NAME_IN_TRACE,
+            filename=filename,
+            lineno=lineno,
+            cause=error,
+            var=getattr(error, "name", None) or f"<in {func.__name__}>",
+            function_name=func.__name__,
+        ) from error
+
+    @staticmethod
+    def _filter_call_traceback(func: Any, exc: BaseException) -> None:
+        """Drop the DSL's frames from the traceback of ``exc``, raised by a
+        call of the decorated ``func`` (:func:`filter_traceback`), when the
+        DSL filters stack traces (``<PREFIX>_FILTER_STACKTRACE``, on unless
+        ``DEBUG`` or ``SHOW_STACKTRACE`` asks for everything). The region
+        functions the AST preprocessor plugin generates
+        (``generated_frame_names``) are collapsed into the user's frame. A
+        function whose DSL instance does not exist yet (its construction is
+        what failed) is left alone."""
+        dsl = getattr(func, "_dsl_object", None)
+        if dsl is None or not dsl.envar.filter_stacktrace:
+            return
+        preprocessor = None
+        filter_traceback(
+            exc, generated_names=getattr(preprocessor, "generated_frame_names", ())
+        )
