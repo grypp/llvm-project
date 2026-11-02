@@ -15,6 +15,7 @@ configure_lit_site_cfg(
 set(MLIR_DSL_TEST_DEPENDS
   FileCheck
   MLIRPythonModules
+  MLIRPythonModulesMlirTestDSL
 )
 add_lit_testsuite(check-mlir-dsl "Running the mlir.dsl core tests"
   ${CMAKE_CURRENT_BINARY_DIR}

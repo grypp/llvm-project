@@ -28,8 +28,11 @@ Run with `PRINT_DSL_PRINT_IR=1` to print the verified module. The call traces
 `hello` into a zero-argument `func.func` containing two `gpu.printf`
 operations. The Python argument specializes IR construction. Calls to other
 decorated functions inside the body inline their builders into the active
-trace. Functions currently return `None`; no runtime arguments, compiler or
-execution engine are required. Emitting a print operation does not execute it.
+trace. Additional capabilities are introduced below. Emitting a print operation does not execute it.
 
 Enable `MLIR_ENABLE_BINDINGS_PYTHON` and `MLIR_ENABLE_PYTHON_DSL` when building
 MLIR, then run `check-mlir-dsl` to exercise the tracing tests.
+
+## Available capabilities
+
+Typed scalar parameters become SSA block arguments. Numeric operators dispatch through the selected `type_ops` emitter, so the same Python expression can target different dialects.
