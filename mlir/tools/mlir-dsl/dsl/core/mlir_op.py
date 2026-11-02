@@ -156,6 +156,9 @@ class OpEmitter:
     def select(self, *args: Any, **kwargs: Any) -> Any:
         return self._unsupported("select")
 
+    def cast(self, *args: Any, **kwargs: Any) -> Any:
+        return self._unsupported("cast")
+
     def bitcast(self, *args: Any, **kwargs: Any) -> Any:
         return self._unsupported("bitcast")
 

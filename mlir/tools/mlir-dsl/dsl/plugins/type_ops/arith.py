@@ -256,6 +256,52 @@ def int_to_int(
 # =============================================================================
 
 
+def _cast(
+    res_elem_ty: ir.Type,
+    src: Union[ir.Value, "Numeric"],
+    is_signed: Optional[bool] = None,
+    *,
+    loc: Optional[ir.Location] = None,
+    ip: Optional[ir.InsertionPoint] = None,
+) -> ir.Value:
+    """Element-wise conversion of ``src`` to the element type ``res_elem_ty``.
+
+    ``is_signed`` is the signedness of the integer side of the conversion (the
+    source for an integer source, the destination for float-to-integer);
+    ``None`` reads as signed.
+    """
+    if isinstance(src, ir.Value):
+        src_ty = src.type
+    else:
+        src_ty = type(src).mlir_type
+        src = src.ir_value()
+
+    src_elem_ty = element_type(src_ty)
+
+    if src_elem_ty == res_elem_ty:
+        return src
+    elif is_float_type(src_elem_ty) and is_float_type(res_elem_ty):
+        return cvtf(src, res_elem_ty, loc=loc, ip=ip)
+    elif is_integer_like_type(src_elem_ty) and is_integer_like_type(res_elem_ty):
+        if src_elem_ty.width >= res_elem_ty.width:
+            cast_op = arith.trunci
+        elif _reads_as_signed(is_signed):
+            cast_op = arith.extsi
+        else:
+            cast_op = arith.extui
+
+        res_ty = recast_type(src_ty, res_elem_ty)
+        return cast_op(res_ty, src, loc=loc, ip=ip)
+    elif is_float_type(src_elem_ty) and is_integer_like_type(res_elem_ty):
+        return fptoi(src, is_signed, res_elem_ty, loc=loc, ip=ip)
+    elif is_integer_like_type(src_elem_ty) and is_float_type(res_elem_ty):
+        return itofp(src, is_signed, res_elem_ty, loc=loc, ip=ip)
+    else:
+        raise DSLRuntimeError(
+            f"cast from {src_elem_ty} to {res_elem_ty} is not supported"
+        )
+
+
 def const(
     value: Union[int, float, bool, ir.Value, "Numeric"],
     ty: Optional[Union[ir.Type, "NumericMeta"]] = None,
@@ -619,3 +665,26 @@ def select(
 ) -> ir.Value:
     """``a if cond else b`` on values of one type: ``arith.select``."""
     return arith.select(cond, a, b, loc=loc, ip=ip)
+
+
+def cast(
+    src: Union[ir.Value, "Numeric"],
+    dst_type: Union[ir.Type, "NumericMeta"],
+    *,
+    signed: Optional[bool] = None,
+    loc: Optional[ir.Location] = None,
+    ip: Optional[ir.InsertionPoint] = None,
+) -> ir.Value:
+    """Convert ``src`` to ``dst_type``, an ``ir.Type`` or a ``Numeric`` class.
+
+    ``signed`` is the signedness of the integer side of the conversion (see
+    ``_cast``); for a float source and a ``Numeric`` destination it defaults
+    to the destination's.
+    """
+    if not isinstance(dst_type, ir.Type):
+        if signed is None:
+            src_ty = src.type if isinstance(src, ir.Value) else type(src).mlir_type
+            if is_float_type(element_type(src_ty)):
+                signed = getattr(dst_type, "signed", None)
+        dst_type = dst_type.mlir_type
+    return _cast(dst_type, src, signed, loc=loc, ip=ip)

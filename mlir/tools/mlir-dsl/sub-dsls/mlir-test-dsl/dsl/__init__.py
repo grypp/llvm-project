@@ -15,6 +15,7 @@ your own exports its own namespace the same way.
 
 from ..dsl import *  # noqa: F401,F403  the core names, re-exported
 from ..dsl import __all__ as _core_names
+from ..dsl.plugins.decorators.kernels.gpu_plugin import LaunchConfig
 from ..dsl.plugins.ast_preprocessor.scf import (
     WhileLoopContext,
     all_,
@@ -29,7 +30,7 @@ from ..dsl.plugins.ast_preprocessor.scf import (
     yield_,
 )
 
-from .mlir_dsl import LOWER_TO_LLVM, MlirTestDSL, compile, jit
+from .mlir_dsl import LOWER_TO_LLVM, MlirTestDSL, compile, jit, kernel
 
 __all__ = [
     *_core_names,
@@ -45,7 +46,9 @@ __all__ = [
     "while_",
     "yield_",
     "LOWER_TO_LLVM",
+    "LaunchConfig",
     "MlirTestDSL",
     "compile",
     "jit",
+    "kernel",
 ]

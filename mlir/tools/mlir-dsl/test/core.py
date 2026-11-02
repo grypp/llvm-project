@@ -155,3 +155,26 @@ else:
     raise AssertionError("the core bypassed the trace error hook")
 print("ERROR CONTRACT: custom class and trace name policy")
 # CHECK-NEXT: ERROR CONTRACT: custom class and trace name policy
+
+forwarded_options = []
+class BoundaryOptionsDSL(RuntimeDefaults):
+    def _check_unsupported_jit_arg(self, *, boundary_marker=None, **kwargs):
+        if boundary_marker is not None:
+            forwarded_options.append(boundary_marker)
+        return super()._check_unsupported_jit_arg(**kwargs)
+
+@BoundaryOptionsDSL.jit
+def bind_device_argument(value: Int32):
+    _, _, _, device_args = BoundaryOptionsDSL().bind_arguments(
+        lambda device_value: None,
+        "device_entry",
+        (value,),
+        {},
+        boundary_marker="device policy",
+    )
+    assert len(device_args.values) == len(device_args.types) == len(device_args.attributes) == 1
+
+bind_device_argument(7)
+assert forwarded_options == ["device policy"]
+print("DEVICE BOUNDARY CONTRACT: custom options reach validation")
+# CHECK-NEXT: DEVICE BOUNDARY CONTRACT: custom options reach validation

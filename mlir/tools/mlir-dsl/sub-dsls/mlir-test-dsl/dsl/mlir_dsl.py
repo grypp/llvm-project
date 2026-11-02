@@ -26,6 +26,7 @@ from ..dsl.core.plugin import Plugins
 from ..dsl.plugins.compiler import execution_engine
 from ..dsl.plugins.adapters import dlpack
 from ..dsl.plugins.decorators.jit import func
+from ..dsl.plugins.decorators.kernels import gpu_plugin
 from ..dsl.plugins.type_ops import UpstreamDialectTypeOps, arith, llvm, vector
 
 from ..dsl.util.tree_utils import (
@@ -36,7 +37,7 @@ from ..dsl.util.tree_utils import (
     register_leaf_protocol,
 )
 
-__all__ = ["LOWER_TO_LLVM", "MlirTestDSL", "compile", "jit"]
+__all__ = ["LOWER_TO_LLVM", "MlirTestDSL", "compile", "jit", "kernel"]
 
 #: The passes lowering what the test DSL emits (arith, math, vector and llvm ops
 #: on builtin types, the ``scf`` control flow, the ``func.func`` entry) to the
@@ -125,7 +126,7 @@ class MlirTestDSL(BaseDSL):
         type_ops=UpstreamDialectTypeOps(scalars=arith, vectors=vector, memory=llvm),
         compiler=execution_engine.Compiler(),
         # @jit over a func.func host entry, then @kernel over gpu.func.
-        decorators=[func.Jit()],
+        decorators=[func.Jit(), gpu_plugin.Kernels(chip_option="cubin-chip")],
         # Inbound: anything speaking DLPack (numpy arrays, torch tensors on the
         # host or a device) through the nanobind extension.
         adapters=[dlpack.DlpackPlugin()],
@@ -138,6 +139,13 @@ class MlirTestDSL(BaseDSL):
         of the upstream dialects the builtin types and the ``scf`` control flow
         emit."""
         passes: list[str] = []
+        kernels = self.plugins.named("gpu")
+        if kernels is not None and self.envar.arch:
+            # MLIR's upstream gpu lowering (outlining, NVVM, gpu-module-to-binary)
+            # for the architecture; the plugin only names the chip option.
+            passes.append(
+                f"gpu-lower-to-nvvm-pipeline{{{kernels.chip_option}={self.envar.arch}}}"
+            )
         passes.extend(LOWER_TO_LLVM)
         return passes
 
@@ -146,6 +154,7 @@ class MlirTestDSL(BaseDSL):
 
 
 jit = MlirTestDSL.jit
+kernel = MlirTestDSL.kernel
 
 
 def compile(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:

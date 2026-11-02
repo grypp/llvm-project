@@ -76,3 +76,27 @@ def have_host_jit_feature_support(feature_name):
 
 if config.enable_execution_engine and have_host_jit_feature_support("jit"):
     config.available_features.add("host-supports-jit")
+
+# The GPU launch test needs a CUDA device visible to PyTorch (its tensors are
+# the device memory) and MLIR's CUDA runtime wrappers. The chip MLIR compiles
+# for is the device's compute capability.
+try:
+    _probe = subprocess.run(
+        [
+            config.python_executable,
+            "-c",
+            "import torch; c = torch.cuda.get_device_capability(0); print(f'sm_{c[0]}{c[1]}')",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    _cuda_runtime = os.path.join(
+        config.llvm_tools_dir, "..", "lib", "libmlir_cuda_runtime" + config.llvm_shlib_ext
+    )
+    if _probe.returncode == 0 and os.path.isfile(_cuda_runtime):
+        config.available_features.add("cuda-gpu")
+        config.substitutions.append(("%cuda_chip", _probe.stdout.strip()))
+        config.substitutions.append(("%mlir_cuda_runtime", _cuda_runtime))
+except Exception:
+    pass
