@@ -127,4 +127,7 @@ class ASTPreprocessor(ASTPreprocessorPlugin):
         "then_block",
         "else_block",
         "elif_region",
+        "while_region",
+        "while_before_block",
+        "while_after_block",
     )

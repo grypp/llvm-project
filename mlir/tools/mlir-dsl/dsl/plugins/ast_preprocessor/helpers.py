@@ -5,10 +5,10 @@
 """
 Trace-time helpers referenced by the code the AST preprocessor generates.
 
-``DSLPreprocessor`` rewrites native ``for``/``if`` statements into
+``DSLPreprocessor`` rewrites native ``for``/``if``/``while`` statements into
 region functions decorated with the selectors below (``loop_selector``,
-``if_selector``) and routes expressions through the
-executors (``if_executor``). The selectors forward to the :class:`Executor` of
+``if_selector``, ``while_selector``) and routes expressions through the
+executors (``if_executor``, ...). The selectors forward to the :class:`Executor` of
 the DSL that is tracing, which the DSL fills through
 :meth:`Executor.set_functions`. The module also holds the loop
 iterables (``range``) and the trace-time dispatch helpers
@@ -37,7 +37,9 @@ __all__ = [
     "executor",
     "loop_selector",
     "if_selector",
+    "while_selector",
     "if_executor",
+    "while_executor",
     "range",
     "is_dynamic_range",
     "close_for_iter",
@@ -145,6 +147,38 @@ def if_selector(pred: Any, write_args: Sequence[Any] = ()) -> Callable[..., Any]
         return func(pred, *write_args)
 
     return ir_if
+
+
+def while_selector(*, write_args: Sequence[Any] = ()) -> Callable[..., Any]:
+    """Decorator on a generated ``while`` region: calls it as ``region(*write_args)``.
+
+    The region function defines the before/after blocks and returns
+    ``while_executor(...)``.
+    """
+
+    def ir_while_loop(func: Callable[..., Any]) -> Any:
+        return func(*write_args)
+
+    return ir_while_loop
+
+
+def while_executor(
+    while_before_block: Callable[..., Any],
+    while_after_block: Callable[..., Any],
+    write_args: Sequence[Any] = (),
+    full_write_args_count: int = 0,
+    write_args_names: Sequence[str] = (),
+    mutated_names: tuple[str, ...] = (),
+) -> Any:
+    """Forward a generated ``while`` region to the active ``Executor.while_execute``."""
+    return executor.while_execute(
+        while_before_block,
+        while_after_block,
+        write_args,
+        full_write_args_count,
+        write_args_names,
+        mutated_names=mutated_names,
+    )
 
 
 def if_executor(

@@ -186,6 +186,53 @@ def zero_step(n: m.Int32) -> m.Int32:
 report(zero_step, 4)
 
 
+# --- A name the `while` condition binds with `:=` -----------------------------
+# The condition runs in the region's before block, so a name it first binds is
+# not visible to the body: reading it there is refused with the fix, and a
+# loop whose body never reads it traces as usual. A name bound before the loop
+# and rebound by the `:=` is a write_arg like any other.
+@m.jit
+def walrus_read(n: m.Int32) -> m.Int32:
+    acc = m.Int32(0)
+    while (half := n // 2) > 0:
+        acc = acc + half
+        n = half
+    return acc
+
+
+# CHECK: ERROR: walrus_read UNSUP_SYNTAX
+# CHECK: error[UNSUP_SYNTAX]:{{.*}}Reading `half`, which the `while` condition binds with `:=`, inside the loop body is not supported in a compiled function: the condition runs in its own block, so the body never sees the name it binds; bind the name before the loop and update it in the body.
+report(walrus_read, 9)
+
+
+@m.jit
+def walrus_unread(n: m.Int32) -> m.Int32:
+    acc = m.Int32(0)
+    while (half := n // 2) > 0:
+        n = n - 1
+        acc = acc + 1
+    return acc
+
+
+# CHECK-LABEL: func.func @walrus_unread(
+# CHECK:         scf.while
+# EXEC:          WALRUS_UNREAD: 4
+print("WALRUS_UNREAD:", walrus_unread(5))
+
+
+@m.jit
+def walrus_carried(k: m.Int32) -> m.Int32:
+    acc = m.Int32(0)
+    while (k := k - 1) > 0:
+        acc = acc + k
+    return acc
+
+
+# CHECK-LABEL: func.func @walrus_carried(
+# CHECK:         scf.while
+# EXEC:          WALRUS_CARRIED: 10
+print("WALRUS_CARRIED:", walrus_carried(5))
+
 
 # --- Early exits guarded by `try`, comprehension filters --------------------
 # A `raise` that its own `try` catches never leaves the region, so the `if`

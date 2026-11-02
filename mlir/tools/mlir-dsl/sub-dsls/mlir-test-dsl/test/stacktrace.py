@@ -20,6 +20,28 @@ def plain(n: m.Int32) -> m.Int32:
     return n + int(None)
 
 
+@m.jit
+def staged_for(n: m.Int32) -> m.Int32:
+    acc = m.Int32(0)
+    for i in range(n):
+        acc += int(None)
+    return acc
+
+
+@m.jit
+def staged_if(n: m.Int32) -> m.Int32:
+    if n > 1:
+        n = n + int(None)
+    return n
+
+
+@m.jit
+def staged_while(n: m.Int32) -> m.Int32:
+    while n < 10:
+        n = n + int(None)
+    return n
+
+
 def show(label, fn, *args):
     """Call `fn` and print the traceback of the error it raises."""
     try:
@@ -41,13 +63,6 @@ def show(label, fn, *args):
 # CHECK:        TypeError: int() argument must be
 show("PLAIN", plain, 1)
 
-@m.jit
-def staged_for(n: m.Int32) -> m.Int32:
-    acc = m.Int32(0)
-    for i in range(n):
-        acc += int(None)
-    return acc
-
 # CHECK-LABEL:  --- FOR
 # CHECK:          File "{{.*}}stacktrace.py", line {{[0-9]+}}, in show
 # UNFILTERED:     in jit_wrapper
@@ -61,13 +76,7 @@ def staged_for(n: m.Int32) -> m.Int32:
 # CHECK:        TypeError: int() argument must be
 show("FOR", staged_for, 3)
 
-
-@m.jit
-def staged_if(n: m.Int32) -> m.Int32:
-    if n > 1:
-        n = n + int(None)
-    return n
-
+# The region call `if_region_N` sits at the `if` line, like the user's frame
 # there: filtered, the two are one frame.
 # CHECK-LABEL:  --- IF
 # CHECK:          File "{{.*}}stacktrace.py", line [[#IF_LINE:]], in staged_if
@@ -80,3 +89,16 @@ def staged_if(n: m.Int32) -> m.Int32:
 # CHECK-NEXT:       n = n + int(None)
 # CHECK:        TypeError: int() argument must be
 show("IF", staged_if, 3)
+
+# CHECK-LABEL:  --- WHILE
+# CHECK:          File "{{.*}}stacktrace.py", line [[#WHILE_LINE:]], in staged_while
+# CHECK-NEXT:       while n < 10:
+# UNFILTERED:     File "{{.*}}stacktrace.py", line [[#WHILE_LINE]], in while_region_{{[0-9]+}}
+# FILTERED-NOT:   in while_region_
+# FILTERED-NOT:   {{[\\/]}}mlir{{[\\/]}}dsl{{[\\/]}}
+# CHECK:          File "{{.*}}stacktrace.py", line {{[0-9]+}}, in while_after_block_{{[0-9]+}}
+# CHECK-NEXT:       n = n + int(None)
+# CHECK:        TypeError: int() argument must be
+# CHECK:        --- end
+show("WHILE", staged_while, 3)
+print("--- end")
