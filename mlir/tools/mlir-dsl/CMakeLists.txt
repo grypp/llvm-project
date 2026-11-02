@@ -22,6 +22,7 @@ declare_mlir_python_sources(MLIRPythonSources.DSL.Core
     dsl/plugins/__init__.py
     dsl/types/__init__.py
     dsl/types/typing.py
+    dsl/types/vector.py
     dsl/util/__init__.py
     dsl/util/logger.py
     dsl/util/tree_utils.py
@@ -66,6 +67,7 @@ declare_mlir_python_sources(MLIRPythonSources.DSL.typeops
     dsl/plugins/type_ops/arith.py
     dsl/plugins/type_ops/llvm.py
     dsl/plugins/type_ops/upstream_dialects.py
+    dsl/plugins/type_ops/vector.py
 )
 
 declare_mlir_python_sources(MLIRPythonSources.DSL.MlirTestDSL

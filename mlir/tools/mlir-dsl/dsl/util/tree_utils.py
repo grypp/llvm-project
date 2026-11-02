@@ -33,6 +33,7 @@ from ..core.common import DSLRuntimeError, DSLUserCodeError
 from ..core.diagnostics import DiagId
 from ..core.mlir_op import current_emitter
 from ..types.typing import Numeric, Pointer, _lookup_mlir_type
+from ..types.vector import Vector
 
 __all__ = [
     "Leaf",
@@ -964,6 +965,25 @@ _add_entry(
         staged=lambda v: v.is_staged,
         wrap=lambda v: (
             Pointer(v) if current_emitter().pointer_space(v.type) is not None else None
+        ),
+    )
+)
+_add_entry(
+    LeafEntry(
+        Vector,
+        ir_types=lambda p: [current_emitter().vector_type(p[1], p[2])],
+        ir_values=lambda v: [v.ir_value()],
+        from_ir_values=lambda p, vs: Vector.from_ir(vs[0], dtype=p[1]),
+        marshal=None,
+        reference=False,
+        # The dtype is part of the join rule: Vector[Int32] and Vector[Uint32]
+        # share ``vector<N x i32>`` but are different values.
+        prototype=lambda v: (Vector, v.dtype, v.lanes),
+        staged=lambda v: True,
+        wrap=lambda v: (
+            Vector.from_ir(v)
+            if current_emitter().vector_shape(v.type) is not None
+            else None
         ),
     )
 )

@@ -46,3 +46,5 @@ Tuples, lists, frozen dataclasses and `@struct` records flatten at argument and 
 `for_`, `if_`, `while_` and `yield_` construct structured control flow explicitly. Callback executors validate loop carries and branch results.
 
 Typed `Pointer` values support address arithmetic, address spaces, scalar loads and stores through the LLVM memory emitter.
+
+`Vector` supports construction, arithmetic, extraction and reduction. Pointer operations can load and store vectors, including masked accesses.

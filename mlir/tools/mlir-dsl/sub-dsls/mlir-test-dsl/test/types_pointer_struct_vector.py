@@ -71,11 +71,14 @@ def subclassed(p: P[F32]) -> I64:
     s = mp.tospace(3)  # a MyPtr in space 3
     t = s + 2  # the override: 8 bytes on, through inttoptr
     al = mp & 15
+    v = mp.load(count=2)
     print("SUBCLASS:", name(type(q)), name(type(s)), name(type(t)), name(type(al)))
+    print("LOADED:", name(type(v)), name(type(p.load(count=2))))
     return t.toint() - s.toint()
 
 
 # CHECK:       SUBCLASS: MyPtr MyPtr MyPtr MyPtr
+# CHECK-NEXT:  LOADED: MyVec Vector
 # CHECK-LABEL: func.func @subclassed(
 # CHECK-SAME:    %[[P:[^:]+]]: !llvm.ptr) -> i64
 # CHECK:         llvm.getelementptr %[[P]][1] : (!llvm.ptr) -> !llvm.ptr, f32
@@ -84,5 +87,6 @@ def subclassed(p: P[F32]) -> I64:
 # CHECK:         %[[C8:.+]] = arith.constant 8 : i64
 # CHECK:         %[[TI:.+]] = arith.addi %[[SI]], %[[C8]] : i64
 # CHECK:         llvm.inttoptr %[[TI]] : i64 to !llvm.ptr<3>
+# CHECK:         llvm.load %[[P]] <alignment = 4> : !llvm.ptr -> vector<2xf32>
 # EXEC:          RESULT: 8
 print("RESULT:", subclassed(ctypes.addressof(buf)))
