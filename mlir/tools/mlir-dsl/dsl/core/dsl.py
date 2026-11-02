@@ -44,7 +44,7 @@ from .common import (
     active_dsl,
     in_trace,
 )
-from .diagnostics import DiagId, filter_traceback
+from .diagnostics import DiagId, filter_traceback, find_user_source_location
 from .env_manager import EnvironmentVarManager
 from .plugin import DecoratorPlugin, Plugins, _NoRemarkSession
 from .staging import Executor, _is_mlir_op_leaf, is_argument_meta
@@ -342,6 +342,9 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         # environment does not turn the rewrite off.
         self.enable_preprocessor: bool = False
         self.preprocessor: Any = None
+        # The prepared calls (``DeferredDecoratorCall``) of the open top-level trace,
+        # checked when the trace ends; None outside a trace.
+        self._deferred_calls: list[Any] | None = None
 
         # set warning
         if self.envar.warnings_ignore:
@@ -1401,6 +1404,8 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                         entry, result, sig, loc, func=func
                     )
                     entry.generate_return(func_op, ret_values, loc=loc)
+                # A prepared call the body never issued is the user's mistake.
+                self._check_deferred_calls()
                 for plugin in self.plugins.decorators:
                     plugin.after_trace(self, module, function_name)
 
@@ -1850,6 +1855,75 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     # ===------------------------------------------------------------------===
     # Services for the decorators plugins add
     # ===------------------------------------------------------------------===
+
+    def bind_arguments(
+        self,
+        func: Callable[..., Any],
+        name: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        is_host: bool = False,
+        **boundary_options: Any,
+    ) -> tuple[inspect.Signature, tuple[Any, ...], dict[str, Any], JitFuncArgs]:
+        """Bind one call of ``func`` for a plugin's decorator.
+
+        :return: The signature, the canonical positional and keyword-only
+            arguments (defaults applied), and their IR operands, types and
+            attribute dicts from the argument boundary; ``is_host=False`` is the
+            device side (a kernel's arguments are the host trace's values);
+            the ``boundary_options`` are forwarded to the boundary
+        """
+        signature = self._get_signature(func)
+        self.traced_function = func
+        bound = self._get_function_bound_args(signature, name, *args, **kwargs)
+        self._check_arg_count(signature, bound, name)
+        canonical_args, canonical_kwargs = self._canonicalize_args(bound)
+        jit_args = self._generate_jit_func_args(
+            func,
+            name,
+            canonical_args,
+            canonical_kwargs,
+            signature,
+            is_host=is_host,
+            **boundary_options,
+        )
+        if not len(jit_args.values) == len(jit_args.types) == len(jit_args.attributes):
+            raise DSLRuntimeError(
+                "the argument boundary produced mismatched operands, types and attributes",
+                context={
+                    "function": name,
+                    "values": len(jit_args.values),
+                    "types": len(jit_args.types),
+                    "attributes": len(jit_args.attributes),
+                },
+            )
+        return signature, canonical_args, canonical_kwargs, jit_args
+
+    def _register_deferred_call(self, call: Any) -> None:
+        """Remember a prepared call (``DeferredDecoratorCall``) made inside the open
+        trace, with the user's call site for its diagnostic; outside a trace
+        nothing is remembered (issuing it there is ``CALL_OUTSIDE_JIT``)."""
+        if self._deferred_calls is not None:
+            call.creation_loc = find_user_source_location()
+            self._deferred_calls.append(call)
+
+    def _check_deferred_calls(self) -> None:
+        """Report the first prepared call of the open trace that was never
+        issued (``CALL_NEVER_ISSUED``), at the line that prepared it."""
+        for call in self._deferred_calls or ():
+            if not call.issued:
+                filename, lineno, col, end_col = call.creation_loc
+                raise self.user_error(
+                    DiagId.CALL_NEVER_ISSUED,
+                    filename=filename,
+                    lineno=lineno,
+                    col_offset=col,
+                    end_col_offset=end_col,
+                    function_name=call.name,
+                    decorator=f"@{call.plugin.decorator_name}",
+                    issue=call.plugin.issue_example,
+                )
 
     def trace_body(
         self,

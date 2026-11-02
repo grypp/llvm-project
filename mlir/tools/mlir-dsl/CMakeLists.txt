@@ -83,6 +83,14 @@ declare_mlir_python_sources(MLIRPythonSources.DSL.decorators.jit
     dsl/plugins/decorators/jit/func.py
 )
 
+declare_mlir_python_sources(MLIRPythonSources.DSL.decorators.kernels
+  ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
+  ADD_TO_PARENT MLIRPythonSources.DSL.Python
+  SOURCES
+    dsl/plugins/decorators/kernels/__init__.py
+    dsl/plugins/decorators/kernels/gpu_plugin.py
+)
+
 declare_mlir_python_sources(MLIRPythonSources.DSL.typeops
   ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
   ADD_TO_PARENT MLIRPythonSources.DSL.Python

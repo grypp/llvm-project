@@ -469,6 +469,11 @@ class EnvironmentVarManager(LogEnvironmentManager):
     # Governs whether results are cached, not what is compiled.
     no_cache: bool = env_var("NO_CACHE", affects_compile=False, default=False)
     dryrun: bool = env_var("DRYRUN", affects_compile=True, default=False)
+    # Stored under _arch because the public spelling belongs to the arch property;
+    # read_as sends the key through that property.
+    _arch: str | None = env_var(
+        "ARCH", affects_compile=True, default=None, read_as="arch"
+    )
     warnings_ignore: bool = env_var(
         "WARNINGS_IGNORE", affects_compile=False, default=False
     )
@@ -479,6 +484,26 @@ class EnvironmentVarManager(LogEnvironmentManager):
 
     def __init__(self, prefix: str = "DSL") -> None:
         super().__init__(prefix)
+
+    @property
+    def arch(self) -> str | None:
+        """Target architecture from ``{prefix}_ARCH``, or ``None`` when it is unset.
+
+        The core only carries it: a plugin that compiles for a target (the gpu
+        kernels plugin) validates and uses it. There is no detection: ``None``
+        means no target, and a kernel launch reports it naming the variable.
+        """
+        return self._arch
+
+    @arch.setter
+    def arch(self, value: str) -> None:
+        self._arch = value
+
+    @arch.deleter
+    def arch(self) -> None:
+        """Reset to the construction-time state (``{prefix}_ARCH``), so
+        ``mock.patch.object`` teardown restores the default."""
+        self._arch = get_str_env_var(f"{self.prefix}_ARCH")
 
 
 # These variables are read directly in ``__init__``, so their suffixes are not
