@@ -362,6 +362,15 @@ class DiagId(DiagCatalog, enum.Enum):
             "DSL values is not supported.",
         ),
     )
+    CONTAINER_INVALID_RECORD = (
+        "`{var}` is a `{type}` that compiled code cannot carry: {detail}.",
+        (
+            "A record carried through compiled code is a frozen dataclass or "
+            "`@struct` whose fields all have values: declare it "
+            "`@dataclass(frozen=True)`, assign every field (an `init=False` one in "
+            "`__post_init__`), and keep DSL values in fields, not in other attributes.",
+        ),
+    )
     CONTAINER_TOO_DEEP = (
         "`{var}` is nested deeper than Python's recursion limit allows (or it "
         "contains itself), so it cannot be flattened.",
@@ -387,6 +396,18 @@ class DiagId(DiagCatalog, enum.Enum):
         (
             "Pass an `int`, a `float`, or a DSL numeric such as `Int32(...)` for "
             "`{arg_name}`.",
+        ),
+    )
+    ARG_UNSUPPORTED_TYPE = (
+        "Argument #{num} `{arg_name}` of `{function_name}` has type `{arg_type}`, "
+        "which cannot be passed into compiled code{detail}.",
+        (
+            "Pass a DSL numeric such as `Int32`, a pointer, a host buffer one of the "
+            "DSL's adapter plugins accepts (a numpy array or a torch tensor with the "
+            "dlpack plugin), or a "
+            "tuple or frozen record of them for `{arg_name}`.",
+            "To pass a custom class, register an adapter for it with "
+            "`@register_jit_arg_adapter(YourClass)`.",
         ),
     )
 
@@ -425,6 +446,27 @@ class DiagId(DiagCatalog, enum.Enum):
     CONFIG_INVALID = (
         "`{var}` has an invalid setting: {detail}.",
         ("Set `{var}` to a supported value, or leave it unset for the default.",),
+    )
+
+    # --- STRUCT ---
+    STRUCT_DEFINITION = (
+        "`{name}` is not a valid `@struct`: {detail}.",
+        (
+            "Declare at least one field annotated with a DSL type such as `Int32` or "
+            "`Float32`, a `Pointer[T]` or another `@struct` class; keep compile-time "
+            "settings as plain class attributes.",
+        ),
+    )
+    STRUCT_CONSTRUCTION = (
+        "`{name}(...)` cannot be built: {detail}.",
+        (
+            "Construct a `@struct` by field, e.g. `Vec2(x=Float32(1.0), "
+            "y=Float32(2.0))`, one DSL value per field.",
+        ),
+    )
+    STRUCT_FIELD_ASSIGNMENT = (
+        "`{name}.{field}` cannot be assigned: a `@struct` instance is immutable.",
+        ("Create an updated copy instead: `v = v.replace({field}=...)`.",),
     )
 
 

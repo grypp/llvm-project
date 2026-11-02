@@ -11,13 +11,64 @@ The decorator, the call pipeline and the inline launch are
 
 from __future__ import annotations
 
+import ctypes
 from typing import Any
 
 from ..... import ir
 from .....dialects import func, llvm
+from ....core.common import DSLUserCodeError
+from ....core.diagnostics import DiagId
 from ....core.plugin import DecoratorPlugin
+from ....types import typing as _t
 
 __all__ = ["Jit"]
+
+
+def _float_from_bits(bits: int, exponent_width: int, mantissa_width: int) -> float:
+    """Decode an IEEE-style binary float held as an integer bit pattern."""
+    sign = -1.0 if bits >> (exponent_width + mantissa_width) & 1 else 1.0
+    exponent = (bits >> mantissa_width) & ((1 << exponent_width) - 1)
+    mantissa = bits & ((1 << mantissa_width) - 1)
+    bias = (1 << (exponent_width - 1)) - 1
+    if exponent == (1 << exponent_width) - 1:
+        return sign * (float("nan") if mantissa else float("inf"))
+    if exponent == 0:
+        return sign * mantissa * 2.0 ** (1 - bias - mantissa_width)
+    return sign * (1.0 + mantissa / (1 << mantissa_width)) * 2.0 ** (exponent - bias)
+
+
+def _result_ctype(prototypes: list[Any]) -> type:
+    """The ``ctypes`` type of the result slot for the given result dtypes."""
+    ctypes_types: list[type] = []
+    for prototype in prototypes:
+        if prototype.ctype is None:
+            raise DSLUserCodeError(
+                DiagId.TYPE_RETURN_MISMATCH,
+                got=f"a `{prototype.__name__}`",
+                detail=" (that type has no host representation)",
+            )
+        ctypes_types.append(prototype.ctype)
+    if len(ctypes_types) == 1:
+        return ctypes_types[0]
+    return type(
+        "_Result",
+        (ctypes.Structure,),
+        {"_fields_": [(f"f{i}", ct) for i, ct in enumerate(ctypes_types)]},
+    )
+
+
+def _scalar_from_ctypes(dtype: Any, raw: Any) -> Any:
+    """Convert the ctypes field of a result into ``dtype``."""
+    value = getattr(raw, "value", raw)
+    if (
+        isinstance(dtype, _t.FloatMeta)
+        and dtype.ctype is not None
+        and not issubclass(dtype.ctype, (ctypes.c_float, ctypes.c_double))
+    ):
+        value = _float_from_bits(
+            int(value), dtype._exponent_width, dtype._mantissa_width
+        )
+    return dtype(value)
 
 
 class Jit(DecoratorPlugin):
@@ -51,7 +102,7 @@ class Jit(DecoratorPlugin):
     ) -> tuple[list[Any], Any]:
         if not values:
             return [], None
-        slot = None
+        slot = _result_ctype(prototypes)
         if len(values) == 1:
             return [values[0]], slot
         struct_type = llvm.StructType.get_literal([v.type for v in values])
@@ -59,3 +110,11 @@ class Jit(DecoratorPlugin):
         for i, value in enumerate(values):
             packed = llvm.insertvalue(packed, value, [i], loc=loc)
         return [packed], slot
+
+    def unpack_result(self, slot: Any, raw: Any, prototypes: list[Any]) -> list[Any]:
+        raws = (
+            [raw]
+            if len(prototypes) == 1
+            else [getattr(raw, f"f{i}") for i in range(len(prototypes))]
+        )
+        return [_scalar_from_ctypes(p, r) for p, r in zip(prototypes, raws)]

@@ -20,10 +20,12 @@ so both can be passed to a ``@jit`` function.
 import builtins
 import ctypes
 import functools
+import dataclasses
 import math
 import operator
 import struct as _pystruct
 from abc import abstractmethod
+from collections.abc import Iterator
 from typing import (
     Any,
     Callable,
@@ -32,6 +34,8 @@ from typing import (
     Type,
     Union,
     cast as tcast,
+    get_origin,
+    get_type_hints,
 )
 
 from ... import ir
@@ -44,6 +48,37 @@ from ..core.common import (
 )
 from ..core.diagnostics import DiagId, WarnId
 from ..core.mlir_op import current_emitter as _emitter
+
+
+# =============================================================================
+# Host marshalling helpers
+# =============================================================================
+
+
+def _make_owning_c_pointer(c_value: Any) -> ctypes.c_void_p:
+    """Return a pointer that keeps its backing ctypes value alive.
+
+    ``ctypes.cast(ctypes.pointer(c_value), ctypes.c_void_p)`` makes the
+    intermediate pointer reference itself through its ``_objects`` dictionary,
+    and those cycles accumulate when cyclic garbage collection is disabled. A
+    direct address creates no cycle; the private keep-alive attribute preserves
+    the backing value for the lifetime of the returned pointer.
+    """
+    c_pointer = ctypes.c_void_p(ctypes.addressof(c_value))
+    c_pointer._keepalive = c_value  # type: ignore[attr-defined]
+    return c_pointer
+
+
+def _in_trace() -> bool:
+    """True when an MLIR context and an insertion point are active."""
+    if ir.Context.current is None:
+        return False
+    try:
+        ir.InsertionPoint.current
+    except ValueError:
+        return False
+    return True
+
 
 # =============================================================================
 # Metaclasses and the dtype registry
@@ -910,6 +945,47 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         result = _emitter().bitcast(ir_val, dtype.mlir_type, loc=loc, ip=ip)
         return dtype(result)
 
+    # -- Host marshalling ---------------------------------------------------
+
+    @classmethod
+    def _to_ctype(cls, value: Union[bool, int, float]) -> Any:
+        """Return the ctypes object holding ``value`` in this dtype's C form."""
+        return cls.ctype(value)  # type: ignore[misc]
+
+    @classmethod
+    def marshal(
+        cls,
+        value: Union[bool, int, float, "Numeric"],
+        *,
+        arg_name: Optional[str] = None,
+    ) -> ctypes.c_void_p:
+        """Return an owning pointer to the C representation of ``value``.
+
+        Only the dtypes with a ctypes representative (``ctype``) can be passed
+        to a compiled function; every other dtype is staged-only.
+
+        :param value: A Python scalar or a ``Numeric`` holding one
+        :param arg_name: Name of the argument, for the diagnostic; by default the
+            argument the adapter registry is currently marshalling
+        :return: A ``c_void_p`` at the value, which it keeps alive
+        """
+        if isinstance(value, Numeric):
+            value = value.value
+        if cls.ctype is None or not isinstance(value, (bool, int, float)):
+            from ..core.arguments import JitArgAdapterRegistry
+
+            if arg_name is None:
+                arg_name = JitArgAdapterRegistry.active_argument()[0]
+            raise DSLUserCodeError(
+                DiagId.ARG_UNSUPPORTED_TYPE,
+                num=JitArgAdapterRegistry.active_argument()[1] + 1,
+                arg_name=arg_name,
+                function_name="the compiled function",
+                arg_type=cls.__name__,
+                detail=": this dtype has no host representation",
+            )
+        return _make_owning_c_pointer(cls._to_ctype(value))
+
     def __bool__(self) -> bool:
         if isinstance(self.value, (int, float, bool)):
             return bool(self.value)
@@ -1605,6 +1681,11 @@ class Float(Numeric, metaclass=FloatMeta, mlir_type=T.f32, is_abstract=True):
                 arg_type=type(x).__name__,
             )
 
+    @classmethod
+    def _to_ctype(cls, value: Union[bool, int, float]) -> Any:
+        """Return ``value`` in this dtype's C float type."""
+        return cls.ctype(float(value))  # type: ignore[misc]
+
 
 class Boolean(Integer, metaclass=IntegerMeta, width=1, signed=True, mlir_type=T.bool):
     """Boolean type representation in the DSL.
@@ -2081,6 +2162,295 @@ def min_(*args: Any, loc: Any = None, ip: Any = None) -> Any:
     return _minmax(True, *args, loc=loc, ip=ip)
 
 
+# =============================================================================
+# Structs
+# =============================================================================
+
+
+class Struct:
+    """Marker base class of every ``@struct`` class.
+
+    A ``@struct`` is a frozen record of DSL-typed fields and a pytree, not an
+    SSA aggregate: wherever a value crosses a boundary (a ``@jit`` argument or
+    result, a loop carry) it flattens to its fields, so it needs no dialect
+    type and works under every emitter. A field read is the field's own
+    value; ``replace(**fields)`` returns an updated copy; ``a, b = s`` unpacks
+    the fields in declaration order. Instances are immutable
+    (``STRUCT_FIELD_ASSIGNMENT``).
+    """
+
+    _field_names: ClassVar[list] = []
+    _field_annotations: ClassVar[dict] = {}
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise DSLUserCodeError(
+            DiagId.STRUCT_FIELD_ASSIGNMENT, name=type(self).__name__, field=name
+        )
+
+    def __delattr__(self, name: str) -> None:
+        raise DSLUserCodeError(
+            DiagId.STRUCT_FIELD_ASSIGNMENT, name=type(self).__name__, field=name
+        )
+
+    @classmethod
+    def _build(cls, values: dict) -> "Struct":
+        obj = object.__new__(cls)
+        for name, value in values.items():
+            object.__setattr__(obj, name, value)
+        return obj
+
+    def __iter__(self) -> Iterator[Any]:
+        """Yield each field as its DSL-typed value, so ``a, b = my_struct`` works."""
+        for name in type(self)._field_names:
+            yield getattr(self, name)
+
+    def replace(
+        self,
+        *args: Any,
+        loc: Optional[ir.Location] = None,
+        ip: Optional[ir.InsertionPoint] = None,
+        **fields: Any,
+    ) -> "Struct":
+        """Return a copy with the given fields replaced; ``self`` is unchanged."""
+        cls = type(self)
+        if args:
+            raise DSLUserCodeError(
+                DiagId.STRUCT_CONSTRUCTION,
+                name=f"{cls.__name__}.replace",
+                detail=f"it takes keyword arguments naming its fields, but got {len(args)} positional argument(s)",
+            )
+        extra = set(fields) - set(cls._field_names)
+        if extra:
+            raise DSLUserCodeError(
+                DiagId.STRUCT_CONSTRUCTION,
+                name=cls.__name__,
+                detail=f"unexpected keyword argument(s) {sorted(extra)}; the fields are {cls._field_names}",
+            )
+        values = {name: getattr(self, name) for name in cls._field_names}
+        for fname, v in fields.items():
+            values[fname] = _coerce_field_value(
+                cls._field_annotations[fname],
+                v,
+                fname,
+                position=cls._field_names.index(fname) + 1,
+                struct_name=cls.__name__,
+                loc=loc,
+                ip=ip,
+            )
+        return cls._build(values)
+
+
+def _is_struct_class(ann: Any) -> bool:
+    return isinstance(ann, type) and issubclass(ann, Struct) and ann is not Struct
+
+
+def _is_field_annotation(ann: Any) -> bool:
+    """True if ``ann`` can type a struct field: a numeric dtype, a
+    ``Pointer[T]`` annotation or another struct class."""
+    return isinstance(ann, NumericMeta) or _is_struct_class(ann)
+
+
+def _field_mismatch(
+    position: int, field: str, ann: Any, value: Any
+) -> DSLUserCodeError:
+    expected = getattr(ann, "__name__", None) or repr(ann)
+    return DSLUserCodeError(
+        DiagId.ARG_ANNOTATION_MISMATCH,
+        num=position,
+        arg_name=field,
+        expected=f"a `{expected}`",
+        got=type(value).__name__,
+    )
+
+
+def _coerce_field_value(
+    ann: Any,
+    value: Any,
+    name: str,
+    *,
+    position: int = 1,
+    struct_name: str = "",
+    loc: Optional[ir.Location] = None,
+    ip: Optional[ir.InsertionPoint] = None,
+) -> Any:
+    """Coerce ``value`` for struct field ``name`` into the field's DSL type.
+
+    A missing value (``None``) is the zero of the field's type. A literal or a
+    numeric of another dtype goes through the field's dtype (``Int32(10)``); a
+    ``Pointer`` field takes a ``Pointer``, a nested struct field an instance
+    of that struct class.
+    """
+    if isinstance(value, (tuple, list)):
+        raise DSLUserCodeError(
+            DiagId.STRUCT_CONSTRUCTION,
+            name=struct_name,
+            detail=f"field `{name}` must hold exactly one runtime value, but the value given holds {len(value)}",
+        )
+    if isinstance(ann, NumericMeta):
+        if value is None:
+            return ann(ann.zero)
+        return ann(value, loc=loc, ip=ip)
+    if _is_struct_class(ann):
+        if value is None:
+            return ann()
+        if isinstance(value, ann):
+            return value
+        raise _field_mismatch(position, name, ann, value)
+    raise DSLUserCodeError(
+        DiagId.STRUCT_DEFINITION,
+        name=struct_name,
+        detail=f"field `{name}` is annotated `{ann!r}`, which is not a DSL type, a `Pointer[T]` or a `@struct` class",
+    )
+
+
+def struct(cls: Optional[type] = None) -> Any:
+    """Decorator making a class of DSL-typed fields a ``@struct`` record.
+
+    The decorated class must annotate every field with a DSL type (``Int32``,
+    ``Pointer[T]``, another struct class); a Python type is
+    ``STRUCT_DEFINITION``. The result is a frozen dataclass deriving from
+    :class:`Struct`: ``__init__(**fields, loc=None, ip=None)`` coerces each
+    value into its field's type and fills missing fields with zero, fields
+    are read as attributes, ``replace`` copies with changes, and the record
+    flattens to its fields at every boundary (no aggregate SSA value). Outside
+    a trace an instance holds host values and can be passed to a ``@jit``
+    function annotated with the struct class.
+
+    Example::
+
+        @struct
+        class Vec2:
+            x: Int32
+            y: Int32
+
+        v = Vec2(x=x_val, y=y_val)
+        x_val = v.x            # Int32
+        w = v.replace(x=new_x)
+        a, b = w
+    """
+
+    def decorate(cls: type) -> type:
+        # A struct class deriving from a struct class inherits its fields; the
+        # marker base's own class-level annotations are not fields.
+        hints = {
+            n: a
+            for n, a in get_type_hints(cls).items()
+            if n not in Struct.__annotations__ and get_origin(a) is not ClassVar
+        }
+        if not hints:
+            raise DSLUserCodeError(
+                DiagId.STRUCT_DEFINITION,
+                name=cls.__name__,
+                detail="it declares no type-annotated field",
+            )
+        field_names: list = []
+        field_annotations: dict = {}
+        for name, ann in hints.items():
+            if not _is_field_annotation(ann):
+                raise DSLUserCodeError(
+                    DiagId.STRUCT_DEFINITION,
+                    name=cls.__name__,
+                    detail=f"field `{name}` is annotated `{ann!r}`, which is not a DSL type, a `Pointer[T]` or a `@struct` class",
+                )
+            field_names.append(name)
+            field_annotations[name] = ann
+        cls_name = cls.__name__
+
+        def __init__(
+            self: Any,
+            *args: Any,
+            loc: Optional[ir.Location] = None,
+            ip: Optional[ir.InsertionPoint] = None,
+            **kwargs: Any,
+        ) -> None:
+            if args:
+                raise DSLUserCodeError(
+                    DiagId.STRUCT_CONSTRUCTION,
+                    name=cls_name,
+                    detail=f"it takes keyword arguments naming its fields, but got {len(args)} positional argument(s)",
+                )
+            extra = set(kwargs) - set(field_names)
+            if extra:
+                raise DSLUserCodeError(
+                    DiagId.STRUCT_CONSTRUCTION,
+                    name=cls_name,
+                    detail=f"unexpected keyword argument(s) {sorted(extra)}; the fields are {field_names}",
+                )
+            for i, name in enumerate(field_names):
+                object.__setattr__(
+                    self,
+                    name,
+                    _coerce_field_value(
+                        field_annotations[name],
+                        kwargs.get(name),
+                        name,
+                        position=i + 1,
+                        struct_name=cls_name,
+                        loc=loc,
+                        ip=ip,
+                    ),
+                )
+
+        attrs: dict = {
+            "_field_names": field_names,
+            "_field_annotations": field_annotations,
+            "__init__": __init__,
+            "__annotations__": dict(hints),
+        }
+        # Preserve existing methods and attributes that don't conflict
+        for key, value in cls.__dict__.items():
+            if key not in attrs and not key.startswith("__"):
+                attrs[key] = value
+        bases = tuple(b for b in cls.__bases__ if b is not object)
+        if not issubclass(cls, Struct):
+            bases = bases + (Struct,)
+        new_cls = type(cls.__name__, bases, attrs)
+        new_cls.__module__ = cls.__module__
+        new_cls.__qualname__ = cls.__qualname__
+        if cls.__doc__ is not None:
+            new_cls.__doc__ = cls.__doc__
+        # A frozen dataclass: the pytree machinery flattens it to its fields
+        # and rebuilds it field by field. ``eq=False`` keeps identity equality
+        # (a field-wise ``==`` on staged values would be a staged Boolean).
+        new_cls = dataclasses.dataclass(frozen=True, init=False, eq=False)(new_cls)
+        # The dataclass installed its own frozen setters; the DSL's diagnostic wins.
+        new_cls.__setattr__ = Struct.__setattr__  # type: ignore[method-assign]
+        new_cls.__delattr__ = Struct.__delattr__  # type: ignore[method-assign]
+        return new_cls
+
+    if cls is None:
+        return decorate
+    return decorate(cls)
+
+
+def make_struct(name: str, **fields: Any) -> type:
+    """Create a struct class dynamically from field name/type pairs.
+
+    Unlike the ``@struct`` decorator which requires a class definition with
+    static type annotations, this factory builds a struct class at runtime,
+    for a record whose fields are determined dynamically. The returned class
+    behaves identically to a ``@struct``-decorated class.
+
+    Example::
+
+        Span = make_struct("Span", lo=Int32, hi=Int32)
+        s = Span(lo=1, hi=2)
+        lo, hi = s
+
+    :param name: Name for the generated class.
+    :param fields: Field names mapped to DSL types (e.g. ``d0=Int32``); order is preserved.
+    :return: A ``@struct`` class with the given fields.
+    """
+    if not fields:
+        raise DSLUserCodeError(
+            DiagId.STRUCT_DEFINITION,
+            name=name,
+            detail="it declares no type-annotated field",
+        )
+    cls = type(name, (), {"__annotations__": dict(fields)})
+    return struct(cls)
+
+
 __all__ = [
     "DslType",
     "Numeric",
@@ -2124,4 +2494,7 @@ __all__ = [
     "from_numpy_dtype",
     "as_numeric",
     "cast",
+    "Struct",
+    "struct",
+    "make_struct",
 ]

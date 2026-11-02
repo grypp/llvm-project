@@ -26,11 +26,13 @@ from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import wraps
-from typing import Annotated, Any, ClassVar, get_args, get_origin
+from types import UnionType
+from typing import Annotated, Any, ClassVar, Union, get_args, get_origin
 
 from ... import ir
 from ..types import typing as t
 from ..util import tree_utils
+from .arguments import JitArgAdapterRegistry
 from .common import (
     DSLBaseError,
     DSLRuntimeError,
@@ -211,6 +213,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     _abstract_dsl_base: ClassVar[bool] = True
 
     _env_class: type[EnvironmentVarManager] = EnvironmentVarManager
+    _jit_arg_adapter_scope: ClassVar[str | None] = None
     # Optional compiler-recognized component inserted by a DSL's name mangler.
     _name_mangling_prefix: ClassVar[str] = ""
     #: What the DSL is made of: one plugin per role (``type_ops``,
@@ -573,7 +576,10 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
     def _is_meta_argument(self, arg: Any, spec_ty: Any) -> bool:
         """True if the boundary will treat ``arg`` as a compile-time value: no
-        DSL annotation, no leaf inside it and no registered adapter for it."""
+        DSL annotation, no leaf inside it and no registered adapter for it;
+        what remains is judged by :meth:`_is_meta_at_boundary`, the same
+        policy the boundary applies, seen before adaptation (the name
+        mangling and ``compile()``'s Meta values read it)."""
         if isinstance(arg, (ir.Type, ir.Value)) or isinstance(
             spec_ty, (ir.Type, ir.Value)
         ):
@@ -581,7 +587,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         annotation = spec_ty
         if get_origin(annotation) is Annotated:
             annotation = get_args(annotation)[0]
-        if isinstance(annotation, (t.NumericMeta)):
+        if isinstance(annotation, t.NumericMeta):
             return False
         if (
             isinstance(annotation, type)
@@ -596,25 +602,27 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             return all(
                 self._is_meta_argument(elem, inspect.Parameter.empty) for elem in arg
             )
-        return True
+        with JitArgAdapterRegistry.using_scope(self._jit_arg_adapter_scope):
+            if JitArgAdapterRegistry.get_registered_adapter(arg) is not None:
+                return False
+        # The position is unknown here, so the receiver rule does not apply.
+        return self._is_meta_at_boundary(arg, spec_ty, "", -1, self.traced_function)
 
     def mangle_name(
         self, function_name: str, args: tuple[Any, ...], sig: inspect.Signature
     ) -> str:
-        """Does simple name mangling: the Meta arguments are folded into the
-        symbol, so every specialisation of a function gets its own name."""
+        """Does simple name mangling: the arguments :meth:`_mangle_folds`
+        selects (the Meta arguments by default) are folded into the symbol as
+        :meth:`_mangle_render` spells them, so every specialisation of a
+        function gets its own name."""
 
         # sig.parameters maybe longer than args, but since canonicalized_args
         # only contains positional arguments, we can rely on zip to truncate
         for param, arg in zip(sig.parameters.values(), args):
-            if not self._is_meta_argument(arg, param.annotation):
+            if not self._mangle_folds(arg, param.annotation):
                 continue
-            if isinstance(arg, type):
-                function_name = f"{function_name}_{arg.__name__}"
-            elif isinstance(arg, (list, tuple)):
-                function_name = f"{function_name}_{'_'.join(map(str, arg))}"
-            else:
-                function_name = f"{function_name}_{arg}"
+            rendered = self._mangle_render(arg, param.annotation)
+            function_name = f"{function_name}_{rendered}"
         function_name = function_name.translate(_MANGLE_TRANSLATION_TABLE)
         # Identify addresses and drop them. Match upper-case hex too: Windows
         # (MSVC %p) id() reprs are upper-case zero-padded.
@@ -678,49 +686,17 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             arg_spec = parameter.annotation
 
             # A Python value is handed to the body as is; ``traced_function``
-            # supplies the owning-function context ``is_argument_meta`` uses to
+            # supplies the owning-function context the meta test uses to
             # detect reserved ``self``/``cls`` parameters.
-            if is_argument_meta(arg, arg_spec, arg_name, idx, self.traced_function):
-                ir_arg: Any = arg
-            else:
-                if True:
-                    base_spec = (
-                        get_args(arg_spec)[0]
-                        if get_origin(arg_spec) is Annotated
-                        else arg_spec
-                    )
-                    if isinstance(base_spec, t.NumericMeta) and not isinstance(
-                        arg, base_spec
-                    ):
-                        # Numeric type coercion for a staged argument: the block arg
-                        # already has the target MLIR type. Wrap it directly
-                        # instead of casting the caller's value, which would
-                        # emit casts referencing SSA values from an outer region.
-                        # An abstract annotation (``Numeric``) is no type to wrap
-                        # in: the block argument's type, fixed at the boundary,
-                        # names the dtype (a kernel is traced with the raw call
-                        # arguments, so the Python number is still here).
-                        block_arg = fop_args[iv_block_args]
-                        dtype = (
-                            t.Numeric.from_mlir_type(block_arg.type)
-                            if base_spec.is_abstract
-                            else base_spec
-                        )
-                        ir_arg = dtype(block_arg)
-                        iv_block_args += 1
-                    else:
-                        _, _, treedef = tree_utils.tree_flatten(
-                            arg, return_ir_values=False
-                        )
-                        n_args = sum(
-                            len(tree_utils.leaf_ir_types(leaf))
-                            for _, leaf in tree_utils.tree_leaves(treedef)
-                        )
-                        blk_args = fop_args[iv_block_args : iv_block_args + n_args]
-                        ir_arg = self._restore_from_block_args(treedef, blk_args)
-                        iv_block_args += n_args
-
-            return ir_arg, iv_block_args
+            if self._is_meta_at_boundary(
+                arg, arg_spec, arg_name, idx, self.traced_function
+            ):
+                return arg, iv_block_args
+            with JitArgAdapterRegistry.using_scope(self._jit_arg_adapter_scope):
+                ir_arg, consumed = self._restore_argument(
+                    arg, arg_spec, fop_args, iv_block_args
+                )
+            return ir_arg, iv_block_args + consumed
 
         block = fop if isinstance(fop, ir.Block) else fop.regions[0].blocks[0]
         fop_args = list(block.arguments)
@@ -743,6 +719,79 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     # Host argument boundary
     # ===------------------------------------------------------------------===
 
+    @staticmethod
+    def _extract_annotation_markers(spec_ty: Any, arg: Any) -> list[Any]:
+        """Extract ``Annotated[...]`` markers from an annotation matching ``arg``.
+
+        Returns the marker list from the first annotation shape that matches
+        the runtime value; an empty list when none applies. Handled shapes:
+        ``Annotated[T, marker]``, each member of a ``Union``/``T | ...``, and
+        ``list[Annotated[T, marker]]``/``tuple[Annotated[T, marker], ...]``
+        (one container layer is peeled so per-element markers survive).
+        """
+        candidate_sub_types = (
+            get_args(spec_ty)
+            if get_origin(spec_ty) is Union or isinstance(spec_ty, UnionType)
+            else (spec_ty,)
+        )
+        for sub_ty in candidate_sub_types:
+            ty, *markers = (
+                get_args(sub_ty) if get_origin(sub_ty) is Annotated else (sub_ty,)
+            )
+            if markers and isinstance(ty, type) and isinstance(arg, ty):
+                return markers
+            # A ``Pointer[T]`` annotation: the value is adapted (and checked)
+            # after the markers are read, so any value matches here.
+            if markers and isinstance(ty, t.TypedPointer):
+                return markers
+
+            container_origin = get_origin(sub_ty)
+            if (
+                container_origin in (list, tuple)
+                and isinstance(arg, (list, tuple))
+                and arg
+            ):
+                container_args = get_args(sub_ty)
+                if container_args and get_origin(container_args[0]) is Annotated:
+                    inner_ty, *inner_markers = get_args(container_args[0])
+                    if (
+                        inner_markers
+                        and isinstance(inner_ty, type)
+                        and all(isinstance(e, inner_ty) for e in arg)
+                    ):
+                        return inner_markers
+        return []
+
+    @staticmethod
+    def _marker_attributes(marker: Any) -> list[ir.DictAttr]:
+        """The argument attribute dicts an ``Annotated`` marker contributes."""
+        extract = getattr(marker, "__extract_mlir_attributes__", None)
+        return list(extract()) if extract is not None else []
+
+    def _check_unsupported_jit_arg(
+        self,
+        *,
+        arg: Any,
+        arg_name: str,
+        arg_index: int,
+        function_name: str,
+        is_host: bool,
+        jit_arg_type: list[Any],
+        jit_exec_arg: list[Any],
+    ) -> None:
+        """Raise when an argument produced no usable JIT signature: neither a
+        known type nor an adapter yielded MLIR types and execution values."""
+        if jit_arg_type and (jit_exec_arg or not is_host):
+            return
+
+        raise DSLUserCodeError(
+            DiagId.ARG_UNSUPPORTED_TYPE,
+            num=arg_index + 1,
+            arg_name=arg_name,
+            arg_type=type(arg).__name__,
+            function_name=function_name,
+        )
+
     def _flatten_jit_arg(
         self,
         arg: Any,
@@ -755,21 +804,56 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         """Flatten one runtime argument into its execution values, SSA types
         and per-value attribute dicts.
 
-        On the host side the leaves are marshalled into owning ``c_void_p``
-        slots; at the kernel launch boundary they are already staged and their
-        ``ir.Value`` s become the launch operands.
+        On the host side (``is_host``) the leaves are marshalled into owning
+        ``c_void_p`` slots; at the kernel launch boundary they are already
+        staged and their ``ir.Value`` s become the launch operands. The
+        default knows the registered leaves and the containers of them; this
+        is the override point for the values a DSL stages itself (a class of
+        its own speaking a protocol, a whole object the DSL hands over as one
+        execution value), paired with :meth:`_restore_argument`, which
+        rebuilds them from the entry's block arguments, and
+        :meth:`_is_meta_at_boundary`, which makes them runtime values.
         """
         values, attrs, treedef = tree_utils.tree_flatten(
             arg, return_ir_values=not is_host, root=arg_name
         )
+        if not is_host:
+            return list(values), [v.type for v in values], list(attrs)
 
         exec_args: list[Any] = []
         arg_types: list[Any] = []
+        arg_attrs: list[Any] = []
+        leaf_values = iter(values)
         for _, leaf in tree_utils.tree_leaves(treedef):
             if leaf.is_none or leaf.is_meta:
                 continue
-            arg_types.extend(tree_utils.leaf_ir_types(leaf))
-        return exec_args, arg_types, [ir.DictAttr.get({})] * len(arg_types)
+            value = next(leaf_values)
+            entry = tree_utils.leaf_entry(type(value))
+            if tree_utils.is_staged_leaf(value):
+                raise DSLUserCodeError(
+                    DiagId.ARG_UNSUPPORTED_TYPE,
+                    num=arg_index + 1,
+                    arg_name=arg_name,
+                    arg_type=type(value).__name__,
+                    function_name=function_name,
+                )
+            if entry is None or entry.marshal is None:
+                raise DSLUserCodeError(
+                    DiagId.ARG_UNSUPPORTED_TYPE,
+                    num=arg_index + 1,
+                    arg_name=arg_name,
+                    function_name=function_name,
+                    arg_type=type(value).__name__,
+                    detail=": the DSL knows the type, but it has no host representation",
+                )
+            with JitArgAdapterRegistry.using_argument(arg_name, arg_index):
+                exec_args.extend(entry.marshal(value))
+            # One attribute dict per SSA value of the leaf, from the leaf's
+            # ``attributes`` hook when it has one.
+            leaf_types = tree_utils.leaf_ir_types(leaf)
+            arg_types.extend(leaf_types)
+            arg_attrs.extend(tree_utils.leaf_attributes(entry, value, len(leaf_types)))
+        return exec_args, arg_types, arg_attrs
 
     def _generate_jit_func_args(
         self,
@@ -790,6 +874,13 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             else:
                 positional_names.append(name)
 
+        if len(args) != len(positional_names) or len(kwonlyargs) != len(kwonly_names):
+            raise DSLRuntimeError(
+                f"Input args {len(args)=} and kwonlyargs {len(kwonlyargs)=} must match "
+                f"positional params {len(positional_names)=} and keyword-only params "
+                f"{len(kwonly_names)=}"
+            )
+
         jit_arg_types: list[Any] = []
         jit_arg_attrs: list[Any] = []
         jit_exec_args: list[Any] = []
@@ -799,6 +890,9 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         jit_adapted_args: list[Any] = [None] * len(input_args)
         for i, (arg_name, arg) in enumerate(zip(input_arg_names, input_args)):
             spec_ty = sig.parameters[arg_name].annotation
+
+            # Retrieve markers from the annotated type that matches the arg
+            annotation_markers = self._extract_annotation_markers(spec_ty, arg)
 
             cast_ty = (
                 get_args(spec_ty)[0] if get_origin(spec_ty) is Annotated else spec_ty
@@ -820,13 +914,23 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
             # Adapt the argument before the Meta test, so the test sees the
             # adapted value. Keep the scope active through nested adaptations.
-            if True:
+            with JitArgAdapterRegistry.using_scope(self._jit_arg_adapter_scope):
+                adapted = None
+                if not isinstance(arg, ir.Value):
+                    adapter = JitArgAdapterRegistry.get_registered_adapter(arg)
+                    if adapter is not None:
+                        with JitArgAdapterRegistry.using_argument(arg_name, i):
+                            adapted = adapter(arg)
+                if adapted is not None:
+                    arg = adapted
+                    jit_adapted_args[i] = arg
+
                 # A Python value (``None`` triple) is specialised on by the
                 # trace; an MLIR op gets its types, attributes and values.
                 jit_exec_arg: list[Any] | None = []
                 jit_arg_type: list[Any] | None = []
                 jit_arg_attr: list[Any] | None = []
-                if is_argument_meta(arg, spec_ty, arg_name, i, func):
+                if self._is_meta_at_boundary(arg, spec_ty, arg_name, i, func):
                     jit_exec_arg = jit_arg_type = jit_arg_attr = None
 
                 if jit_arg_type is not None and len(jit_arg_type) == 0:
@@ -837,7 +941,32 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                     jit_arg_type.extend(arg_types)
                     jit_arg_attr.extend(arg_attrs)  # type: ignore[union-attr]
 
+                    self._check_unsupported_jit_arg(
+                        arg=arg,
+                        arg_name=arg_name,
+                        arg_index=i,
+                        function_name=function_name,
+                        is_host=is_host,
+                        jit_arg_type=jit_arg_type,
+                        jit_exec_arg=jit_exec_arg,  # type: ignore[arg-type]
+                    )
+
             if jit_arg_type is not None:
+                # Merge attributes from annotated markers (`__extract_mlir_attributes__`)
+                # into every element of jit_arg_attr for this argument.
+                if annotation_markers and jit_arg_attr:
+                    extra = {
+                        na.name: na.attr
+                        for marker in annotation_markers
+                        for attr_dict in self._marker_attributes(marker)
+                        for na in attr_dict
+                    }
+                    if extra:
+                        jit_arg_attr = [
+                            ir.DictAttr.get({na.name: na.attr for na in d} | extra)
+                            for d in jit_arg_attr
+                        ]
+
                 jit_exec_args.extend(jit_exec_arg)  # type: ignore[arg-type]
                 jit_arg_types.extend(jit_arg_type)
                 jit_arg_attrs.extend(jit_arg_attr)  # type: ignore[arg-type]
@@ -860,6 +989,12 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         result = self._generate_jit_func_args(
             func, function_name, args, kwonlyargs, sig, is_host=True
         )
+
+        if len(result.values) != len(result.types):
+            raise DSLRuntimeError(
+                "expects the same number of arguments and function parameters",
+                context={"values": len(result.values), "types": len(result.types)},
+            )
 
         return result
 
@@ -1093,6 +1228,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 mlir_func_args = self.generate_mlir_function_types(
                     func, function_name, args, kwonlyargs, sig
                 )
+                exe_args = mlir_func_args.values
                 adapted_args = mlir_func_args.adapted_python_args
                 # The body is traced with the adapted values, so an adapter runs once.
                 n_positional = len(args)
@@ -1354,6 +1490,7 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         # The DSL is active for the whole call: its types emit, its settings
         # are read, and a decorated function called inside the trace sees an
         # open trace (``in_trace``) and is launched into it.
+        self.traced_function = func
         with active_dsl(self):
             setup = self._prepare_compilation(func, *args, **kwargs)
 
@@ -1418,3 +1555,74 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             with scope:
                 result = func(*ir_args, **ir_kwargs)
         return func_op, entry_block, result
+
+    def _is_meta_at_boundary(
+        self, arg: Any, spec: Any, name: str, idx: int, func: Any
+    ) -> bool:
+        """Whether the argument ``arg`` of the parameter ``name`` (annotated
+        ``spec``, at position ``idx`` of ``func``) is a Python value the trace
+        specialises on, the alternative being a runtime value the compiled
+        function takes. The default is :func:`is_argument_meta`: decided by
+        the annotation and the (adapted) value alone, a value the DSL has no
+        leaf for being a Python value. A DSL with another policy (every
+        unannotated argument a runtime value, a class of its own speaking a
+        protocol the core does not know) decides here, and pairs the verdict
+        with :meth:`_flatten_jit_arg` and :meth:`_restore_argument` for the
+        values the core cannot flatten or rebuild itself."""
+        return is_argument_meta(arg, spec, name, idx, func)
+
+    def _restore_argument(
+        self, arg: Any, spec: Any, block_args: Sequence[Any], start: int
+    ) -> tuple[Any, int]:
+        """Rebuild the value the traced body receives for the runtime argument
+        ``arg`` (annotated ``spec``) from the entry's ``block_args``, starting
+        at index ``start``; returns the value and the number of block arguments
+        it consumed. The default wraps one block argument in the annotated
+        dtype when the value is not of it yet (a Python number cast at the
+        boundary, ``compile()``'s type-only placeholder; an abstract annotation
+        takes the dtype of the block argument), and rebuilds any other value
+        leaf by leaf in its Python shape. A DSL restores the values its
+        :meth:`_flatten_jit_arg` flattened itself here."""
+        base_spec = get_args(spec)[0] if get_origin(spec) is Annotated else spec
+        if isinstance(base_spec, t.NumericMeta) and not isinstance(arg, base_spec):
+            # Numeric type coercion for a staged argument: the block arg
+            # already has the target MLIR type. Wrap it directly instead of
+            # casting the caller's value, which would emit casts referencing
+            # SSA values from an outer region. An abstract annotation
+            # (``Numeric``) is no type to wrap in: the block argument's type,
+            # fixed at the boundary, names the dtype (a kernel is traced with
+            # the raw call arguments, so the Python number is still here).
+            block_arg = block_args[start]
+            dtype = (
+                t.Numeric.from_mlir_type(block_arg.type)
+                if base_spec.is_abstract
+                else base_spec
+            )
+            return dtype(block_arg), 1
+        _, _, treedef = tree_utils.tree_flatten(arg, return_ir_values=False)
+        n_args = sum(
+            len(tree_utils.leaf_ir_types(leaf))
+            for _, leaf in tree_utils.tree_leaves(treedef)
+        )
+        restored = self._restore_from_block_args(
+            treedef, block_args[start : start + n_args]
+        )
+        return restored, n_args
+
+    def _mangle_folds(self, arg: Any, annotation: Any) -> bool:
+        """Whether :meth:`mangle_name` folds ``arg`` (passed to a parameter
+        annotated ``annotation``) into the symbol: by default the Meta
+        arguments, the values the trace specialises on. A DSL that wants one
+        symbol per value of an annotated scalar too folds those as well."""
+        return self._is_meta_argument(arg, annotation)
+
+    def _mangle_render(self, arg: Any, annotation: Any) -> str:
+        """The spelling of a folded ``arg`` in the symbol, before the unwanted
+        characters are stripped: a type by its name, a sequence element by
+        element, anything else through ``str``. A DSL spells its own kinds of
+        values here (an instance by its class name, say)."""
+        if isinstance(arg, type):
+            return arg.__name__
+        if isinstance(arg, (list, tuple)):
+            return "_".join(map(str, arg))
+        return str(arg)

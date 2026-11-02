@@ -14,11 +14,22 @@ sub-DSL of your own is the same shape with another record
 (``examples/11_custom_dsl.py``).
 """
 
+from .. import ir
+from typing import Any
+from types import SimpleNamespace
 from ..dsl.core.diagnostics import DiagId, register_dsl_package
 from ..dsl.core.dsl import BaseDSL
 from ..dsl.core.plugin import Plugins
 from ..dsl.plugins.decorators.jit import func
 from ..dsl.plugins.type_ops import UpstreamDialectTypeOps, arith
+
+from ..dsl.util.tree_utils import (
+    is_leaf,
+    is_staged_leaf,
+    leaf_entry,
+    register_container,
+    register_leaf_protocol,
+)
 
 __all__ = ["LOWER_TO_LLVM", "MlirTestDSL", "jit"]
 
@@ -38,6 +49,63 @@ LOWER_TO_LLVM: tuple[str, ...] = (
 
 # Frames of this package are DSL-internal when a diagnostic locates user code.
 register_dsl_package(__package__)
+
+
+# The test DSL's additions to the value model, registered once at import.
+# (a) A value protocol: a class whose ``__ir_types__()`` and ``__ir_values__()``
+# methods and ``__from_ir_values__(values)`` classmethod define its SSA view is
+# a leaf. Its leaf-valued attributes, in definition order, are its host
+# payload (marshalled one by one) and tell a staged instance from a host one;
+# an optional ``__ir_attributes__()`` gives the argument attributes of its SSA
+# values.
+_VALUE_PROTOCOL = ("__ir_types__", "__ir_values__", "__from_ir_values__")
+
+
+def _speaks_value_protocol(cls: type) -> bool:
+    return all(hasattr(cls, name) for name in _VALUE_PROTOCOL)
+
+
+def _leaf_attributes_of(value: Any) -> list[Any]:
+    return [v for v in vars(value).values() if is_leaf(v)]
+
+
+def _marshal_fields(value: Any) -> list[Any]:
+    return [
+        slot
+        for field in _leaf_attributes_of(value)
+        for slot in leaf_entry(type(field)).marshal(field)
+    ]
+
+
+def _value_attributes(value: Any) -> list[ir.Attribute]:
+    attributes = getattr(value, "__ir_attributes__", None)
+    if attributes is not None:
+        return list(attributes())
+    return [ir.DictAttr.get({}) for _ in value.__ir_types__()]
+
+
+register_leaf_protocol(
+    _speaks_value_protocol,
+    ir_types=lambda p: list(p.__ir_types__()),
+    ir_values=lambda v: list(v.__ir_values__()),
+    from_ir_values=lambda p, vs: type(p).__from_ir_values__(list(vs)),
+    marshal=_marshal_fields,
+    staged=lambda v: any(is_staged_leaf(f) for f in _leaf_attributes_of(v)),
+    attributes=_value_attributes,
+)
+
+# (b) ``typing.NamedTuple`` as a container: its fields are the children, named
+# in paths and diagnostics; two namedtuple classes with the same fields are
+# still different containers at a join.
+register_container(
+    lambda cls: issubclass(cls, tuple) and hasattr(cls, "_fields"),
+    name="namedtuple",
+    to_iterable=lambda x, path: (
+        SimpleNamespace(kind="namedtuple", cls=type(x), fields=list(x._fields)),
+        list(x),
+    ),
+    from_iterable=lambda metadata, children: metadata.cls._make(children),
+)
 
 
 class MlirTestDSL(BaseDSL):

@@ -94,3 +94,34 @@ assert Family() is Concrete()
 print("TRACE CONTRACT: decorator options, scopes, nested call and ownership")
 # CHECK: ABSTRACT: refused before a concrete instance
 # CHECK-NEXT: TRACE CONTRACT: decorator options, scopes, nested call and ownership
+
+from mlir import ir
+from mlir.dsl import Int32
+from mlir.dsl.plugins.type_ops import UpstreamDialectTypeOps, arith
+
+class RuntimeDefaults(Concrete):
+    plugins = Plugins(type_ops=UpstreamDialectTypeOps(scalars=arith), decorators=[func.Jit()])
+    def _is_meta_at_boundary(self, value, annotation, name, index, function):
+        if isinstance(value, int):
+            return False
+        return super()._is_meta_at_boundary(value, annotation, name, index, function)
+    def _flatten_jit_arg(self, value, *args, **kwargs):
+        return super()._flatten_jit_arg(Int32(value) if isinstance(value, int) else value, *args, **kwargs)
+    def _restore_argument(self, value, annotation, block_args, start):
+        if isinstance(value, int):
+            return Int32(block_args[start]), 1
+        return super()._restore_argument(value, annotation, block_args, start)
+    def _mangle_folds(self, value, annotation):
+        return True
+    def _mangle_render(self, value, annotation):
+        return "selected"
+
+@RuntimeDefaults.jit
+def runtime_argument(value):
+    assert isinstance(value, Int32)
+    assert isinstance(value.ir_value(), ir.Value)
+
+runtime_argument(7)
+assert RuntimeDefaults().mangle_name("f", (7,), inspect.signature(lambda value: None)) == "f_selected"
+print("BOUNDARY CONTRACT: runtime default, restoration and symbol policy")
+# CHECK-NEXT: BOUNDARY CONTRACT: runtime default, restoration and symbol policy

@@ -39,6 +39,8 @@ Typed scalar parameters become SSA block arguments. Numeric operators dispatch t
 
 The scalar catalogue includes signed and unsigned integers, standard floating-point types and supported low-precision formats. Casts and promotions validate supported combinations.
 
+Tuples, lists, frozen dataclasses and `@struct` records flatten at argument and result boundaries. Registered leaves allow downstream value classes to participate.
+
 The call keywords `pipeline`, `container_attrs`, `no_cache`, `extra_link_libs`
 and `compile_only` belong to the framework. They do not bind to user Meta
 parameters; use different names for compile-time keyword arguments.

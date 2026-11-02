@@ -10,6 +10,7 @@ declare_mlir_python_sources(MLIRPythonSources.DSL.Core
   SOURCES
     dsl/__init__.py
     dsl/core/__init__.py
+    dsl/core/arguments.py
     dsl/core/common.py
     dsl/core/diagnostics.py
     dsl/core/dsl.py

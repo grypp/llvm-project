@@ -8,14 +8,16 @@
 the ``@jit`` boundary into its SSA values plus a ``PyTreeDef``;
 ``tree_unflatten`` rebuilds it from new SSA values. The value model is small
 on purpose: a leaf is an instance of a registered leaf class (``Numeric``,
-``Pointer``, ``Vector``, whatever a sub-DSL adds with ``register_leaf``); a
-container is a ``tuple``, a ``list`` or a frozen dataclass (a ``@struct`` is
-one), nested as deep as needed; ``None`` is an empty slot; any other object
-is a Python value written back verbatim. A dict, set, frozenset,
-namedtuple, tuple subclass or non-frozen dataclass holding DSL values is
-rejected, not flattened; so is a container that contains itself or that is
-nested deeper than Python's recursion limit. Containers come back as fresh objects, leaves are restored from
-their prototypes.
+``Pointer``, ``Vector``, whatever a sub-DSL adds with ``register_leaf``, or a
+class a ``register_leaf_protocol`` predicate recognises); a container is a
+``tuple``, a ``list``, a frozen dataclass (a ``@struct`` is one) or a class a
+sub-DSL registers with ``register_container``, nested as deep as needed;
+``None`` is an empty slot; any other object is a Python value written back
+verbatim. A dict, set, frozenset, namedtuple, tuple subclass or non-frozen
+dataclass holding DSL values is rejected, not flattened, unless a sub-DSL
+registers it as a container; so is a container that contains itself or that
+is nested deeper than Python's recursion limit. Containers come back as fresh
+objects, leaves are restored from their prototypes.
 """
 
 import dataclasses
@@ -24,23 +26,37 @@ from collections.abc import Callable, Iterable, Iterator
 from types import SimpleNamespace
 from typing import Any, NamedTuple, Optional
 
+import ctypes
 
 from ... import ir
 from ..core.common import DSLRuntimeError, DSLUserCodeError
 from ..core.diagnostics import DiagId
+from ..core.mlir_op import current_emitter
 from ..types.typing import Numeric, _lookup_mlir_type
 
 __all__ = [
     "Leaf",
     "LeafEntry",
     "PyTreeDef",
+    "check_tree_equal",
     "contains_leaf",
+    "describe_tree_difference",
+    "is_frozen_dataclass",
     "is_leaf",
+    "is_reference_leaf",
     "is_staged_leaf",
+    "leaf_attributes",
     "leaf_entry",
     "leaf_ir_types",
+    "register_container",
+    "register_leaf",
+    "register_leaf_protocol",
+    "registered_container",
     "tree_flatten",
     "tree_leaves",
+    "tree_unflatten",
+    "trees_equal",
+    "leaf_type_name",
     "wrap_ir_value",
 ]
 
@@ -65,20 +81,30 @@ class LeafEntry(NamedTuple):
 
     The first six fields are the ``register_leaf`` arguments; ``prototype``
     picks what a ``Leaf`` stores for the restore, ``staged`` tells a staged
-    payload and ``wrap`` claims a raw ``ir.Value`` of a matching type.
+    payload, ``wrap`` claims a raw ``ir.Value`` of a matching type and
+    ``attributes`` gives one argument attribute dict per SSA value.
     """
 
     cls: type
     ir_types: Callable[[Any], list[ir.Type]]
     ir_values: Callable[[Any], list[ir.Value]]
     from_ir_values: Callable[[Any, list[ir.Value]], Any]
+    marshal: Optional[Callable[[Any], list[ctypes.c_void_p]]]
     reference: bool
     prototype: Callable[[Any], Any] = lambda v: v
     staged: Optional[Callable[[Any], bool]] = None
     wrap: Optional[Callable[[ir.Value], Any]] = None
+    attributes: Optional[Callable[[Any], list[ir.Attribute]]] = None
 
 
 _leaf_registry: dict[type, LeafEntry] = {}
+
+# Leaves recognised by a predicate over the class (``register_leaf_protocol``):
+# the predicates in registration order, and the entry synthesized for each
+# class that met one (None for a class that met none), so a lookup runs the
+# predicates once per class.
+_leaf_protocols: list[tuple[Callable[[type], bool], LeafEntry]] = []
+_protocol_entries: dict[type, Optional[LeafEntry]] = {}
 
 
 def _add_entry(entry: LeafEntry) -> None:
@@ -92,14 +118,107 @@ def _add_entry(entry: LeafEntry) -> None:
     _leaf_registry[entry.cls] = entry
 
 
+def register_leaf(
+    cls: type,
+    *,
+    ir_types: Callable[[Any], list[ir.Type]],
+    ir_values: Callable[[Any], list[ir.Value]],
+    from_ir_values: Callable[[Any, list[ir.Value]], Any],
+    marshal: Optional[Callable[[Any], list[ctypes.c_void_p]]] = None,
+    reference: bool = False,
+    staged: Optional[Callable[[Any], bool]] = None,
+    prototype: Optional[Callable[[Any], Any]] = None,
+    attributes: Optional[Callable[[Any], list[ir.Attribute]]] = None,
+) -> None:
+    """Register ``cls`` as a leaf class of the DSL's value model.
+
+    Instances of ``cls`` (and of its subclasses) flatten to the SSA values
+    ``ir_values(value)`` and are restored by ``from_ir_values(prototype,
+    values)``, where the prototype is the instance that entered the region.
+    ``ir_types(prototype)`` gives the SSA types at the ``@jit`` and kernel
+    boundaries, where ``marshal(value)`` returns one owning ``c_void_p`` per
+    SSA value for a host argument (a leaf without ``marshal`` is staged-only).
+    A leaf registers once, at import of its module. ``reference=True`` marks a
+    reference leaf whose stores are memory side effects (``Pointer``): the
+    executors carry it only when its name is rebound. ``staged(value)`` tells
+    a staged payload from a host one (without it, the payload's attributes are
+    scanned for an ``ir.Value``); ``prototype(value)`` picks what a ``Leaf``
+    stores to restore the value and to compare it at a join (the instance by
+    default; a tuple of classes and ints compares structurally);
+    ``attributes(value)`` gives one argument attribute dict per SSA value at
+    the boundaries (empty dicts without it).
+    """
+    entry = LeafEntry(cls, ir_types, ir_values, from_ir_values, marshal, reference)
+    if prototype is not None:
+        entry = entry._replace(prototype=prototype)
+    if staged is not None:
+        entry = entry._replace(staged=staged)
+    if attributes is not None:
+        entry = entry._replace(attributes=attributes)
+    _add_entry(entry)
+
+
+def register_leaf_protocol(
+    predicate: Callable[[type], bool],
+    *,
+    ir_types: Callable[[Any], list[ir.Type]],
+    ir_values: Callable[[Any], list[ir.Value]],
+    from_ir_values: Callable[[Any, list[ir.Value]], Any],
+    marshal: Optional[Callable[[Any], list[ctypes.c_void_p]]] = None,
+    reference: bool = False,
+    staged: Optional[Callable[[Any], bool]] = None,
+    prototype: Optional[Callable[[Any], Any]] = None,
+    attributes: Optional[Callable[[Any], list[ir.Attribute]]] = None,
+) -> None:
+    """Register a leaf recognised by ``predicate(cls)`` instead of by class.
+
+    A class no leaf class claims through its MRO is a leaf when a predicate
+    accepts it; the entry then serving its instances is built from the other
+    arguments, which mean what they mean for ``register_leaf``, and is cached
+    for the class. The predicates are asked in registration order. The
+    prototype is the instance by default, so two instances of one class
+    compare equal at a join and instances of different classes differ.
+    ``ir_types`` is required: a host payload has no SSA type to read.
+    """
+    if not callable(predicate):
+        raise DSLRuntimeError(
+            f"register_leaf_protocol expects a predicate over classes, got {predicate!r}"
+        )
+    template = LeafEntry(type, ir_types, ir_values, from_ir_values, marshal, reference)
+    if prototype is not None:
+        template = template._replace(prototype=prototype)
+    if staged is not None:
+        template = template._replace(staged=staged)
+    if attributes is not None:
+        template = template._replace(attributes=attributes)
+    _leaf_protocols.append((predicate, template))
+    _protocol_entries.clear()
+
+
+def _protocol_entry(cls: type) -> Optional[LeafEntry]:
+    """The entry of the first leaf protocol accepting ``cls``, cached per class."""
+    if cls in _protocol_entries:
+        return _protocol_entries[cls]
+    entry = None
+    for predicate, template in _leaf_protocols:
+        if predicate(cls):
+            entry = template._replace(cls=cls)
+            break
+    _protocol_entries[cls] = entry
+    return entry
+
+
 def leaf_entry(cls: type) -> Optional[LeafEntry]:
-    """Return the entry serving instances of ``cls`` (MRO walk), or None."""
+    """Return the entry serving instances of ``cls``, or None: the leaf class
+    registry first (MRO walk), then the leaf protocols."""
     if not isinstance(cls, type):
         return None
     for base in cls.__mro__:
         entry = _leaf_registry.get(base)
         if entry is not None:
             return entry
+    if _leaf_protocols:
+        return _protocol_entry(cls)
     return None
 
 
@@ -107,6 +226,12 @@ def is_leaf(obj_or_cls: Any) -> bool:
     """True if ``obj_or_cls`` is a registered leaf class or an instance of one."""
     cls = obj_or_cls if isinstance(obj_or_cls, type) else type(obj_or_cls)
     return leaf_entry(cls) is not None
+
+
+def is_reference_leaf(value: Any) -> bool:
+    """True if ``value`` is an instance of a reference leaf class."""
+    entry = leaf_entry(type(value))
+    return entry is not None and entry.reference
 
 
 def is_staged_leaf(value: Any) -> bool:
@@ -127,19 +252,23 @@ def is_staged_leaf(value: Any) -> bool:
 def contains_leaf(value: Any) -> bool:
     """True if ``value`` is, or holds inside containers, a leaf or a raw ``ir.Value``.
     The walk is wider than ``tree_flatten`` on purpose: tuples, lists, sets,
-    frozensets, dict keys and values and the fields of any dataclass (frozen
-    or not), so that a DSL value hidden in a container ``tree_flatten`` would
-    treat as a Python value is found and refused. A leaf stops the walk.
+    frozensets, dict keys and values, the fields of any dataclass (frozen or
+    not) and the children of a registered container, so that a DSL value
+    hidden in a container ``tree_flatten`` would treat as a Python value is
+    found and refused. A leaf stops the walk.
     """
     active: set[int] = set()
 
     def visit(x: Any) -> bool:
         if leaf_entry(type(x)) is not None or isinstance(x, ir.Value):
             return True
-        if dataclasses.is_dataclass(x) and not isinstance(x, type):
-            children: Iterable[Any] = (
-                getattr(x, f.name, None) for f in dataclasses.fields(x)
-            )
+        node = registered_container(x)
+        children: Iterable[Any]
+        if node is not None:
+            _, children = node.to_iterable(x, "")
+            children = list(children)
+        elif dataclasses.is_dataclass(x) and not isinstance(x, type):
+            children = (getattr(x, f.name, None) for f in dataclasses.fields(x))
         elif isinstance(x, dict):
             children = it.chain(x.keys(), x.values())
         elif isinstance(x, (tuple, list, set, frozenset)):
@@ -239,6 +368,189 @@ class Leaf:
         return not self.is_none and self.prototype is None
 
 
+_UNSET = object()
+
+
+def _record_to_iterable(x: Any, path: str = "") -> tuple[SimpleNamespace, list[Any]]:
+    """A frozen record's fields in order. A field without a value is an error;
+    an instance attribute that is not a field is kept verbatim on the rebuilt
+    record when it holds no DSL value, refused when it does."""
+    fields = [f.name for f in dataclasses.fields(x)]
+    members = []
+    for name in fields:
+        value = getattr(x, name, _UNSET)
+        if value is _UNSET:
+            raise DSLUserCodeError(
+                DiagId.CONTAINER_INVALID_RECORD,
+                var=_display_path(path),
+                type=type(x).__name__,
+                detail=f"its field `{name}` has no value",
+            )
+        members.append(value)
+    extras = (
+        {k: v for k, v in vars(x).items() if k not in fields}
+        if hasattr(x, "__dict__")
+        else {}
+    )
+    for attr, value in extras.items():
+        if contains_leaf(value):
+            raise DSLUserCodeError(
+                DiagId.CONTAINER_INVALID_RECORD,
+                var=_display_path(path),
+                type=type(x).__name__,
+                detail=f"its attribute `{attr}` is not a dataclass field but holds a DSL value",
+            )
+    metadata = SimpleNamespace(
+        kind="dataclass",
+        type_str=f"{type(x).__module__}.{type(x).__qualname__}",
+        cls=type(x),
+        fields=fields,
+        extras=extras,
+    )
+    return metadata, members
+
+
+def _record_from_iterable(metadata: SimpleNamespace, children: Iterable[Any]) -> Any:
+    """Rebuild a frozen record field by field (no ``__init__``/``__post_init__``)."""
+    instance = object.__new__(metadata.cls)
+    for name, value in zip(metadata.fields, children):
+        object.__setattr__(instance, name, value)
+    for name, value in getattr(metadata, "extras", {}).items():
+        object.__setattr__(instance, name, value)
+    return instance
+
+
+_RECORD_NODE = NodeType("dataclass", _record_to_iterable, _record_from_iterable)
+_TUPLE_NODE = NodeType(
+    "tuple",
+    lambda t, path="": (SimpleNamespace(kind="tuple", length=len(t)), list(t)),
+    lambda _, xs: tuple(xs),
+)
+_LIST_NODE = NodeType(
+    "list",
+    lambda l, path="": (SimpleNamespace(kind="list", length=len(l)), list(l)),
+    lambda _, xs: list(xs),
+)
+# The kinds whose metadata carries no class: a registered container naming
+# one of them compares with and rebuilds as that built-in.
+_BUILTIN_KINDS = frozenset({"tuple", "list"})
+
+# Containers a sub-DSL registers (``register_container``): by exact class, by
+# predicate over the class in registration order, and the node resolved for
+# each class seen (None for one no registration claims).
+_container_classes: dict[type, NodeType] = {}
+_container_predicates: list[tuple[Callable[[type], bool], NodeType]] = []
+_container_nodes: dict[type, Optional[NodeType]] = {}
+
+
+def register_container(
+    cls_or_predicate: type | Callable[[type], bool],
+    *,
+    to_iterable: Callable[[Any, str], tuple[SimpleNamespace, list[Any]]],
+    from_iterable: Callable[[SimpleNamespace, Iterable[Any]], Any],
+    name: Optional[str] = None,
+) -> NodeType:
+    """Register a container of the DSL's value model: a class, or a predicate
+    over classes (``issubclass(cls, tuple) and hasattr(cls, "_fields")`` for
+    namedtuples).
+
+    ``to_iterable(x, path)`` returns the node's metadata and its children in
+    order; ``from_iterable(metadata, children)`` rebuilds it. Metadata is a
+    fresh ``SimpleNamespace`` per call (the missing entries are filled in on
+    it): ``fields`` names the children in paths and
+    diagnostics, ``kind`` (``name`` when absent) and ``cls`` (the class when
+    absent) are the join rule, so instances of two classes sharing one
+    registration differ unless their metadata says otherwise, and metadata
+    whose ``kind`` is ``"tuple"`` or ``"list"`` compares with and rebuilds as
+    that built-in. A registration is consulted after ``tuple`` and ``list``
+    and before the frozen record node, by ``tree_flatten``, ``contains_leaf``
+    and ``is_mlir_op`` alike: an exact class first, then the predicates in
+    registration order.
+
+    :return: The ``NodeType`` registered
+    """
+    if isinstance(cls_or_predicate, type):
+        node = NodeType(name or cls_or_predicate.__name__, to_iterable, from_iterable)
+        if cls_or_predicate in _container_classes:
+            raise DSLRuntimeError(
+                f"container class `{cls_or_predicate.__qualname__}` is already "
+                "registered; a container registers once, at import of its module"
+            )
+        _container_classes[cls_or_predicate] = node
+    elif callable(cls_or_predicate):
+        node = NodeType(
+            name or getattr(cls_or_predicate, "__name__", "container"),
+            to_iterable,
+            from_iterable,
+        )
+        _container_predicates.append((cls_or_predicate, node))
+    else:
+        raise DSLRuntimeError(
+            "register_container expects a class or a predicate over classes, "
+            f"got {cls_or_predicate!r}"
+        )
+    _container_nodes.clear()
+    return node
+
+
+def registered_container(obj: Any) -> Optional[NodeType]:
+    """The node a sub-DSL registered for ``obj``'s class, or None (a class is
+    never a container)."""
+    if isinstance(obj, type) or not (_container_classes or _container_predicates):
+        return None
+    cls = type(obj)
+    if cls in _container_nodes:
+        return _container_nodes[cls]
+    node = _container_classes.get(cls)
+    if node is None:
+        for predicate, candidate in _container_predicates:
+            if predicate(cls):
+                node = candidate
+                break
+    _container_nodes[cls] = node
+    return node
+
+
+def _container_node_type(x: Any) -> Optional[NodeType]:
+    """The node type of a container: a ``tuple``, a ``list``, a registered
+    container or a frozen record."""
+    if type(x) is tuple:
+        return _TUPLE_NODE
+    if type(x) is list:
+        return _LIST_NODE
+    if isinstance(x, type):
+        return None
+    node = registered_container(x)
+    if node is not None:
+        return node
+    if is_frozen_dataclass(x):
+        return _RECORD_NODE
+    return None
+
+
+def _complete_metadata(metadata: SimpleNamespace, node: NodeType, x: Any) -> None:
+    """Fill the ``kind``, ``cls`` and ``type_str`` a registration left out."""
+    if not hasattr(metadata, "kind"):
+        metadata.kind = node.name
+    if metadata.kind in _BUILTIN_KINDS:
+        return
+    if not hasattr(metadata, "cls"):
+        metadata.cls = type(x)
+    if not hasattr(metadata, "type_str"):
+        metadata.type_str = f"{type(x).__module__}.{type(x).__qualname__}"
+
+
+def _child_path(metadata: SimpleNamespace, path: str, index: int) -> str:
+    fields = getattr(metadata, "fields", None)
+    if fields is not None and index < len(fields):
+        return f"{path}.{fields[index]}"
+    return f"{path}[{index}]"
+
+
+def _display_path(path: str) -> str:
+    return (path[1:] if path.startswith(".") else path) or "value"
+
+
 # =============================================================================
 # tree_flatten and tree_unflatten
 # =============================================================================
@@ -261,6 +573,20 @@ def leaf_ir_types(leaf: Leaf) -> list[ir.Type]:
         return []
     _require_context("leaf_ir_types")
     return list(leaf_entry(leaf.node_metadata.cls).ir_types(leaf.prototype))
+
+
+def leaf_attributes(entry: LeafEntry, value: Any, count: int) -> list[ir.Attribute]:
+    """One argument attribute dict per SSA value of a leaf: the entry's
+    ``attributes(value)`` when it has the hook, else empty dicts (needs a context)."""
+    if entry.attributes is None:
+        return [ir.DictAttr.get({}) for _ in range(count)]
+    attrs = list(entry.attributes(value))
+    if len(attrs) != count:
+        raise DSLRuntimeError(
+            f"the attributes hook of leaf `{entry.cls.__qualname__}` returned "
+            f"{len(attrs)} attribute dict(s) for {count} SSA value(s)"
+        )
+    return attrs
 
 
 def _flatten_leaf(
@@ -289,6 +615,8 @@ def _flatten_leaf(
     leaf = dataclasses.replace(leaf, ir_type_str=ir_type_str)
     if ir.Context.current is None:
         return values, [None] * len(values), leaf
+    if return_ir_values:
+        return values, leaf_attributes(entry, x, len(values)), leaf
     return values, [ir.DictAttr.get({}) for _ in values], leaf
 
 
@@ -311,7 +639,7 @@ def tree_flatten(
         return list(values), list(attrs), treedef
     except RecursionError:
         raise DSLUserCodeError(
-            DiagId.CONTAINER_TOO_DEEP, var=path or "value", type=type(x).__name__
+            DiagId.CONTAINER_TOO_DEEP, var=root or "value", type=type(x).__name__
         ) from None
 
 
@@ -325,11 +653,6 @@ def _tree_flatten(
     entry = leaf_entry(type(x))
     if entry is not None:
         return _flatten_leaf(x, entry, return_ir_values)
-    if isinstance(x, (tuple, list, dict)) or dataclasses.is_dataclass(x):
-        raise DSLUserCodeError(
-            DiagId.CONTAINER_UNSUPPORTED, var=path or "value", type=type(x).__name__
-        )
-    return [], [], Leaf(meta=x)
     if isinstance(x, ir.Value):
         wrapped = wrap_ir_value(x)
         entry = leaf_entry(type(wrapped))
@@ -338,6 +661,96 @@ def _tree_flatten(
                 f"wrap_ir_value returned an unregistered {type(wrapped).__qualname__}"
             )
         return _flatten_leaf(wrapped, entry, return_ir_values)
+    node_type = _container_node_type(x)
+    if node_type is None:
+        # A Python value, unless it hides DSL values the rebuild would lose.
+        if not isinstance(x, type) and contains_leaf(x):
+            if dataclasses.is_dataclass(x):
+                raise DSLUserCodeError(
+                    DiagId.CONTAINER_INVALID_RECORD,
+                    var=_display_path(path),
+                    type=type(x).__name__,
+                    detail="it is a dataclass that is not frozen, so an update made on one path would be lost",
+                )
+            raise DSLUserCodeError(
+                DiagId.CONTAINER_UNSUPPORTED,
+                var=_display_path(path),
+                type=type(x).__name__,
+            )
+        return [], [], Leaf(meta=x)
+    if id(x) in active:
+        raise DSLUserCodeError(
+            DiagId.CONTAINER_TOO_DEEP, var=_display_path(path), type=type(x).__name__
+        )
+    active.add(id(x))
+    node_metadata, children = node_type.to_iterable(x, path)
+    _complete_metadata(node_metadata, node_type, x)
+    child_values, child_attrs, child_trees, paths = [], [], [], []
+    for i, child in enumerate(children):
+        values, attrs, tree = _tree_flatten(
+            child, return_ir_values, _child_path(node_metadata, path, i), active
+        )
+        child_values.append(values)
+        child_attrs.append(attrs)
+        child_trees.append(tree)
+        child_path = _child_path(node_metadata, "", i)
+        if isinstance(tree, Leaf):
+            paths.append(child_path)
+        else:
+            paths.extend(child_path + p for p in tree.paths)
+    active.discard(id(x))
+    return (
+        it.chain.from_iterable(child_values),
+        it.chain.from_iterable(child_attrs),
+        PyTreeDef(node_type, node_metadata, tuple(child_trees), tuple(paths)),
+    )
+
+
+def _value_count(treedef: PyTreeDef | Leaf) -> int:
+    """How many entries of ``xs`` ``tree_unflatten`` consumes for ``treedef``."""
+    count = 0
+    for _, leaf in tree_leaves(treedef):
+        if leaf.is_none or leaf.is_meta:
+            continue
+        count += leaf.node_metadata.num_values if leaf.node_metadata.ir_values else 1
+    return count
+
+
+def tree_unflatten(treedef: PyTreeDef | Leaf, xs: list[Any]) -> Any:
+    """Rebuild the value ``treedef`` describes from ``xs``: leaves from their
+    prototypes, Python-value slots verbatim, every container a fresh object."""
+    _require_tree(treedef, "tree_unflatten")
+    xs = list(xs)
+    needed = _value_count(treedef)
+    if len(xs) != needed:
+        raise DSLRuntimeError(
+            f"tree_unflatten got {len(xs)} value(s) for a tree of {needed}"
+        )
+    try:
+        return _tree_unflatten(treedef, iter(xs))
+    except RecursionError:
+        raise DSLUserCodeError(
+            DiagId.CONTAINER_TOO_DEEP, var="value", type="tree"
+        ) from None
+
+
+def _tree_unflatten(treedef: PyTreeDef | Leaf, xs: Iterator[Any]) -> Any:
+    if isinstance(treedef, Leaf):
+        if treedef.is_none:
+            return None
+        if treedef.is_meta:
+            return treedef.meta
+        metadata = treedef.node_metadata
+        if not metadata.ir_values:
+            return next(xs)
+        values = [next(xs) for _ in range(metadata.num_values)]
+        return leaf_entry(metadata.cls).from_ir_values(treedef.prototype, values)
+    if isinstance(treedef, PyTreeDef):
+        children = [_tree_unflatten(t, xs) for t in treedef.child_treedefs]
+        return treedef.node_type.from_iterable(treedef.node_metadata, children)
+    raise DSLRuntimeError(
+        f"tree_unflatten expects a PyTreeDef or Leaf, got {treedef!r}"
+    )
 
 
 def tree_leaves(treedef: PyTreeDef | Leaf) -> list[tuple[str, Leaf]]:
@@ -357,6 +770,172 @@ def tree_leaves(treedef: PyTreeDef | Leaf) -> list[tuple[str, Leaf]]:
 
 
 # =============================================================================
+# Structural comparison (the join rule of staged regions)
+# =============================================================================
+
+
+def _meta_equal(lhs: Any, rhs: Any) -> bool:
+    """Compare two Python values with ``==``, falling back to identity."""
+    if lhs is rhs:
+        return True
+    try:
+        return bool(lhs == rhs)
+    except Exception:
+        return False
+
+
+def _prototype_equal(lhs: Any, rhs: Any) -> bool:
+    """Compare two leaf prototypes: the type-stability rule of a join."""
+    if isinstance(lhs, type) or isinstance(rhs, type):
+        return lhs is rhs
+    if isinstance(lhs, tuple) and isinstance(rhs, tuple):
+        return len(lhs) == len(rhs) and all(
+            _prototype_equal(a, b) for a, b in zip(lhs, rhs)
+        )
+    if type(lhs) is not type(rhs):
+        return False
+    # Address spaces compare by value; other registered leaves by class, their
+    # MLIR types through ``ir_type_str``.
+    return _meta_equal(lhs, rhs) if isinstance(lhs, (int, str)) else True
+
+
+def _node_shape(tree: PyTreeDef) -> tuple:
+    """What two container nodes must share to join: the metadata's kind,
+    class and fields and the number of children; the node registration
+    itself does not matter, so a registered container whose metadata mirrors
+    a built-in's joins with it."""
+    metadata = tree.node_metadata
+    return (
+        getattr(metadata, "kind", None),
+        getattr(metadata, "cls", None),
+        list(getattr(metadata, "fields", None) or []),
+        len(tree.child_treedefs),
+    )
+
+
+def trees_equal(lhs: PyTreeDef | Leaf, rhs: PyTreeDef | Leaf) -> bool:
+    """
+    Check if two tree definitions are structurally equal.
+
+    Leaves match when both are None, both Python values that compare equal, or both
+    leaves of the same IR types and equal prototypes (same dtype, same
+    ``(dtype, addrspace)``, same struct class, same registered class).
+    """
+    if isinstance(lhs, Leaf) and isinstance(rhs, Leaf):
+        if lhs.is_none or rhs.is_none:
+            return lhs.is_none == rhs.is_none
+        if lhs.is_meta or rhs.is_meta:
+            return lhs.is_meta == rhs.is_meta and _meta_equal(lhs.meta, rhs.meta)
+        return lhs.ir_type_str == rhs.ir_type_str and _prototype_equal(
+            lhs.prototype, rhs.prototype
+        )
+    if isinstance(lhs, PyTreeDef) and isinstance(rhs, PyTreeDef):
+        return _node_shape(lhs) == _node_shape(rhs) and all(
+            map(trees_equal, lhs.child_treedefs, rhs.child_treedefs)
+        )
+    return False
+
+
+def leaf_type_name(prototype: Any) -> str:
+    """Name the value a leaf prototype stands for: ``Int32``, ``Pointer[Float32]``
+    (``Pointer[Float32, 3]`` outside space 0), ``Vector[Int32, 4]``, else the
+    class name of the prototype."""
+    if isinstance(prototype, type):
+        return prototype.__name__
+    if isinstance(prototype, tuple) and prototype and isinstance(prototype[0], type):
+        if len(prototype) == 3:  # (Vector, dtype, lanes)
+            return f"{prototype[0].__name__}[{prototype[1].__name__}, {prototype[2]}]"
+        if len(prototype) == 2:  # (dtype, space) of a Pointer
+            dtype, space = prototype
+            return (
+                f"Pointer[{dtype.__name__}]"
+                if space == 0
+                else f"Pointer[{dtype.__name__}, {space}]"
+            )
+    return type(prototype).__name__
+
+
+def _tree_value_description(tree: PyTreeDef | Leaf) -> str:
+    """Format a tree node or leaf for structure-change diagnostics."""
+    if isinstance(tree, Leaf):
+        if tree.is_none:
+            return "`None`"
+        if tree.is_meta:
+            try:
+                shown = repr(tree.meta)
+            except Exception:
+                shown = f"<{type(tree.meta).__name__}>"
+            return f"a Python value `{shown}`"
+        name = leaf_type_name(tree.prototype)
+        if tree.ir_type_str:
+            return f"`{name}` (type `{tree.ir_type_str}`)"
+        return f"a `{name}` value"
+
+    child_count = len(tree.child_treedefs)
+    metadata = tree.node_metadata
+    if metadata.kind in ("tuple", "list"):
+        noun = "item" if child_count == 1 else "items"
+        return f"`{metadata.kind}` with {child_count} {noun}"
+    type_name = metadata.type_str.rsplit(".", 1)[-1]
+    fields = getattr(metadata, "fields", None)
+    if fields:
+        return f"`{type_name}` with fields {list(fields)!r}"
+    return f"`{type_name}`"
+
+
+def describe_tree_difference(
+    lhs: PyTreeDef | Leaf,
+    rhs: PyTreeDef | Leaf,
+    path: str,
+) -> str:
+    """Describe the first deterministic structural difference between two trees.
+
+    The returned fragment is suitable for a diagnostic detail, for example
+    ``"`state.pending` changed from `None` to `Int32` (type `i32`)"``. An
+    empty string means the trees have the same structure.
+    """
+    _require_tree(lhs, "describe_tree_difference")
+    _require_tree(rhs, "describe_tree_difference")
+    if trees_equal(lhs, rhs):
+        return ""
+    if isinstance(lhs, PyTreeDef) and isinstance(rhs, PyTreeDef):
+        if _node_shape(lhs) == _node_shape(rhs):
+            for index, (lhs_child, rhs_child) in enumerate(
+                zip(lhs.child_treedefs, rhs.child_treedefs)
+            ):
+                if not trees_equal(lhs_child, rhs_child):
+                    child_path = _child_path(lhs.node_metadata, path, index)
+                    return describe_tree_difference(lhs_child, rhs_child, child_path)
+    return (
+        f"`{path}` changed from {_tree_value_description(lhs)} "
+        f"to {_tree_value_description(rhs)}"
+    )
+
+
+def check_tree_equal(lhs: PyTreeDef, rhs: PyTreeDef) -> int:
+    """
+    Check if two tree definitions are equal and return the index of first difference.
+
+    The two trees must have the same number of children (the write_args of
+    one region); the result is the index of the first child that differs, or
+    -1 if they are completely equal.
+    """
+    _require_tree(lhs, "check_tree_equal")
+    _require_tree(rhs, "check_tree_equal")
+    if isinstance(lhs, Leaf) or isinstance(rhs, Leaf):
+        return -1 if trees_equal(lhs, rhs) else 0
+    if len(lhs.child_treedefs) != len(rhs.child_treedefs):
+        raise DSLRuntimeError(
+            "check_tree_equal expects trees with the same number of children, "
+            f"got {len(lhs.child_treedefs)} and {len(rhs.child_treedefs)}"
+        )
+    for index, (l, r) in enumerate(zip(lhs.child_treedefs, rhs.child_treedefs)):
+        if not trees_equal(l, r):
+            return index
+    return -1
+
+
+# =============================================================================
 # Built-in leaves
 # =============================================================================
 
@@ -367,6 +946,7 @@ _add_entry(
         ir_types=lambda p: [p.mlir_type],
         ir_values=lambda v: [v.ir_value()],
         from_ir_values=lambda p, vs: p(vs[0]),
+        marshal=lambda v: [type(v).marshal(v)],
         reference=False,
         prototype=lambda v: type(v),
         staged=lambda v: isinstance(v.value, ir.Value),
