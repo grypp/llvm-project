@@ -175,6 +175,10 @@ class ASTPreprocessorPlugin(Plugin):
     #: The ``DSLPreprocessor`` (sub)class performing the rewrite; None for a
     #: plugin that only supplies executors.
     preprocessor_class: Any = None
+    #: Reject a nested function that captures a variable and is called from a
+    #: staged region (``SCOPE_CLOSURE_CAPTURE``); a plugin whose executors
+    #: support such captures sets this False and the preprocessor emits no check.
+    closure_check: bool = True
 
     def executors(self, dsl: BaseDSL) -> dict[str, Any]:
         """The keyword arguments of ``Executor.set_functions``: the DSL's
@@ -198,12 +202,13 @@ class ASTPreprocessorPlugin(Plugin):
         ``and_``/``or_``/``not_``/``as_ir_value`` from (:meth:`helpers_package`
         or the DSL's own), ``decorator_names`` the decorators of the DSL
         class's record, which mark a function for the rewrite. The default
-        instantiates :attr:`preprocessor_class` with
-        :attr:`helpers_module`; a plugin that picks a preprocessor by the
+        instantiates :attr:`preprocessor_class` with :attr:`closure_check`
+        and :attr:`helpers_module`; a plugin that picks a preprocessor by the
         DSL's settings, or configures it further, overrides this."""
         if self.preprocessor_class is None:
             return None
         options: dict[str, Any] = {
+            "closure_check": self.closure_check,
             "decorator_names": list(decorator_names),
         }
         if self.helpers_module is not None:
@@ -659,6 +664,27 @@ class Plugins:
             if plugin.decorator_name == decorator_name:
                 return plugin
         return None
+
+    def without(self, *keys: str | type) -> "Plugins":
+        """A copy of the record without the family members named by ``keys``:
+        a plugin ``name`` (``"gpu"``), a ``decorator_name`` (``"kernel"``) or a
+        plugin class. The roles are untouched; the shipped variants are spelled
+        this way (``MlirTestDSL.plugins.without("gpu")`` is the DSL without
+        kernels)."""
+
+        def dropped(plugin: Plugin) -> bool:
+            for key in keys:
+                if isinstance(key, type):
+                    if isinstance(plugin, key):
+                        return True
+                elif key in (plugin.name, getattr(plugin, "decorator_name", None)):
+                    return True
+            return False
+
+        fields = {role: getattr(self, role) for role in self.ROLES}
+        for family in self.FAMILIES:
+            fields[family] = tuple(p for p in getattr(self, family) if not dropped(p))
+        return Plugins(**fields)
 
     def __iter__(self):
         for role in self.ROLES:

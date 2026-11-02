@@ -11,7 +11,8 @@ native control flow as ``scf`` (``scf/__init__.py`` holds ``ASTPreprocessor``,
 and uses the explicit builders.
 """
 
+from .helpers import range
 from .preprocessor import DSLPreprocessor
 from .scf import ASTPreprocessor
 
-__all__ = ["ASTPreprocessor", "DSLPreprocessor"]
+__all__ = ["ASTPreprocessor", "DSLPreprocessor", "range"]

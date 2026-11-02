@@ -105,9 +105,10 @@ print("BOOL_FULL:", read(slots[1], ctypes.c_int32))
 # `int` for its `Int32` parameter.
 @m.jit
 def total(p: m.Pointer[m.Int32], n: m.Int32) -> m.Int32:
-    for i, acc, result in m.for_(n, iter_args=[m.Int32(0)]):
-        m.yield_(acc + p[i])
-    return result
+    acc = m.Int32(0)
+    for i in range(n):
+        acc += p[i]
+    return acc
 
 
 data = np.arange(1000, dtype=np.int32)

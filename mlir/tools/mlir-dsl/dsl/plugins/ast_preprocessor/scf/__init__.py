@@ -94,12 +94,18 @@ class ASTPreprocessor(ASTPreprocessorPlugin):
     that stage native control flow as ``scf.for``/``scf.if``/``scf.while`` and
     route comparisons, ternaries and ``max``/``min``/``any``/``all`` through
     the DSL.
+
+    :param closure_check: Reject nested functions capturing variables inside
+        staged regions (the default; see ``ASTPreprocessorPlugin.closure_check``)
     """
 
     name = "scf"
     preprocessor_class = DSLPreprocessor
 
-    def __init__(self, *, helpers_module: str | None = None) -> None:
+    def __init__(
+        self, *, closure_check: bool = True, helpers_module: str | None = None
+    ) -> None:
+        self.closure_check = closure_check
         # None keeps the class attribute: the base's None, or the module a
         # subclass fixes there.
         if helpers_module is not None:
@@ -113,3 +119,6 @@ class ASTPreprocessor(ASTPreprocessorPlugin):
             compare_executor=_compare_executor,
             builtin_redirector=_builtin_redirector,
         )
+
+
+    generated_frame_names = ("loop_body",)

@@ -28,6 +28,7 @@ from ..... import ir
 from .....dialects import scf
 from ....core.common import DSLRuntimeError, DSLUserCodeError
 from ....core.diagnostics import DiagId
+from ....core.mlir_op import current_emitter
 from ....core.staging import is_mlir_op
 from .builders import _promote_loop_bounds
 from ....types.typing import Boolean, as_numeric
@@ -45,7 +46,8 @@ from ....util.tree_utils import (
     tree_unflatten,
 )
 
-__all__ = ["LoopUnroll", "ScfGenerator", "and_", "or_", "not_", "any_", "all_", "in_"]
+__all__ = [
+    "normalize_range","LoopUnroll", "ScfGenerator", "and_", "or_", "not_", "any_", "all_", "in_"]
 
 # =============================================================================
 # AST Helpers
@@ -404,6 +406,10 @@ def _loop_execute_range_dynamic(
 ) -> Any:
     """Build an ``scf.for`` over integer bounds, with an optional unroll annotation.
 
+    The bounds follow Python's ``range``: a negative or runtime step is
+    normalised first (:func:`normalize_range`), so the ``scf.for`` always has
+    a positive step and the body receives the value Python would.
+
     :param func: The loop body, ``func(iv, *write_args) -> write_args``
     :param start: The bounds; ``as_numeric``-ed, integer, promoted to one dtype
         that is also the induction variable's (no ``index``)
@@ -424,6 +430,7 @@ def _loop_execute_range_dynamic(
             function_name="range",
             detail=f"no loop option is named `{next(iter(options))}`",
         )
+    start, stop, step, iv_of = normalize_range(start, stop, step)
     start_, stop_, step_, dtype = _promote_loop_bounds(start, stop, step)
 
     # The loop options become attributes, so they must be Python values.
@@ -455,8 +462,10 @@ def _loop_execute_range_dynamic(
         for_op.attributes[_LOOP_ANNOTATION_ATTR] = unroll_attr
 
     with ir.InsertionPoint(for_op.body):
-        # The induction variable takes the promoted dtype; no cast.
-        iv = dtype(for_op.induction_variable)
+        # The induction variable takes the promoted dtype; no cast. The body
+        # sees the value Python's range would give (a descending one under a
+        # negative step).
+        iv = iv_of(dtype(for_op.induction_variable))
         func_args = scf_gen.pack(for_op.inner_iter_args)
         log().debug("For body builder: %s func_args: %s", iv, func_args)
         scf.YieldOp(scf_gen.yield_values(func(iv, *func_args)))
@@ -824,3 +833,44 @@ def _compare_executor(left: Any, comparators: Sequence[Any], ops: Sequence[str])
         current = comparator
 
     return result
+
+
+def normalize_range(
+    start: Any, stop: Any, step: Any
+) -> tuple[Any, Any, Any, Callable[[Any], Any]]:
+    """Python ``range`` semantics for a staged loop whose step may be negative.
+
+    ``range(start, stop, step)`` with ``step < 0`` yields ``start + k * step``
+    for the same count of ``k`` as ``range(stop, start, -step)``, so such a
+    loop becomes the positive-step loop over the swapped bounds and the body
+    sees ``iv_of(iv') = start + stop - iv'``, the descending value in the
+    original order.
+
+    :return: ``(start', stop', step', iv_of)``: a positive Python step leaves
+        everything as it is (``iv_of`` is the identity); a negative Python
+        step swaps the bounds and negates the step in Python, so no IR is
+        emitted for the sign; a staged step is tested at run time
+        (``arith.cmpi slt``) and every bound, the step and the induction
+        variable go through ``arith.select``. A Python ``step == 0`` passes
+        through to the bound promotion, which rejects it as Python does.
+    """
+    step_n = as_numeric(step)
+    if isinstance(step_n.value, int):
+        if step_n.value >= 0:
+            return start, stop, step, lambda iv: iv
+        negated = -step if isinstance(step, int) else -step_n
+        return stop, start, negated, lambda iv: start + stop - iv
+
+    start_, stop_, step_, dtype = _promote_loop_bounds(start, stop, step)
+    is_negative = (step_ < 0).ir_value()
+    emitter = current_emitter()
+
+    def select(when_negative: Any, otherwise: Any) -> Any:
+        return dtype(
+            emitter.select(is_negative, when_negative.ir_value(), otherwise.ir_value())
+        )
+
+    def iv_of(iv: Any) -> Any:
+        return select(start_ + stop_ - iv, iv)
+
+    return select(stop_, start_), select(start_, stop_), select(-step_, step_), iv_of

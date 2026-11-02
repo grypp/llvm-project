@@ -1184,6 +1184,15 @@ class DiagId(DiagCatalog, enum.Enum):
             "that is not taken does not assign the variables inside it.",
         ),
     )
+    SCOPE_CLOSURE_CAPTURE = (
+        "Function `{func_name}` captures variable `{var_name}` from the enclosing "
+        "scope, but `{func_name}` is used inside a for/while/if controlled by a "
+        "{staged}, where captured variables are not supported.",
+        (
+            "Pass `{var_name}` to `{func_name}` as an argument.",
+            "Define `{func_name}` inside the body of the for/while/if.",
+        ),
+    )
     SCOPE_REGION_LOCAL_ESCAPES = (
         "`{var}` is read here, but it was created inside a {region} body (at "
         "{birth_file}:{birth_line}) and belongs to that body. The body is compiled "
@@ -1554,6 +1563,7 @@ _classify_error(
     "UNSUP_SYNTAX",
     "UNSUP_EARLY_EXIT",
     "UNSUP_NO_SOURCE",
+    "SCOPE_CLOSURE_CAPTURE",
 )
 _classify_error(
     USAGE,
