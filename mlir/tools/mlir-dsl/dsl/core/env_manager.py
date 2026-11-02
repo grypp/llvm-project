@@ -15,7 +15,7 @@ redeclares or adds settings; ``BaseDSL`` constructs one per instance under the
 DSL's name as prefix.
 
 A malformed value is the user's mistake: the typed readers raise
-:class:`DSLUserCodeError` ``CONFIG_INVALID`` naming the variable. A malformed
+:class:`DSLUserCodeValueError` ``CONFIG_INVALID`` naming the variable. A malformed
 declaration (an annotation without a reader, a bad default) is the DSL
 author's and raises :class:`DSLRuntimeError`.
 """
@@ -23,10 +23,12 @@ author's and raises :class:`DSLRuntimeError`.
 import inspect
 import os
 import types
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Union, get_args, get_origin
 
-from .common import DSLRuntimeError, DSLUserCodeError
+from ..util.logger import setup_log
+from .common import DSLRuntimeError, DSLUserCodeValueError, DSLWarning
 from .diagnostics import DiagId
 
 
@@ -62,6 +64,10 @@ class EnvVar:
 
     def __set_name__(self, owner: type, name: str) -> None:
         object.__setattr__(self, "attribute", name)
+
+    @property
+    def key_name(self) -> str:
+        return self.read_as or self.attribute
 
     def resolve(
         self, manager: Any, prefix: str, parser: Callable[..., Any] | None
@@ -134,6 +140,8 @@ def parser_for_type(annotation: Any) -> Callable[..., Any]:
             base = members[0]
     if base is bool:
         return get_bool_env_var
+    if base is int and not optional:
+        return get_int_env_var
     if base is str:
         return get_str_env_var
     raise DSLRuntimeError(
@@ -204,7 +212,7 @@ def get_bool_env_var(var_name: str, default_value: bool = False) -> bool:
     returns ``default_value``.
 
     Raises:
-        DSLUserCodeError: ``CONFIG_INVALID`` if the variable is set to any
+        DSLUserCodeValueError: ``CONFIG_INVALID`` if the variable is set to any
             other value.
     """
     raw = get_str_env_var(var_name)
@@ -218,7 +226,7 @@ def get_bool_env_var(var_name: str, default_value: bool = False) -> bool:
     if normalized in _BOOL_FALSE_VALUES:
         return False
     accepted = ", ".join(sorted(_BOOL_TRUE_VALUES) + sorted(_BOOL_FALSE_VALUES))
-    raise DSLUserCodeError(
+    raise DSLUserCodeValueError(
         DiagId.CONFIG_INVALID,
         var=var_name,
         detail=f"`{raw}` is not a boolean; expected one of {accepted} "
@@ -226,7 +234,93 @@ def get_bool_env_var(var_name: str, default_value: bool = False) -> bool:
     )
 
 
-class EnvironmentVarManager(EnvVarSpec):
+def get_int_env_var(var_name: str, default_value: int = 0) -> int:
+    """
+    Get the value of an integer environment variable.
+
+    Surrounding whitespace is ignored. An unset variable or one with an
+    empty value returns ``default_value``. Negative integers (e.g.
+    ``-5``) are accepted.
+
+    Raises:
+        DSLUserCodeValueError: ``CONFIG_INVALID`` if the variable is set to a value
+            that is not a valid base-10 integer.
+    """
+    raw = get_str_env_var(var_name)
+    if raw is None:
+        return default_value
+    stripped = raw.strip()
+    if stripped == "":
+        return default_value
+    try:
+        return int(stripped)
+    except ValueError:
+        raise DSLUserCodeValueError(
+            DiagId.CONFIG_INVALID,
+            var=var_name,
+            detail=f"`{raw}` is not a base-10 integer; expected one, or empty "
+            f"for the default `{default_value!r}`",
+        ) from None
+
+
+def has_env_var(var_name: str) -> bool:
+    """
+    Check if an environment variable is set.
+    """
+    return os.getenv(var_name) is not None
+
+
+class LogEnvironmentManager(EnvVarSpec):
+    """The logging settings, applied to the DSL logger at construction.
+
+    Reads ``{prefix}_LOG_TO_CONSOLE``, ``{prefix}_LOG_TO_FILE`` (written to
+    ``{prefix}.log``) and ``{prefix}_LOG_LEVEL``, then calls :func:`setup_log`.
+    A ``LOG_LEVEL`` with no sink enabled is reported as a warning, since it
+    would have no effect.
+    """
+
+    log_to_console: bool = env_var(
+        "LOG_TO_CONSOLE", affects_compile=False, default=False
+    )
+    log_to_file: bool = env_var("LOG_TO_FILE", affects_compile=False, default=False)
+    log_level: int = env_var("LOG_LEVEL", affects_compile=False, default=1)
+
+    def __init__(self, prefix: str = "DSL") -> None:
+        self.prefix = prefix
+
+        self._apply_env_var_spec(prefix)
+
+        setup_log(
+            prefix,
+            self.log_to_console,
+            self.log_to_file,
+            f"{prefix}.log",
+            self.log_level,
+        )
+
+        if (
+            has_env_var(f"{prefix}_LOG_LEVEL")
+            and not self.log_to_console
+            and not self.log_to_file
+        ):
+            # setup_log has just disabled the DSL logger, so the notice cannot
+            # go through it; a DSLWarning reaches the user instead.
+            warnings.warn(
+                DSLWarning(
+                    f"{prefix}_LOG_LEVEL was set, but neither logging to file "
+                    f"({prefix}_LOG_TO_FILE) nor logging to console "
+                    f"({prefix}_LOG_TO_CONSOLE) is enabled, so it has no effect.",
+                    suggestion=[
+                        f"Set {prefix}_LOG_TO_CONSOLE=1 or {prefix}_LOG_TO_FILE=1 "
+                        "to see the log.",
+                        f"Unset {prefix}_LOG_LEVEL if logging is not wanted.",
+                    ],
+                ),
+                stacklevel=3,
+            )
+
+
+class EnvironmentVarManager(LogEnvironmentManager):
     """Manages environment variables for configuration options.
 
     Printing options:
@@ -272,15 +366,29 @@ class EnvironmentVarManager(EnvVarSpec):
     # diagnostic settings below, each still overridable by its own variable.
     debug: bool = env_var("DEBUG", affects_compile=True, default=False)
     print_ir: bool = env_var("PRINT_IR", affects_compile=False, default=False)
+    # Selects between a full traceback and the formatted message on the exception
+    # path.
+    show_stacktrace: bool = env_var(
+        "SHOW_STACKTRACE", affects_compile=False, default=lambda mgr: mgr.debug
+    )
+    filter_stacktrace: bool = env_var(
+        "FILTER_STACKTRACE",
+        affects_compile=False,
+        default=lambda mgr: not (mgr.debug or mgr.show_stacktrace),
+    )
+
     # Emits an ir.Location per op; keyed because it changes the module.
     debuginfo: bool = env_var(
         "DEBUGINFO", affects_compile=True, default=lambda mgr: mgr.debug
     )
+    # Verifies each op as dsl_user_op builds it, so a malformed op is reported
+    # at the Python line that built it rather than by the pass manager.
+    verify_trace: bool = env_var("VERIFY_TRACE", affects_compile=False, default=False)
     dryrun: bool = env_var("DRYRUN", affects_compile=True, default=False)
     warnings_ignore: bool = env_var(
         "WARNINGS_IGNORE", affects_compile=False, default=False
     )
+    loc_tracebacks: int = env_var("LOC_TRACEBACKS", affects_compile=True, default=0)
 
     def __init__(self, prefix: str = "DSL") -> None:
-        self._apply_env_var_spec(prefix)
-        self.prefix = prefix
+        super().__init__(prefix)

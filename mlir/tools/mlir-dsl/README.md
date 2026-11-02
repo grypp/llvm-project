@@ -40,3 +40,5 @@ Typed scalar parameters become SSA block arguments. Numeric operators dispatch t
 The scalar catalogue includes signed and unsigned integers, standard floating-point types and supported low-precision formats. Casts and promotions validate supported combinations.
 
 Tuples, lists, frozen dataclasses and `@struct` records flatten at argument and result boundaries. Registered leaves allow downstream value classes to participate.
+
+`dsl_user_op` preserves source locations around user operations. Diagnostics show source context, and per-DSL environment settings control tracing and logging.

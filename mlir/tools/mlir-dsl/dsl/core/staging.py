@@ -32,7 +32,8 @@ from collections.abc import Callable
 from typing import Any, Optional
 
 from ... import ir
-from .common import DSLRuntimeError, DSLUserCodeError, get_current_dsl
+from .common import DSLRuntimeError, _user_error, get_current_dsl
+from ..util.logger import log
 from ..types.typing import NumericMeta
 from ..util.tree_utils import (
     contains_leaf,

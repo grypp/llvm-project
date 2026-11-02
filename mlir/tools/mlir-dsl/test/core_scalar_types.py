@@ -4,6 +4,7 @@
 # active DSL's `plugins.type_ops`; no BaseDSL exists yet, so the S1 context
 # `active_dsl` is entered with a stand-in carrying that record (and the two
 # names the error path reads). The IR is checked first, the text after it.
+import os
 import warnings
 from types import SimpleNamespace
 
@@ -19,9 +20,12 @@ from mlir.dsl.types.typing import (
     Boolean,
     Float,
     Float32,
+    Int8,
+    Int16,
     Int32,
     Int64,
     Integer,
+    IntegerMeta,
     Numeric,
     as_numeric,
     cast,
@@ -312,6 +316,24 @@ print("WARNED VALUES:", [repr(v) for v in vals])
 # CHECK: WARNED: ['TYPE_INT_LITERAL_OUT_OF_RANGE', 'TYPE_FLOAT_TO_INT_OUT_OF_RANGE', 'TYPE_FLOAT_LITERAL_OVERFLOW', 'TYPE_FLOAT_LITERAL_UNDERFLOW']
 # CHECK: WARNED VALUES: ['Int32(0)', 'Int32(-727379968)', 'Float32(1e+40)', 'Float32(1e-50)', 'Int32(-1)']
 
+
+# The warnings module attributes a literal warning to the author's line,
+# through the DSL frames between it and the range check (`cast` here), so its
+# filters and once-per-location deduplication see the author's call.
+def warn_through_cast():
+    return cast(2**40, Int32)
+
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    warn_through_cast()
+print(
+    "WARN AT:",
+    os.path.basename(caught[0].filename),
+    caught[0].lineno == warn_through_cast.__code__.co_firstlineno + 1,
+)
+# CHECK: WARN AT: core_scalar_types.py True
+
 # -- errors outside a trace, and errors that need no trace
 with ir.Context():
     err("MLIR TYPE OUTSIDE", lambda: Int32.mlir_type)
@@ -357,5 +379,7 @@ print("\n".join(text))
 # CHECK: STR TO FLOAT: ARG_NOT_NUMERIC | Argument `Float32(...)` expects a numeric value, but this call passes a value of type `str`.
 # CHECK: STR TO BOOLEAN: ARG_NOT_NUMERIC | Argument `Boolean(...)` expects a numeric value, but this call passes a value of type `str`.
 # CHECK: STR AS NUMERIC: ARG_NOT_NUMERIC | Argument `value` expects a numeric value, but this call passes a value of type `str`.
+
+
 print("S3_TYPES", "OK")
 # CHECK: S3_TYPES OK

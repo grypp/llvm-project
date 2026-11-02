@@ -28,20 +28,39 @@ mix-in that namespaced plugin catalogs such as ``GpuDiagId`` reuse, and the
 author-facing classification at the end).
 """
 
+import ast
 import enum
+import functools
+import linecache
+import re
 import sys
+import textwrap
 import types
+from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 __all__ = [
+    "Colors",
     "DiagCatalog",
     "DiagId",
     "WarnId",
     "META_VALUE",
     "STAGED_VALUE",
+    "NOT_ZERO_COST",
+    "UNSUPPORTED",
+    "USAGE",
+    "WARNING",
+    "classify",
     "register_dsl_package",
     "find_user_source_location",
+    "filter_traceback",
+    "user_warning_stacklevel",
+    "render_code_frame",
     "render_user_diagnostic",
+    # The layout primitives, for a sub-DSL's own renderers.
+    "format_diagnostic_headline",
+    "format_labeled_text",
 ]
 
 # The author-facing words for the two kinds of values (a Python value and an
@@ -52,11 +71,40 @@ META_VALUE = "Python value"
 STAGED_VALUE = "runtime value"
 
 
+class Colors:
+    """Shared ANSI color codes for DSL and compiler diagnostics."""
+
+    RED = "\033[91m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    GREEN = "\033[92m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+
+
+# An MLIR location as printed in a verifier message: `"file.py":line:col`. The
+# internal-error envelope recovers a source frame from it.
+_PY_LOC_RE = re.compile(r'"(?P<file>[^"]+?\.py)":(?P<line>\d+):(?P<col>\d+)')
+
+# Wrap width of the labelled lines, and the context shown around a compiler
+# source location.
+_COMPILER_DIAG_TEXT_WIDTH = 100
+_COMPILER_CONTEXT_LINES = 2
+
+# The name of the environment prefix quoted in the internal-error envelope when
+# the error carries no env manager (``active_dsl`` attaches the DSL's).
+_DEFAULT_ENV_PREFIX = "MLIR_DSL"
+
+
 # =============================================================================
 # DSL package registry (which frames are "inside the DSL")
 # =============================================================================
 
-_DSL_PACKAGES: list[str] = ["mlir.dsl"]
+# The framework's own package, from this module's name: ``mlir.dsl`` next to
+# the bindings, or ``<pkg>._mlir.dsl`` when the bindings ship relocated under
+# another package and the framework moves with them.
+_DSL_PACKAGE = __name__.rsplit(".", 2)[0]
+_DSL_PACKAGES: list[str] = [_DSL_PACKAGE]
 
 
 def register_dsl_package(prefix: str) -> None:
@@ -75,6 +123,125 @@ def _is_dsl_module(mod: str) -> bool:
     return any(mod == p or mod.startswith(p + ".") for p in _DSL_PACKAGES)
 
 
+_STDLIB_MODULES: frozenset[str] = getattr(sys, "stdlib_module_names", frozenset())
+
+
+def _is_internal_frame(frame: types.FrameType) -> bool:
+    """Whether ``frame`` runs code of a registered DSL package, of the standard
+    library or of a ``<...>`` pseudo-file; the other frames are the author's.
+    Frames are classified by module name, which holds across source,
+    build-tree and installed layouts."""
+    mod = frame.f_globals.get("__name__", "") or ""
+    top = mod.split(".", 1)[0]
+    return (
+        _is_dsl_module(mod)
+        or top in _STDLIB_MODULES
+        or frame.f_code.co_filename.startswith("<")
+    )
+
+
+# =============================================================================
+# Traceback filtering (the DSL's frames dropped from a user's error)
+# =============================================================================
+
+# The package the bindings live in: the parent of the framework's package
+# (``mlir`` for ``mlir.dsl``, ``<pkg>._mlir`` when relocated). Its frames (the
+# ``ir`` module, the generated op builders) go with the DSL's.
+_BINDINGS_PACKAGE = _DSL_PACKAGE.rpartition(".")[0]
+
+
+def _is_internal_module(mod: str) -> bool:
+    """Whether code of the module ``mod`` is a registered DSL package's, the
+    bindings' or the standard library's: the frames a user-facing traceback
+    leaves out. Classified by module name alone (unlike
+    :func:`_is_internal_frame`, no pseudo-file rule), so the frame of a REPL
+    or of an ``exec``'d user source stays."""
+    if _is_dsl_module(mod):
+        return True
+    if _BINDINGS_PACKAGE and (
+        mod == _BINDINGS_PACKAGE or mod.startswith(_BINDINGS_PACKAGE + ".")
+    ):
+        return True
+    return mod.split(".", 1)[0] in _STDLIB_MODULES
+
+
+def _traceback_entries(tb: types.TracebackType | None) -> list[types.TracebackType]:
+    entries = []
+    while tb is not None:
+        entries.append(tb)
+        tb = tb.tb_next
+    return entries
+
+
+def _filter_one_traceback(
+    exc: BaseException, generated: "re.Pattern[str] | None"
+) -> None:
+    entries = _traceback_entries(exc.__traceback__)
+    kept = [
+        tb
+        for tb in entries
+        if not _is_internal_module(tb.tb_frame.f_globals.get("__name__", "") or "")
+    ]
+
+    def is_generated(tb: types.TracebackType) -> bool:
+        return generated is not None and bool(
+            generated.match(tb.tb_frame.f_code.co_name)
+        )
+
+    # The rewrite calls the region function it generated at the line of the
+    # statement it replaced, so the user's frame and the region's sit at one
+    # line: one entry tells the story, the user's.
+    collapsed: list[types.TracebackType] = []
+    for tb in kept:
+        if collapsed:
+            prev = collapsed[-1]
+            same_line = (
+                prev.tb_lineno == tb.tb_lineno
+                and prev.tb_frame.f_code.co_filename == tb.tb_frame.f_code.co_filename
+            )
+            if same_line and is_generated(tb):
+                continue
+            if same_line and is_generated(prev):
+                collapsed[-1] = tb
+                continue
+        collapsed.append(tb)
+    if not collapsed or len(collapsed) == len(entries):
+        return
+    for outer, inner in zip(collapsed, collapsed[1:]):
+        outer.tb_next = inner
+    collapsed[-1].tb_next = None
+    exc.__traceback__ = collapsed[0]
+
+
+def filter_traceback(
+    exc: BaseException, *, generated_names: Iterable[str] = ()
+) -> None:
+    """Drop the DSL's frames from the traceback of ``exc``, in place, so the
+    error reads as the user's code: the entries whose module is a registered
+    DSL package (:func:`register_dsl_package`), the bindings package or the
+    standard library (``contextlib`` mediates the region builders) go.
+    Consecutive entries of one file and line keep the one the rewrite did not
+    generate: a frame named ``<name>_<N>`` for a ``name`` in
+    ``generated_names`` is the region function called at the line of the
+    statement it replaced. The chained causes (``__cause__``) are filtered
+    too. A traceback is never emptied: when no entry would remain it is left
+    as it is.
+
+    Called by the decorated call's wrapper, the outermost frame of the DSL on
+    a call from Python, under the DSL's ``FILTER_STACKTRACE`` setting.
+    """
+    names = tuple(generated_names)
+    generated = (
+        re.compile(r"^(?:%s)_\d+$" % "|".join(map(re.escape, names))) if names else None
+    )
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        _filter_one_traceback(current, generated)
+        current = current.__cause__
+
+
 # =============================================================================
 # Renderer
 # =============================================================================
@@ -85,26 +252,21 @@ def find_user_source_location() -> (
 ):
     """Best-effort author location: ``(filename, line, col, end_col)``.
 
-    Walks out to the nearest call-stack frame *outside* the DSL package (frames
-    classified by module name -- robust across source / build-tree / installed
-    layouts), so a diagnostic raised deep inside the DSL still points at the
-    author's own line.  On Python 3.11+ the column span of the instruction the
-    author frame is suspended at is recovered via ``co_positions`` so the caret
-    can underline it.  Returns ``(None, None, None, None)`` when no author frame
-    is on the stack.
+    Walks out to the nearest call-stack frame *outside* the DSL package (see
+    ``_is_internal_frame``), so a diagnostic raised deep inside the DSL still
+    points at the author's own line.  On Python 3.11+ the column span of the
+    instruction the author frame is suspended at is recovered via
+    ``co_positions`` so the caret can underline it.  Returns ``(None, None,
+    None, None)`` when no author frame is on the stack.
     """
     try:
         frame: types.FrameType | None = sys._getframe(1)
     except Exception:  # noqa: BLE001
         return None, None, None, None
-    stdlib: frozenset[str] = getattr(sys, "stdlib_module_names", frozenset())
     try:
         while frame is not None:
-            mod = frame.f_globals.get("__name__", "") or ""
-            top = mod.split(".", 1)[0]
-            fn = frame.f_code.co_filename
-            is_internal = _is_dsl_module(mod) or top in stdlib or fn.startswith("<")
-            if not is_internal:
+            if not _is_internal_frame(frame):
+                fn = frame.f_code.co_filename
                 line, col, end_col = frame.f_lineno, None, None
                 try:  # exact column span of the suspended instruction (3.11+)
                     positions = list(frame.f_code.co_positions())  # type: ignore[attr-defined]
@@ -124,28 +286,563 @@ def find_user_source_location() -> (
     return None, None, None, None
 
 
+def user_warning_stacklevel(default: int = 2) -> int:
+    """The ``stacklevel`` that attributes a warning to the author's frame.
+
+    Called from the function that calls ``warnings.warn``: that function's
+    caller is level 2, each enclosing call adds one, and the first frame
+    outside the DSL package, the standard library and ``<...>`` pseudo-files
+    (``_is_internal_frame``, the classification of
+    ``find_user_source_location``) is the author's.  So a warning raised deep
+    inside the DSL, through however many DSL frames, is reported at the
+    author's line, where the ``warnings`` module's filters and once-per-location
+    deduplication see it.  ``default`` when no author frame is on the stack.
+    """
+    try:
+        frame: types.FrameType | None = sys._getframe(2)
+    except Exception:  # noqa: BLE001
+        return default
+    level = 2
+    try:
+        while frame is not None:
+            if not _is_internal_frame(frame):
+                return level
+            frame = frame.f_back
+            level += 1
+    finally:
+        del frame
+    return default
+
+
+def render_code_frame(
+    filename: str | None,
+    line: int | None,
+    col: int | None = None,
+    end_col: int | None = None,
+) -> str | None:
+    """Code frame: ``--> file:line:col`` + gutter + source lines + caret.
+
+    Shows the error line preceded by up to two lines of context. The ``^``
+    underlines ``[col, end_col)`` on the error line when a column span is known,
+    otherwise it points at the first non-blank character of that line.
+    Best-effort -- returns just the ``-->`` location line if the source cannot
+    be read.
+    """
+    if not filename or not line:
+        return None
+    frame = _format_user_source_frame(filename, line, col, end_col)
+    return "\n".join(frame) if frame else None
+
+
 def render_user_diagnostic(err: Any) -> str:
-    """Seed stand-in for the shared renderer: the headline, the location, the
-    notes and the suggestions as plain lines (the renderer PR replaces it)."""
-    is_warning = getattr(err, "_severity", "error") == "warning"
-    severity = "warning" if is_warning else "error"
-    code = "INTERNAL" if err._is_internal else getattr(err, "code", None)
-    headline = f"{severity}[{code}]" if code else severity
-    parts = [f"{headline}: {err.message}"]
-    if err.filename and err.line:
-        parts.append(f"--> {err.filename}:{err.line}")
-    cause = err._generate_cause()
-    if cause:
-        parts.append(f"  = note: {cause}")
-    if isinstance(err.context, dict):
-        parts.extend(f"  = note: {k}: {v}" for k, v in err.context.items())
-    elif err.context:
-        parts.append(f"  = note: {err.context}")
-    fixes = err.suggestion
-    if not isinstance(fixes, (list, tuple)):
-        fixes = [fixes]
-    parts.extend(f"  suggestion: {s}" for s in fixes if s)
+    """Render a DSL user diagnostic or warning.
+
+    Used by ``DSLBaseError`` and ``DSLWarning`` so AST pre-processing, tracing,
+    runtime errors, and warnings share one source-frame and suggestion format.
+    """
+    parts = []
+    cause_text = err._generate_cause()
+    code = getattr(err, "code", None)
+    frame = render_code_frame(
+        err.filename, err.line, getattr(err, "col", None), getattr(err, "end_col", None)
+    )
+
+    if getattr(err, "_is_internal", False):
+        return _format_internal_error_diagnostic(err, frame, cause_text)
+
+    diag = getattr(err, "diag_id", None) or getattr(err, "warn_id", None)
+    severity = "warning" if getattr(err, "_severity", "error") == "warning" else "error"
+    parts.append(
+        _format_diagnostic_headline(
+            severity,
+            err.message,
+            code=code or "",
+            namespace=getattr(diag, "namespace", "") if diag is not None else "",
+            bold=True,
+            leading_newline=True,
+        )
+    )
+
+    if frame:
+        parts.append(frame)
+
+    if diag is not None:
+        parts.extend(
+            _format_user_labeled_text(
+                "category", f"{diag.category} ({diag.subcategory})"
+            )
+        )
+
+    if cause_text:
+        parts.extend(_format_user_labeled_text("note", cause_text))
+    parts.extend(_format_error_details(err))
+
+    parts.append("")
     return "\n".join(parts)
+
+
+def _format_error_details(err: Any) -> list[str]:
+    """The ``= note:`` lines of ``err.context`` (a dict renders one per key, a
+    string one note) and the ``suggestion:`` lines of ``err.suggestion`` (one
+    or several fixes; blank entries are skipped).  Shared by the user block
+    and the internal-error envelope, so a raise site's details render the same
+    whichever class it raised."""
+    lines: list[str] = []
+    context = getattr(err, "context", None)
+    if context:
+        if isinstance(context, dict):
+            for key, value in context.items():
+                lines.extend(_format_user_labeled_text("note", f"{key}: {value}"))
+        else:
+            lines.extend(_format_user_labeled_text("note", str(context)))
+    suggestion = getattr(err, "suggestion", None)
+    if suggestion:
+        fixes = suggestion if isinstance(suggestion, (list, tuple)) else [suggestion]
+        for fix in fixes:
+            if str(fix).strip():
+                lines.extend(_format_labeled_text("suggestion", str(fix)))
+    return lines
+
+
+def _format_internal_error_diagnostic(
+    err: Any, frame: str | None, cause_text: str
+) -> str:
+    """Format internal compiler errors with a user-facing bug-report envelope."""
+    # Internal errors (compiler bugs) get a "please report" envelope instead of
+    # a "here's your mistake + fix" block -- they are not the author's fault.
+    # Keep the same headline/source-frame/reason/suggestion grammar as compiler
+    # diagnostics so backend failures and internal DSL failures are scannable in
+    # the same way.
+    is_verifier_error = _is_internal_verifier_error(err.message, cause_text)
+    headline = (
+        "The compiler could not build valid IR for this code."
+        if is_verifier_error
+        else "The compiler hit an internal DSL problem while compiling your code."
+    )
+    parts = [
+        _format_diagnostic_headline(
+            "error",
+            headline,
+            code="INTERNAL",
+            bold=True,
+            leading_newline=True,
+        )
+    ]
+    frame = frame or _internal_error_source_frame_from_cause(cause_text)
+    if frame:
+        parts.append(frame)
+
+    env_manager = getattr(err, "_dsl_env_manager", None)
+    prefix = getattr(env_manager, "prefix", None) or _DEFAULT_ENV_PREFIX
+    if is_verifier_error:
+        summary = _brief_internal_error(err.message)
+        verifier_detail = _brief_verifier_cause(cause_text)
+        if verifier_detail:
+            summary = f"{summary}: {verifier_detail}"
+        parts.extend(_format_labeled_text("error", summary))
+    else:
+        parts.extend(
+            _format_labeled_text(
+                "note", "This is a bug in the DSL, not a mistake in your kernel."
+            )
+        )
+        if err.message:
+            parts.extend(
+                _format_labeled_text("error", _brief_internal_error(err.message))
+            )
+        if cause_text:
+            parts.extend(_format_internal_cause(cause_text))
+
+    # What the raise site attached (``context`` and ``suggestion``), before
+    # the generic advice.
+    parts.extend(_format_error_details(err))
+
+    if not is_verifier_error:
+        parts.extend(
+            _format_labeled_text(
+                "suggestion",
+                "Please report this with the snippet above and your kernel.",
+            )
+        )
+    else:
+        parts.extend(
+            _format_labeled_text(
+                "suggestion",
+                "Check the source location above for invalid primitive arguments, "
+                "types, or address spaces. If the code looks valid, report this "
+                "with the snippet above and your kernel.",
+            )
+        )
+    parts.extend(
+        _format_labeled_text(
+            "suggestion",
+            f"Re-run with {prefix}_SHOW_STACKTRACE=1 to include the full "
+            "technical detail.",
+        )
+    )
+    parts.append("")
+    return "\n".join(parts)
+
+
+def _is_internal_verifier_error(message: str, cause_text: str) -> bool:
+    """Whether an internal error is the MLIR verifier rejecting the built IR."""
+    return "IR verification failed" in message or "Verification failed:" in cause_text
+
+
+def _brief_internal_error(message: str) -> str:
+    """One-line summary of an internal error message."""
+    if "IR verification failed" in message:
+        return "IR verification failed"
+    return message.strip()
+
+
+def _internal_error_source_frame_from_cause(cause_text: str) -> str | None:
+    """Source frame for the first ``"file.py":line:col`` location in a cause."""
+    loc_match = _PY_LOC_RE.search(cause_text)
+    if not loc_match:
+        return None
+    frame = _format_compiler_source_frame(
+        loc_match.group("file"),
+        int(loc_match.group("line")),
+        int(loc_match.group("col")),
+    )
+    return "\n".join(frame) if frame else None
+
+
+def _clean_internal_cause_line(line: str) -> str:
+    """Strip the ``Caused exception:`` / ``error:`` scaffolding and the MLIR
+    location from one line of a cause, returning ``""`` for a bare label."""
+    line = line.strip()
+    if not line or line in {"error:", "note:"}:
+        return ""
+    if line.startswith("Caused exception: "):
+        line = line.removeprefix("Caused exception: ").strip()
+    if line == "Verification failed:":
+        return ""
+
+    loc_match = _PY_LOC_RE.search(line)
+    if loc_match:
+        line = line[loc_match.end() :].lstrip("): ")
+    return line.strip()
+
+
+def _brief_verifier_cause(cause_text: str) -> str:
+    """The first informative line of a verifier failure, without the IR dump."""
+    details: list[str] = []
+    for line in cause_text.splitlines():
+        cleaned = _clean_internal_cause_line(line)
+        if not cleaned:
+            continue
+        if cleaned.startswith("see current operation"):
+            continue
+        if cleaned.startswith(": ("):
+            continue
+        if cleaned not in details:
+            details.append(cleaned)
+
+    return details[0] if details else ""
+
+
+def _format_internal_cause(cause_text: str) -> list[str]:
+    return _format_labeled_multiline_text("error", cause_text)
+
+
+def _nearest_function_name(lines: list[str], line_no: int) -> str | None:
+    """Name of the innermost function containing ``line_no`` of ``lines``.
+
+    Function locations commonly point at the first decorator rather than the
+    ``def`` line, so the containing ``ast`` node is resolved first (the
+    smallest span wins) and a decorated function is not mislabeled as the one
+    preceding it. Sources that do not parse fall back to the nearest ``def``
+    above the line.
+    """
+    try:
+        tree = ast.parse("\n".join(lines))
+    except (SyntaxError, ValueError):
+        tree = None
+    if tree is not None:
+        candidates: list[tuple[int, str]] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            start_line = min(
+                (decorator.lineno for decorator in node.decorator_list),
+                default=node.lineno,
+            )
+            end_line = node.end_lineno or node.lineno
+            if start_line <= line_no <= end_line:
+                candidates.append((end_line - start_line, node.name))
+        if candidates:
+            return min(candidates)[1]
+
+    # Retain the old best-effort behavior for incomplete or generated sources
+    # that cannot be parsed as a complete Python module.
+    for idx in range(min(line_no - 1, len(lines) - 1), -1, -1):
+        match = re.match(
+            r"\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\(",
+            lines[idx],
+        )
+        if match:
+            return match.group(1)
+    return None
+
+
+def _read_source_lines(file_path: str | Path) -> list[str]:
+    """Source lines of ``file_path`` (via ``linecache``, then the file system);
+    empty when the file cannot be read."""
+    filename = str(file_path)
+    try:
+        lines = linecache.getlines(filename)
+    except Exception:  # noqa: BLE001
+        lines = []
+    if lines:
+        return [line.rstrip("\n") for line in lines]
+    try:
+        return Path(filename).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+
+
+def _display_column(col: int | None, *, col_zero_based: bool) -> int | None:
+    """1-based column for the ``file:line:col`` location line."""
+    if col is None:
+        return None
+    return col + 1 if col_zero_based else col
+
+
+def _caret_column(source_line: str, col: int | None, *, col_zero_based: bool) -> int:
+    """0-based column of the caret: ``col``, or the first non-blank character
+    of the line when no column is known."""
+    if col is None:
+        return len(source_line) - len(source_line.lstrip())
+    return max(col if col_zero_based else col - 1, 0)
+
+
+def _caret_span(
+    source_line: str,
+    col: int | None,
+    end_col: int | None,
+    *,
+    col_zero_based: bool,
+) -> int:
+    """Number of carets: the ``[col, end_col)`` span clipped to the line, and
+    one when the span is unknown or empty."""
+    if col is None or end_col is None:
+        return 1
+    start = _caret_column(source_line, col, col_zero_based=col_zero_based)
+    end = end_col if col_zero_based else end_col - 1
+    end = min(end, len(source_line))
+    return max(1, end - start) if end > start else 1
+
+
+def _format_source_location(
+    filename: str,
+    line: int,
+    col: int | None,
+    *,
+    absolute_path: bool,
+    col_zero_based: bool,
+) -> str:
+    """``path:line[:col]`` with the column shown 1-based."""
+    display_path = str(Path(filename).resolve()) if absolute_path else filename
+    display_col = _display_column(col, col_zero_based=col_zero_based)
+    loc = f"{display_path}:{line}"
+    if display_col is not None:
+        loc += f":{display_col}"
+    return loc
+
+
+def _format_user_source_frame(
+    filename: str,
+    line: int,
+    col: int | None,
+    end_col: int | None,
+) -> list[str]:
+    """Lines of the user code frame: ``-->`` location, gutter, up to two
+    context lines, the error line and the caret line (0-based ``col``).
+
+    Only the ``-->`` line is produced when the source cannot be read, the line
+    is out of range, or it is blank.
+    """
+    source_lines = _read_source_lines(filename)
+    loc = _format_source_location(
+        filename,
+        line,
+        col,
+        absolute_path=False,
+        col_zero_based=True,
+    )
+    width = len(str(line))
+    pad = " " * width
+    lines = [f"{pad}{Colors.BLUE}-->{Colors.RESET} {loc}"]
+    if not (1 <= line <= len(source_lines)):
+        return lines
+    source_line = source_lines[line - 1]
+    if not source_line.strip():
+        return lines
+    caret_col = _caret_column(source_line, col, col_zero_based=True)
+    span = _caret_span(source_line, col, end_col, col_zero_based=True)
+    caret = f"{Colors.RED}{'^' * span}{Colors.RESET}"
+    lines.append(f"{pad} |")
+    for current in range(max(1, line - 2), line):
+        context_line = source_lines[current - 1]
+        lines.append(f"{current:>{width}} | {context_line}")
+    lines.append(f"{line} | {source_line}")
+    lines.append(f"{pad} | {' ' * caret_col}{caret}")
+    return lines
+
+
+def _format_compiler_source_frame(filename: str, line: int, col: int) -> list[str]:
+    """Lines of the compiler-location frame used by the internal-error
+    envelope: absolute path, enclosing function name, two context lines on
+    each side and a ``>`` marker on the error line (1-based ``col``)."""
+    source_lines = _read_source_lines(filename)
+    loc = _format_source_location(
+        filename, line, col, absolute_path=True, col_zero_based=False
+    )
+    lines = ["", f"  --> {loc}"]
+    fn_name = _nearest_function_name(source_lines, line)
+    if fn_name:
+        lines.append(f"      in function `{Colors.GREEN}{fn_name}{Colors.RESET}(...)`:")
+    if not source_lines:
+        return lines
+
+    start = max(1, line - _COMPILER_CONTEXT_LINES)
+    end = min(len(source_lines), line + _COMPILER_CONTEXT_LINES)
+    width = len(str(end))
+    lines.append("   |")
+    for current in range(start, end + 1):
+        source_line = source_lines[current - 1]
+        prefix = ">" if current == line else " "
+        lines.append(f"{prefix} {current:{width}d} | {source_line}")
+        if current == line:
+            caret_col = _caret_column(source_line, col, col_zero_based=False)
+            lines.append(f"  {' ' * width} | {' ' * caret_col}^")
+    return lines
+
+
+_DIAGNOSTIC_LABEL_COLORS = {
+    "error": Colors.RED,
+    "warning": Colors.YELLOW,
+    "suggestion": Colors.GREEN,
+    "note": Colors.BLUE,
+}
+
+
+def _diagnostic_label_prefixes(
+    label: str, *, marker: str = "", prefix: str = "  "
+) -> tuple[str, str]:
+    """``(plain, colored)`` prefixes of a labelled line, e.g. ``"  = note: "``;
+    the plain one sizes the wrap width and continuation indent."""
+    plain_prefix = f"{prefix}{marker}{label}: "
+    color = _DIAGNOSTIC_LABEL_COLORS.get(label, "")
+    colored_label = f"{marker}{label}:"
+    colored_prefix = (
+        f"{prefix}{color}{colored_label}{Colors.RESET} " if color else plain_prefix
+    )
+    return plain_prefix, colored_prefix
+
+
+def _diagnostic_label_indent(label: str, *, marker: str = "") -> str:
+    """Continuation indent aligning wrapped text under a label's text."""
+    plain_prefix, _ = _diagnostic_label_prefixes(label, marker=marker)
+    return " " * len(plain_prefix)
+
+
+def _format_labeled_text(
+    label: str, text: str, *, marker: str = "", wrap: bool = True
+) -> list[str]:
+    """``label: text`` lines, wrapped at :data:`_COMPILER_DIAG_TEXT_WIDTH`
+    with continuation lines indented under the text."""
+    plain_prefix, colored_prefix = _diagnostic_label_prefixes(label, marker=marker)
+    if not wrap:
+        if not text:
+            return [colored_prefix.rstrip()]
+        return [colored_prefix + text]
+
+    wrapped = textwrap.wrap(
+        text,
+        width=max(20, _COMPILER_DIAG_TEXT_WIDTH - len(plain_prefix)),
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+    if not wrapped:
+        return [colored_prefix.rstrip()]
+
+    lines = [colored_prefix + wrapped[0]]
+    lines.extend(
+        _diagnostic_label_indent(label, marker=marker) + line for line in wrapped[1:]
+    )
+    return lines
+
+
+def _format_user_labeled_text(label: str, text: str) -> list[str]:
+    """``= label: text``, unwrapped: the form used under a user code frame."""
+    return _format_labeled_text(label, text, marker="= ", wrap=False)
+
+
+def _format_labeled_block(label: str, heading: str, body: str) -> list[str]:
+    """A labelled heading followed by a multi-line body indented under it."""
+    lines = _format_labeled_text(label, heading)
+    indent = _diagnostic_label_indent(label)
+    width = max(20, _COMPILER_DIAG_TEXT_WIDTH - len(indent))
+    for raw_line in body.splitlines():
+        if not raw_line:
+            lines.append(indent.rstrip())
+            continue
+        wrapped = textwrap.wrap(
+            raw_line,
+            width=width,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        lines.extend(indent + line for line in wrapped)
+    return lines
+
+
+def _format_labeled_multiline_text(label: str, text: str) -> list[str]:
+    """Label ``text``, as one wrapped line or as heading plus indented body."""
+    text = text.strip()
+    if "\n" not in text:
+        return _format_labeled_text(label, text)
+    heading, body = text.split("\n", 1)
+    return _format_labeled_block(label, heading, body)
+
+
+def _diagnostic_marker(severity: str, code: str = "", namespace: str = "") -> str:
+    """``severity``, ``severity[CODE]`` or ``severity[namespace:CODE]``."""
+    marker = severity
+    if code:
+        marker = (
+            f"{severity}[{namespace}:{code}]" if namespace else f"{severity}[{code}]"
+        )
+    return marker
+
+
+def _format_diagnostic_headline(
+    severity: str,
+    message: str,
+    *,
+    code: str = "",
+    namespace: str = "",
+    bold: bool = False,
+    leading_newline: bool = False,
+) -> str:
+    """The first line of a diagnostic: the colored marker and the message."""
+    marker = _diagnostic_marker(severity, code, namespace)
+    color = _DIAGNOSTIC_LABEL_COLORS.get(severity, "")
+    style = f"{color}{Colors.BOLD if bold else ''}"
+    prefix = "\n" if leading_newline else ""
+    if style:
+        return f"{prefix}{style}{marker}:{Colors.RESET} {message}"
+    return f"{prefix}{marker}: {message}"
+
+
+# The layout primitives under their public names, for the renderers a sub-DSL
+# adds beside this one (the diagnostics of the compilers a backend drives, its
+# own remarks): one headline, label and indent grammar for every diagnostic.
+format_diagnostic_headline = _format_diagnostic_headline
+format_labeled_text = _format_labeled_text
 
 
 # =============================================================================
@@ -212,6 +909,18 @@ class DiagCatalog:
     def prefix(self) -> str:
         """The name prefix (PHASE / TYPE / ...), the catalog's internal grouping."""
         return self.name.split("_", 1)[0]
+
+    @property
+    def category(self) -> str:
+        """Author-facing category ("not zero-cost", "unsupported", "usage",
+        "warning"); see ``_CATEGORIES``. ``type(self)`` is the catalog the
+        member belongs to."""
+        return _CATEGORIES[(type(self), self.name)][0]
+
+    @property
+    def subcategory(self) -> str:
+        """Author-facing subcategory, a short phrase naming the mistake."""
+        return _CATEGORIES[(type(self), self.name)][1]
 
     @property
     def message(self) -> str:
@@ -379,7 +1088,6 @@ class DiagId(DiagCatalog, enum.Enum):
             "that refers back to itself is not supported.",
         ),
     )
-    # preprocessor) ---
 
     # --- ARG ---
     ARG_ANNOTATION_MISMATCH = (
@@ -408,6 +1116,14 @@ class DiagId(DiagCatalog, enum.Enum):
             "tuple or frozen record of them for `{arg_name}`.",
             "To pass a custom class, register an adapter for it with "
             "`@register_jit_arg_adapter(YourClass)`.",
+        ),
+    )
+    ARG_REJECTED_BY_OP = (
+        "`{api}` rejected one of its arguments: {detail}",
+        (
+            "Check the kind and value of each argument passed to `{api}` against "
+            "its documentation.",
+            "The underlying error is attached as the cause of this one.",
         ),
     )
 
@@ -525,3 +1241,113 @@ class WarnId(DiagCatalog, enum.Enum):
         "any error.",
         ("Use a wider float type that holds {value}, e.g. `Float64({value})`.",),
     )
+
+
+# =============================================================================
+# Author-facing classification
+# =============================================================================
+
+# Author-facing classification of every catalog entry: (category, subcategory).
+# The category names the rule the author broke; the subcategory says how.
+# Rendered under the source frame as "= category: <category> (<subcategory>)".
+# "not zero-cost" = the code would only work if the Python interpreter ran while
+# the compiled code runs; "unsupported" = a Python construct the DSL does not
+# compile (yet); "usage" = a wrong call, launch, option or type.
+NOT_ZERO_COST = "not zero-cost"
+UNSUPPORTED = "unsupported"
+USAGE = "usage"
+WARNING = "warning"
+
+# Keyed by ``(catalog class, code)``, so two catalogs may reuse one code name
+# whatever their namespace: a sub-DSL that ships a complete catalog of its own
+# in the bare ``error[CODE]`` form classifies its codes through ``classify``
+# without touching the base entries.
+_CATEGORIES: dict[tuple[type, str], tuple[str, str]] = {}
+
+
+def classify(catalog: type, category: str, subcategory: str, *codes: str) -> None:
+    """Classify ``codes`` of ``catalog`` (a ``DiagCatalog`` enum) under
+    ``category``/``subcategory``, so they render like the base ones; every code
+    must be a member of the catalog. Called once per catalog, next to its
+    definition (the gpu plugin's ``GpuDiagId``)."""
+    members = getattr(catalog, "__members__", {})
+    for code in codes:
+        if code not in members:
+            # Imported here: ``common`` imports this module.
+            from .common import DSLRuntimeError
+
+            raise DSLRuntimeError(
+                f"{catalog.__name__} has no member {code!r} to classify",
+                context={"catalog": catalog.__name__, "code": code},
+            )
+        _CATEGORIES[(catalog, code)] = (category, subcategory)
+
+
+# The base catalogs' own classification, one block per subcategory.
+_classify_error = functools.partial(classify, DiagId)
+_classify_warning = functools.partial(classify, WarnId)
+
+_classify_error(
+    NOT_ZERO_COST,
+    "a type or structure differs between paths of a runtime for/while/if",
+    "CONTAINER_UNSUPPORTED",
+    "CONTAINER_INVALID_RECORD",
+    "CONTAINER_TOO_DEEP",
+)
+_classify_error(
+    NOT_ZERO_COST,
+    "a variable is not set on every path of a runtime for/while/if",
+    "SCOPE_UNBOUND_NAME_IN_TRACE",
+)
+_classify_error(
+    NOT_ZERO_COST,
+    "a Python-only operation is applied to a runtime value",
+    "PHASE_REQUIRES_CONSTANT",
+    "PHASE_DYNAMIC_INDEX",
+    "PHASE_DYNAMIC_TO_STATIC_BOOL",
+)
+_classify_error(
+    USAGE,
+    "arguments",
+    "ARG_ANNOTATION_MISMATCH",
+    "ARG_UNSUPPORTED_TYPE",
+    "ARG_NOT_NUMERIC",
+    "ARG_REJECTED_BY_OP",
+    "CALL_ARGUMENTS",
+)
+_classify_error(
+    USAGE,
+    "compiling and reusing functions",
+    "CALL_NOT_CALLABLE",
+    "CALL_OUTSIDE_JIT",
+    "CALL_PLUGIN_REQUIRED",
+    "TYPE_RETURN_MISMATCH",
+)
+_classify_error(
+    USAGE,
+    "compile options",
+    "CONFIG_INVALID",
+)
+_classify_error(
+    USAGE,
+    "types",
+    "TYPE_IMPLICIT_PROMOTION_UNSUPPORTED",
+    "TYPE_INT_POW_UNSUPPORTED",
+    "TYPE_UNSUPPORTED_MLIR_TYPE",
+    "TYPE_UNKNOWN_DTYPE_NAME",
+)
+_classify_error(
+    USAGE,
+    "structs",
+    "STRUCT_DEFINITION",
+    "STRUCT_CONSTRUCTION",
+    "STRUCT_FIELD_ASSIGNMENT",
+)
+_classify_warning(
+    WARNING,
+    "numeric literal out of range",
+    "TYPE_INT_LITERAL_OUT_OF_RANGE",
+    "TYPE_FLOAT_TO_INT_OUT_OF_RANGE",
+    "TYPE_FLOAT_LITERAL_OVERFLOW",
+    "TYPE_FLOAT_LITERAL_UNDERFLOW",
+)
