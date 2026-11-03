@@ -55,6 +55,11 @@ def takes_compile_only(*, compile_only):
     entered.append("compile_only")
 
 
+@TestDSL.jit
+def takes_trace_hooks(*, trace_hooks):
+    entered.append("trace_hooks")
+
+
 def rejected(name, function, value):
     try:
         function(**{name: value})
@@ -74,6 +79,8 @@ rejected("extra_link_libs", takes_extra_link_libs, ())
 rejected("compile_only", takes_compile_only, False)
 rejected("no_cache", takes_no_cache, None)
 rejected("compile_only", takes_compile_only, None)
+rejected("trace_hooks", takes_trace_hooks, None)
+rejected("trace_hooks", takes_trace_hooks, ())
 # CHECK: RESERVED: pipeline None
 # CHECK-NEXT: RESERVED: container_attrs {}
 # CHECK-NEXT: RESERVED: no_cache False
@@ -81,6 +88,8 @@ rejected("compile_only", takes_compile_only, None)
 # CHECK-NEXT: RESERVED: compile_only False
 # CHECK-NEXT: RESERVED: no_cache None
 # CHECK-NEXT: RESERVED: compile_only None
+# CHECK-NEXT: RESERVED: trace_hooks None
+# CHECK-NEXT: RESERVED: trace_hooks ()
 
 
 @TestDSL.jit
