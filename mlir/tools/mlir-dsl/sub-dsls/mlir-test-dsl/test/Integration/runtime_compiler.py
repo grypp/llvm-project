@@ -578,6 +578,33 @@ with ir.Context():
     # CHECK: RESOLVED: 5 UNCAPTURED: True
 
 
+# Through the DSL the lookup is blamed on its own library setting: the
+# compile driver hands `load` the `<PREFIX>_LIBS` name, so a decorated
+# function whose module calls a symbol no library defines (added here by a
+# trace hook) is `CONFIG_INVALID` on `MLIR_DSL_LIBS`, not an internal error.
+def call_absent(dsl, module, function_name):
+    """Declare `absent` and call it from the entry, before its return."""
+    i32 = ir.IntegerType.get_signless(32)
+    with ir.InsertionPoint(module.body):
+        func.FuncOp("absent", ((), (i32,)), visibility="private")
+    for op in module.body.operations:
+        if op.operation.name == "func.func" and op.sym_name.value == function_name:
+            body = op.regions[0].blocks[0].operations
+            with ir.InsertionPoint(body[len(body) - 1]):
+                func.CallOp([i32], "absent", [])
+
+
+def dsl_lookup():
+    try:
+        twice(4, trace_hooks=[call_absent])
+        return "no error"
+    except m.DSLUserCodeError as e:
+        return f"{e.diag_id.name} {e.context['symbol']} | {'`MLIR_DSL_LIBS`' in str(e)}"
+
+
+print("DSL_LOOKUP:", dsl_lookup())
+# EXEC: DSL_LOOKUP: CONFIG_INVALID _mlir_twice | True
+
 # The compile cache key hashes the module bytecode with the pipeline and the
 # extra libraries, not the function name.
 with ir.Context():

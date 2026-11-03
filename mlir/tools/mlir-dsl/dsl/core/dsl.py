@@ -26,8 +26,8 @@ import re
 import threading
 import warnings
 from collections.abc import Callable, Hashable, Iterable, Sequence
-from contextlib import nullcontext
-from dataclasses import dataclass
+from contextlib import ExitStack, nullcontext
+from dataclasses import dataclass, field
 from functools import partial, wraps
 from types import UnionType
 from typing import Annotated, Any, ClassVar, NoReturn, Union, get_args, get_origin
@@ -37,6 +37,7 @@ from ..types import typing as t
 from ..util import profiler, tree_utils
 from ..util.cache import (
     JitCacheDict,
+    ModuleLocks,
     dump_cache_to_path,
     framework_identity,
     get_default_generated_ir_path,
@@ -68,10 +69,12 @@ from .user_op import enter_traceback_locations
 
 __all__ = [
     "BaseDSL",
-    "normalize_shared_library_paths",
+    "CompileStep",
     "DSLLocation",
     "DSLSingletonMeta",
     "JitFuncArgs",
+    "PendingCompile",
+    "normalize_shared_library_paths",
 ]
 
 # ===----------------------------------------------------------------------===
@@ -101,18 +104,25 @@ def _normalize_shared_library_paths(paths: Iterable[str]) -> tuple[str, ...]:
     return tuple(normalized_paths)
 
 
+# The public name: a DSL normalizes its own library lists the same way (an
+# empty entry and a missing file are ``DSLRuntimeError``).
+normalize_shared_library_paths = _normalize_shared_library_paths
+
+
 # ===----------------------------------------------------------------------===
 # DSL Class Construction
 # ===----------------------------------------------------------------------===
 
 
-normalize_shared_library_paths = _normalize_shared_library_paths
-
-
 class DSLSingletonMeta(type):
-    """Keep one instance per concrete DSL class.
+    """
+    Metaclass implementing the Singleton pattern for DSL classes.
 
-    Requesting an abstract base returns its first existing concrete instance.
+    One instance exists per concrete subclass, kept in ``_instances``.
+    Requesting an abstract base (``BaseDSL`` itself, or a class defined with
+    ``abstract=True``) returns the first instance of one of its concrete
+    subclasses instead of building one of its own; ``clear_instances`` serves
+    tests.
     """
 
     _instances: ClassVar[dict] = {}
@@ -202,6 +212,214 @@ class _ResultSpec:
     entry: Any
 
 
+@dataclass
+class _TraceResult:
+    """What one trace of a call produced, handed to the compile half of the
+    call (:meth:`BaseDSL.after_trace_result`, :meth:`BaseDSL.emit_artifact`,
+    :meth:`BaseDSL.invoke_compiled`): the verified module and its cache key,
+    the Python value the body returned and the slot its compiled result comes
+    back through, and the call's arguments in every form the rest of the call
+    reads (the canonical Python values, the values the trace saw, the
+    marshalled runtime arguments of the packed entry)."""
+
+    module: ir.Module
+    module_hash: str | None
+    result: Any
+    result_spec: _ResultSpec | None
+    function_name: str
+    pipeline: str
+    sig: inspect.Signature
+    args: tuple[Any, ...]
+    kwonlyargs: dict[str, Any]
+    trace_args: tuple[Any, ...]
+    exe_args: list[Any]
+    extra_link_libs: tuple[str, ...]
+
+
+@dataclass
+class PendingCompile:
+    """The rest of a call, deferred: :meth:`BaseDSL.emit_artifact` returns one
+    instead of a result, and the decorated function's wrapper runs it
+    (:meth:`finish`) once the DSL's ``call_scope`` has been left, or inside
+    the scope when ``needs_call_scope`` is set. ``run`` is the DSL's compile
+    step and whatever follows it (an invocation, a handle); ``scope`` is the
+    trace's context (the ``ir.Context``, location and remark session the core
+    held for the trace), filled in by the core and closed after ``run``. The
+    step runs on the calling thread, with no DSL active."""
+
+    run: Callable[[], Any]
+    scope: Any = None
+    needs_call_scope: bool = False
+
+    def finish(self) -> Any:
+        """Run the step inside its scope, then close the scope: the rest of
+        the call."""
+        with self.scope if self.scope is not None else nullcontext():
+            return self.run()
+
+
+@dataclass
+class CompileStep:
+    """One compile of a traced module, built by :meth:`BaseDSL.prepare_compile`
+    and run by :meth:`run`: the stages of ``compile_and_cache`` as an object a
+    DSL can hold, hand to another thread or run later (the step of a
+    :class:`PendingCompile`). ``compile_options`` are the DSL's
+    ``_compile_options()`` as evaluated when the step was prepared, so the
+    step never reads the DSL's settings later; ``post_processors`` run on the
+    compiled function once per compile, never on a cached function;
+    ``build_engine=False`` lowers the module without an engine, for a call
+    whose artifact is the lowered IR (the returned handle refuses calls);
+    ``func_type`` is the compiled-function class the compiler plugin's
+    ``load`` builds. :meth:`build` is the backend stage: a DSL compiling
+    through something other than the compiler plugin's engine overrides it in
+    a subclass named by ``BaseDSL._compile_step_class``."""
+
+    dsl: "BaseDSL"
+    module: ir.Module
+    module_hash: str | None
+    function_name: str
+    pipeline: str
+    sig: inspect.Signature
+    no_cache: bool
+    result_spec: _ResultSpec | None = None
+    extra_link_libs: tuple[str, ...] = ()
+    func: Callable[..., Any] | None = None
+    func_type: Any = None
+    build_engine: bool = True
+    compile_options: dict[str, Any] = field(default_factory=dict)
+    post_processors: list[Callable[[Any], None]] = field(default_factory=list)
+    #: Set by :meth:`run` when the lowered module came from the file cache;
+    #: :meth:`build` then skips the pass pipeline.
+    from_file_cache: bool = field(default=False, init=False)
+
+    def run(self) -> Any:
+        """Compile the module and publish the compiled function.
+
+        Under the module hash's lock (``BaseDSL.module_locks``): a thread
+        that had to wait for the hash checks the in-memory cache again and
+        takes the function the first thread published (its post-processors
+        skipped); otherwise the file cache is consulted (a hit replaces the
+        module with its lowered form), then :meth:`build` runs, the decorator
+        plugins' ``finish_compiled_function``, the adapters'
+        ``wrap_compiled_function`` and the post-processors, and the function
+        is published to the memory cache and, after a file-cache miss, to the
+        file cache. Nothing is locked or cached under ``no_cache``.
+
+        :return: The compiled function
+        """
+        dsl = self.dsl
+        keys = () if self.no_cache or self.module_hash is None else (self.module_hash,)
+        with dsl.module_locks.hold(keys) as waited:
+            if waited:
+                cached = dsl.jit_cache.get(self.module_hash)
+                if cached is not None and cached.capi_func is not None:
+                    dsl.cache_hits += 1
+                    log().info(
+                        "JIT cache hit IN-MEMORY function=[%s] module_hash=[%s]",
+                        self.function_name,
+                        self.module_hash,
+                    )
+                    return cached
+            file_cache_enabled = bool(keys) and not dsl.envar.disable_file_caching
+            if file_cache_enabled:
+                cached_module = load_cache_from_path(
+                    dsl.name,
+                    self.module_hash,
+                    path=get_default_generated_ir_path(dsl.name),
+                    bytecode_reader=read_bytecode_and_check_crc32,
+                )
+                if cached_module is not None:
+                    dsl.file_cache_hits += 1
+                    log().info(
+                        "JIT cache hit IN-FILE function=[%s] module_hash=[%s]",
+                        self.function_name,
+                        self.module_hash,
+                    )
+                    self.module = cached_module
+                    self.from_file_cache = True
+            if not self.from_file_cache:
+                dsl.cache_misses += 1
+                log().info(
+                    "JIT cache miss function=[%s] module_hash=[%s]",
+                    self.function_name,
+                    self.module_hash,
+                )
+            jit_function = self.build()
+            jit_function.result_spec = self.result_spec  # type: ignore[attr-defined]
+            execution_args = getattr(jit_function, "execution_args", None)
+            if execution_args is not None:
+                execution_args.set_adapter_scope(dsl._jit_arg_adapter_scope)
+            # Decorator plugins record what the trace did; adapters then wrap
+            # the function for another ABI (their symbols are in the engine).
+            for plugin in dsl.plugins.decorators:
+                plugin.finish_compiled_function(dsl, jit_function)
+            for plugin in dsl.plugins.adapters:
+                jit_function = plugin.wrap_compiled_function(dsl, jit_function)
+            for process in self.post_processors:
+                process(jit_function)
+
+            if not self.no_cache:
+                # The entry lives as long as the decorated function does.
+                dsl.jit_cache.set(self.module_hash, jit_function, self.func)
+            if file_cache_enabled and not self.from_file_cache:
+                dump_cache_to_path(
+                    dsl.name,
+                    jit_function,
+                    self.module_hash,
+                    path=get_default_generated_ir_path(dsl.name),
+                    bytecode_writer=lambda f: write_bytecode_with_crc32(
+                        f, jit_function.ir_module
+                    ),
+                )
+            return jit_function
+
+    def build(self) -> Any:
+        """The backend stage: lower the module (unless it came lowered from
+        the file cache), build its engine (unless ``build_engine`` is off)
+        and bind the entry through the compiler plugin's ``load``, with the
+        DSL's ``_load_options``.
+
+        :return: The compiled function the plugin's ``load`` built
+        """
+        dsl = self.dsl
+        if not self.build_engine:
+            if not self.from_file_cache:
+                dsl._maybe_profile(dsl.compile_module)(
+                    self.module,
+                    self.pipeline,
+                    self.function_name,
+                    **self.compile_options,
+                )
+            engine = None
+        else:
+            shared_libs = dsl.get_shared_libs(self.extra_link_libs)
+            if self.from_file_cache:
+                engine = dsl._maybe_profile(dsl.jit_lowered_module)(
+                    self.module, shared_libs, self.function_name
+                )
+            else:
+                engine = dsl._maybe_profile(dsl.compile_and_jit)(
+                    self.module,
+                    self.pipeline,
+                    shared_libs,
+                    self.function_name,
+                    **self.compile_options,
+                )
+        # Binding the entry materializes the JIT'd code (ORC compiles lazily),
+        # so it belongs to the jit phase together with engine construction.
+        load = profiler.timed("jit")(dsl._maybe_profile(dsl._compiler.load))
+        options = {
+            "jit_time_profiling": dsl.envar.jit_time_profiling,
+            "result_ctype": (
+                self.result_spec.slot if self.result_spec is not None else None
+            ),
+            "func_type": self.func_type,
+            "libs_var": f"{dsl.envar.prefix}_LIBS",
+            **dsl._load_options(self),
+        }
+        return load(self.module, engine, self.function_name, self.sig, **options)
+
+
 class _PluginDecorator:
     """Bind a decorator to the DSL class it is accessed through.
 
@@ -256,18 +474,36 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     plugin's ``call`` (from Python) or ``launch`` (inside a trace).
     """
 
-    _jit_cache_class: ClassVar[type[JitCacheDict]] = JitCacheDict
-
-    user_error_class: ClassVar[type[DSLUserCodeError]] = DSLUserCodeError
-    diag_id_aliases: ClassVar[dict[Any, Any]] = {}
-    _warning_category: ClassVar[type[Warning]] = DSLWarning
-
-    _abstract_dsl_base: ClassVar[bool] = True
-
     _env_class: type[EnvironmentVarManager] = EnvironmentVarManager
+    #: The class of the in-memory JIT cache ``__init__`` builds as
+    #: ``jit_cache`` (``max_elems=`` sized from the environment); a DSL with a
+    #: cache policy of its own names a ``JitCacheDict`` subclass.
+    _jit_cache_class: ClassVar[type[JitCacheDict]] = JitCacheDict
+    #: The class of the compile steps :meth:`prepare_compile` builds; a DSL
+    #: whose compile runs through another backend names a ``CompileStep``
+    #: subclass with its own ``build``.
+    _compile_step_class: ClassVar[type[CompileStep]] = CompileStep
+    #: True on an abstract DSL base: ``BaseDSL`` itself and every class
+    #: defined with ``class Family(BaseDSL, abstract=True)``. Calling one
+    #: returns the instance of a concrete subclass, never builds its own.
+    _abstract_dsl_base: ClassVar[bool] = True
     _jit_arg_adapter_scope: ClassVar[str | None] = None
     # Optional compiler-recognized component inserted by a DSL's name mangler.
     _name_mangling_prefix: ClassVar[str] = ""
+    #: The class of the errors the core raises for the author's mistakes: a
+    #: ``DSLUserCodeError`` subclass taking its constructor arguments. Every
+    #: core raise site builds its error through :meth:`user_error`, so a DSL
+    #: with an exception hierarchy of its own sees the core's errors arrive as
+    #: its members.
+    user_error_class: ClassVar[type[DSLUserCodeError]] = DSLUserCodeError
+    #: Catalog ids substituted at the core raise sites, ``{core id: own id}``:
+    #: a DSL with a diagnostic catalog of its own reports the core's mistakes
+    #: under its codes and wording (the fields of the raise site fill the
+    #: alias's templates).
+    diag_id_aliases: ClassVar[dict[Any, Any]] = {}
+    #: The warnings ``<PREFIX>_WARNINGS_IGNORE`` silences: the DSL's own
+    #: (``DSLWarning`` and its subclasses), never every warning of the process.
+    _warning_category: ClassVar[type[Warning]] = DSLWarning
     #: What the DSL is made of: one plugin per role (``type_ops``,
     #: ``ast_preprocessor``, ``compiler``) and
     #: the families (``decorators``, ``adapters``). ``__init__``
@@ -315,6 +551,40 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                         )
                     setattr(cls, name, decorator)
 
+    @classmethod
+    def user_error(cls, diag_id: Any, **fields: Any) -> DSLUserCodeError:
+        """The error this DSL raises for ``diag_id``: an instance of
+        :attr:`user_error_class` carrying the id :attr:`diag_id_aliases` maps
+        ``diag_id`` to, with ``fields`` as ``DSLUserCodeError`` takes them.
+        The core's raise sites call it on the DSL (or DSL class) in hand;
+        ``common._user_error`` is the same for the active DSL."""
+        return _user_error(diag_id, cls, **fields)
+
+    def on_trace_name_error(
+        self,
+        func: Callable[..., Any],
+        error: NameError,
+        filename: str | None,
+        lineno: int | None,
+    ) -> NoReturn:
+        """What a ``NameError`` met while tracing ``func`` becomes.
+
+        ``trace_body`` calls it with the error and the user's line that raised
+        it (the innermost frame of its traceback). The default reports
+        ``SCOPE_UNBOUND_NAME_IN_TRACE`` there through :meth:`user_error`: a
+        name read on a path that never set it, the usual cause once the
+        rewrite has outlined a branch. A DSL whose rewrite introduces names of
+        its own overrides this to tell its unbound reads apart; a hook that
+        returns lets the ``NameError`` propagate as it is."""
+        raise self.user_error(
+            DiagId.SCOPE_UNBOUND_NAME_IN_TRACE,
+            filename=filename,
+            lineno=lineno,
+            cause=error,
+            var=getattr(error, "name", None) or f"<in {func.__name__}>",
+            function_name=func.__name__,
+        ) from error
+
     def _remark_session(self, context: ir.Context) -> Any:
         """The compiler plugin's remark session for ``context`` under the
         ``REMARKS``/``REMARKS_POLICY``/``REMARKS_OUTPUT`` settings; a session
@@ -323,6 +593,17 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         if compiler is None:
             return _NoRemarkSession()
         return compiler.remark_session(context, **self._remark_options())
+
+    def _remark_options(self) -> dict[str, Any]:
+        """The session options of a compile, handed to the compiler plugin's
+        ``remark_session`` (directly, and through ``compile``): the
+        ``REMARKS``, ``REMARKS_POLICY`` and ``REMARKS_OUTPUT`` settings. A DSL
+        whose compiler plugin takes other options overrides this."""
+        return {
+            "remark_filter": self.envar.remarks,
+            "remark_policy": self._remarks_policy,
+            "remark_output": self.envar.remarks_output,
+        }
 
     @property
     def _remarks_policy(self) -> str:
@@ -378,6 +659,9 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         self.jit_cache: JitCacheDict = self._jit_cache_class(
             max_elems=0 if self.envar.no_cache else self.envar.jit_cache_max_elems
         )
+        # One compile per module hash at a time: a second thread with the same
+        # hash waits for the first and takes its compiled function.
+        self.module_locks: ModuleLocks = ModuleLocks()
         self.cache_hits: int = 0
         self.cache_misses: int = 0
         self.file_cache_hits: int = 0
@@ -387,12 +671,15 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         # The structured remarks of the last compile (``RemarkSession.remarks``).
         self.collected_remarks: list[dict[str, Any]] = []
 
-        # set warning
+        # The DSL's own warnings only: the process's other warnings are not
+        # this DSL's to silence.
         if self.envar.warnings_ignore:
             warnings.filterwarnings("ignore", category=self._warning_category)
 
         # Path of the dumped MLIR file; set by build_module when KEEP_IR is active.
         self.dump_mlir_path: Any = None
+        # The same raw dump under the stage's name, and every dump of the last
+        # build_module by stage (``raw``, ``clean``, ``after-<pass>``, ...).
         self.dump_mlir_raw_path: Any = None
         self.dump_mlir_paths: dict[str, str] = {}
         # The function being traced; set on every path that reaches the
@@ -419,6 +706,9 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         ast_preprocessor = self.plugins.ast_preprocessor
         if ast_preprocessor is not None:
             self.executor.set_functions(**ast_preprocessor.executors(self))
+            # The plugin builds the preprocessor, which recognises the
+            # decorators the class installs; a plugin that builds none
+            # supplies executors only.
             self.preprocessor = ast_preprocessor.make_preprocessor(
                 self,
                 dsl_package_name or ast_preprocessor.helpers_package(),
@@ -479,6 +769,37 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         if hasattr(func, "_dsl_cls"):
             func._dsl_object = func._dsl_cls._get_dsl()
             delattr(func, "_dsl_cls")
+
+    @staticmethod
+    def _filter_call_traceback(func: Any, exc: BaseException) -> None:
+        """Drop the DSL's frames from the traceback of ``exc``, raised by a
+        call of the decorated ``func`` (:func:`filter_traceback`), when the
+        DSL filters stack traces (``<PREFIX>_FILTER_STACKTRACE``, on unless
+        ``DEBUG`` or ``SHOW_STACKTRACE`` asks for everything). The region
+        functions the AST preprocessor plugin generates
+        (``generated_frame_names``) are collapsed into the user's frame. A
+        function whose DSL instance does not exist yet (its construction is
+        what failed) is left alone."""
+        dsl = getattr(func, "_dsl_object", None)
+        if dsl is None or not dsl.envar.filter_stacktrace:
+            return
+        preprocessor = dsl.plugins.ast_preprocessor
+        filter_traceback(
+            exc, generated_names=getattr(preprocessor, "generated_frame_names", ())
+        )
+
+    def preprocess_key(self, func: Any) -> Hashable:
+        """What the rewrite of ``func`` depends on: the preprocessor's class
+        and the helpers module it imports. A decorated function is rewritten
+        once per key (:meth:`_preprocess_and_replace_code`), so a DSL whose
+        rewrite has modes (another preprocessor swapped in for a block of
+        code) returns a key that changes with them, and the function is
+        rewritten again, from its original code, the next time it is called."""
+        ast_preprocessor = self.plugins.ast_preprocessor
+        helpers_module = (
+            None if ast_preprocessor is None else ast_preprocessor.helpers_module
+        )
+        return (type(self.preprocessor), helpers_module)
 
     @classmethod
     def _preprocess_and_replace_code(cls, func: Any) -> None:
@@ -568,15 +889,37 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
             @wraps(func)
             def jit_wrapper(*args: Any, **kwargs: Any) -> Any:
+                # The wrapper holds the DSL class and the function only; the
+                # plugin is looked up at call time. No DSL is made active
+                # here: the dispatch reads the current one to tell a call from
+                # Python (none active; ``run`` then activates this DSL) from a
+                # call inside a trace, which runs in the scope of the
+                # top-level call it belongs to. A ``PendingCompile`` the
+                # dispatch hands back (``emit_artifact``) is the rest of the
+                # call, run once the call scope is left unless it asks to run
+                # inside it.
                 try:
-                    # Resolve the instance plugin at call time; retain no bound method.
                     if in_trace():
                         cls._preprocess_and_replace_code(func)
-                        return cls._dispatch_decorated(func, *args, **kwargs)
+                        result = cls._dispatch_decorated(func, *args, **kwargs)
+                        if isinstance(result, PendingCompile):
+                            return result.finish()
+                        return result
                     with cls.call_scope(func):
                         cls._preprocess_and_replace_code(func)
-                        return cls._dispatch_decorated(func, *args, **kwargs)
+                        result = cls._dispatch_decorated(func, *args, **kwargs)
+                        if (
+                            isinstance(result, PendingCompile)
+                            and result.needs_call_scope
+                        ):
+                            return result.finish()
+                    if isinstance(result, PendingCompile):
+                        return result.finish()
+                    return result
                 except Exception as exc:
+                    # The outermost frame of the DSL on a call from Python: the
+                    # DSL's frames leave the traceback here when the DSL
+                    # filters stack traces. A bare raise adds no entry.
                     cls._filter_call_traceback(func, exc)
                     raise
 
@@ -749,6 +1092,24 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         # The position is unknown here, so the receiver rule does not apply.
         return self._is_meta_at_boundary(arg, spec_ty, "", -1, self.traced_function)
 
+    def _mangle_folds(self, arg: Any, annotation: Any) -> bool:
+        """Whether :meth:`mangle_name` folds ``arg`` (passed to a parameter
+        annotated ``annotation``) into the symbol: by default the Meta
+        arguments, the values the trace specialises on. A DSL that wants one
+        symbol per value of an annotated scalar too folds those as well."""
+        return self._is_meta_argument(arg, annotation)
+
+    def _mangle_render(self, arg: Any, annotation: Any) -> str:
+        """The spelling of a folded ``arg`` in the symbol, before the unwanted
+        characters are stripped: a type by its name, a sequence element by
+        element, anything else through ``str``. A DSL spells its own kinds of
+        values here (an instance by its class name, say)."""
+        if isinstance(arg, type):
+            return arg.__name__
+        if isinstance(arg, (list, tuple)):
+            return "_".join(map(str, arg))
+        return str(arg)
+
     def mangle_name(
         self, function_name: str, args: tuple[Any, ...], sig: inspect.Signature
     ) -> str:
@@ -861,6 +1222,82 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     # ===------------------------------------------------------------------===
     # Host argument boundary
     # ===------------------------------------------------------------------===
+
+    def _is_meta_at_boundary(
+        self, arg: Any, spec: Any, name: str, idx: int, func: Any
+    ) -> bool:
+        """Whether the argument ``arg`` of the parameter ``name`` (annotated
+        ``spec``, at position ``idx`` of ``func``) is a Python value the trace
+        specialises on, the alternative being a runtime value the compiled
+        function takes. The default is :func:`is_argument_meta`: decided by
+        the annotation and the (adapted) value alone, a value the DSL has no
+        leaf for being a Python value. A DSL with another policy (every
+        unannotated argument a runtime value, a class of its own speaking a
+        protocol the core does not know) decides here, and pairs the verdict
+        with :meth:`_flatten_jit_arg` and :meth:`_restore_argument` for the
+        values the core cannot flatten or rebuild itself."""
+        return is_argument_meta(arg, spec, name, idx, func)
+
+    def _restore_argument(
+        self, arg: Any, spec: Any, block_args: Sequence[Any], start: int
+    ) -> tuple[Any, int]:
+        """Rebuild the value the traced body receives for the runtime argument
+        ``arg`` (annotated ``spec``) from the entry's ``block_args``, starting
+        at index ``start``; returns the value and the number of block arguments
+        it consumed. The default wraps one block argument in the annotated
+        dtype when the value is not of it yet (a Python number cast at the
+        boundary, ``compile()``'s type-only placeholder; an abstract annotation
+        takes the dtype of the block argument), and rebuilds any other value
+        leaf by leaf in its Python shape. A DSL restores the values its
+        :meth:`_flatten_jit_arg` flattened itself here."""
+        base_spec = get_args(spec)[0] if get_origin(spec) is Annotated else spec
+        if isinstance(base_spec, t.NumericMeta) and not isinstance(arg, base_spec):
+            # Numeric type coercion for a staged argument: the block arg
+            # already has the target MLIR type. Wrap it directly instead of
+            # casting the caller's value, which would emit casts referencing
+            # SSA values from an outer region. An abstract annotation
+            # (``Numeric``) is no type to wrap in: the block argument's type,
+            # fixed at the boundary, names the dtype (a kernel is traced with
+            # the raw call arguments, so the Python number is still here).
+            block_arg = block_args[start]
+            dtype = (
+                t.Numeric.from_mlir_type(block_arg.type)
+                if base_spec.is_abstract
+                else base_spec
+            )
+            return dtype(block_arg), 1
+        _, _, treedef = tree_utils.tree_flatten(arg, return_ir_values=False)
+        n_args = sum(
+            len(tree_utils.leaf_ir_types(leaf))
+            for _, leaf in tree_utils.tree_leaves(treedef)
+        )
+        restored = self._restore_from_block_args(
+            treedef, block_args[start : start + n_args]
+        )
+        return restored, n_args
+
+    @staticmethod
+    def _is_type_placeholder(arg: Any, spec: Any) -> bool:
+        """Whether ``arg`` is a concrete dtype class passed for a parameter
+        whose annotation is a numeric DSL type it belongs to: ``compile()``'s
+        type-only placeholder, a type with no execution value (the function is
+        compiled for the type and called with values later)."""
+        if get_origin(spec) is Annotated:
+            spec = get_args(spec)[0]
+        return (
+            isinstance(arg, t.NumericMeta)
+            and not arg.is_abstract
+            and isinstance(spec, t.NumericMeta)
+            and issubclass(arg, spec)
+        )
+
+    def _compiled_argument_shape(self, arg: Any, spec: Any) -> Any:
+        """The host shape a compiled function remembers for the argument
+        ``arg`` (``ExecutionArgs.set_shapes``): its flattened tree; a type-only
+        placeholder stands for a value of its dtype."""
+        if self._is_type_placeholder(arg, spec):
+            arg = arg(0)
+        return tree_utils.tree_flatten(arg, return_ir_values=False)[2]
 
     def _validate_arg(
         self, arg: Any, arg_index: int, arg_name: str, arg_spec: Any
@@ -1266,16 +1703,40 @@ class BaseDSL(metaclass=DSLSingletonMeta):
     # Compile, hash, dump
     # ===------------------------------------------------------------------===
 
+    def _compile_options(self) -> dict[str, Any]:
+        """The keywords :meth:`prepare_compile` fixes on a compile step for
+        its :meth:`compile_and_jit` or :meth:`compile_module`: the compiler
+        plugin's ``compile`` keywords (the verifier, IR printing into a tree,
+        pass profiling, session options of its own), evaluated when the step
+        is prepared so the step never reads the DSL's settings later. They
+        win over what :meth:`_compile_keywords` passes on its own. The
+        default adds nothing."""
+        return {}
+
+    def _compile_keywords(self, options: dict[str, Any]) -> dict[str, Any]:
+        """The keywords of one compile through the compiler plugin: the pass
+        profiling and debug-info settings, the remark options, then
+        ``options`` (a step's ``compile_options``), which win."""
+        return {
+            "enable_pass_profiling": self.envar.enable_pass_profiling,
+            "enable_debug_info": self.envar.debuginfo,
+            **self._remark_options(),
+            **options,
+        }
+
     def compile_and_jit(
         self,
         module: ir.Module,
         pipeline: str,
         shared_libs: list[str],
         function_name: str = "",
+        **options: Any,
     ) -> Any:
         """
         Compile and JIT an MLIR module through the compiler plugin.
 
+        :param options: Further keywords of the plugin's ``compile_and_jit``
+            (a step's ``compile_options``), over the DSL's own
         :return: The ``ExecutionEngine`` holding the compiled module.
         """
         # This method is also a direct entry point (not only reached through
@@ -1287,13 +1748,45 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 module,
                 pipeline,
                 shared_libs=shared_libs,
-                enable_pass_profiling=self.envar.enable_pass_profiling,
-                enable_debug_info=self.envar.debuginfo,
-                **self._remark_options(),
                 after_lowering=partial(
                     self._after_lowering, function_name=function_name
                 ),
+                **self._compile_keywords(options),
             )
+        except DSLBaseError:
+            raise
+        except Exception as e:
+            raise DSLRuntimeError(
+                "compilation failed", context={"function": function_name}, cause=e
+            ) from e
+        finally:
+            profiler.finish_compile()
+
+    def compile_module(
+        self,
+        module: ir.Module,
+        pipeline: str,
+        function_name: str = "",
+        **options: Any,
+    ) -> ir.Module:
+        """Lower ``module`` through the compiler plugin's pipeline without
+        building an engine (a ``CompileStep(build_engine=False)``); the
+        adapters' ``after_lowering`` run on the lowered module as in
+        :meth:`compile_and_jit`.
+
+        :param options: Further keywords of the plugin's ``compile``
+        :return: The lowered module (``module`` itself with the shipped
+            plugin, which lowers in place)
+        """
+        profiler.begin_compile()
+        try:
+            lowered = self._compiler.compile(
+                module, pipeline, **self._compile_keywords(options)
+            )
+            if lowered is None:
+                lowered = module
+            self._after_lowering(lowered, function_name)
+            return lowered
         except DSLBaseError:
             raise
         except Exception as e:
@@ -1391,6 +1884,14 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         )
         return module_hash
 
+    def _cache_key_extra(self) -> bytes:
+        """Bytes :meth:`get_module_hash` adds to the compile cache key of
+        every module, after the environment's ``affects_compile`` settings:
+        whatever else the compiled artifact depends on in this DSL (compile
+        options of its own, the options of its pipeline). The default adds
+        nothing."""
+        return b""
+
     def _inspection_pipeline(self, passes: str) -> str:
         """Frame ``passes`` for IR-inspection dumps."""
         passes = passes.strip()
@@ -1418,6 +1919,51 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             ) from e
         log().info("Saved IR [%s] to [%s]", label, path)
         return str(path)
+
+    def _keep_ir_stages(self) -> tuple[str, ...]:
+        """The IR dumps ``<PREFIX>_KEEP_IR`` asks :meth:`build_module` for:
+        ``1``/``true`` is the raw module alone (``("raw",)``), otherwise the
+        comma-separated stages ``raw``, ``clean`` (canonicalize and cse),
+        ``after-<pass>`` and ``after-passes`` (the DSL's pipeline), every
+        stage but the raw one taken on a clone. Empty when the setting is
+        unset; an unknown stage is ``CONFIG_INVALID``."""
+        raw = (self.envar.keep_ir or "").strip()
+        lowered = raw.lower()
+        if not lowered or lowered in ("0", "false", "no", "off"):
+            return ()
+        if lowered in ("1", "true", "yes", "on"):
+            return ("raw",)
+        stages = tuple(token.strip() for token in raw.split(",") if token.strip())
+        for stage in stages:
+            if stage not in ("raw", "clean", "after-passes") and not (
+                stage.startswith("after-") and len(stage) > len("after-")
+            ):
+                raise DSLUserCodeValueError(
+                    DiagId.CONFIG_INVALID,
+                    var=f"{self.name}_KEEP_IR",
+                    detail=f"`{stage}` is not a stage; expected `1`, or a "
+                    "comma-separated list of `raw`, `clean`, `after-<pass>` and "
+                    "`after-passes`",
+                )
+        return stages
+
+    def _compile_clone_and_save(
+        self,
+        module: ir.Module,
+        pipeline: str,
+        label: str,
+        *,
+        enable_verifier: bool = True,
+    ) -> str:
+        """Run ``pipeline`` on a clone of ``module`` (a bytecode round trip, so
+        the module itself, and what is cached under its hash, stays untouched)
+        through the compiler plugin and save the result as the dump ``label``
+        (:meth:`_save_ir`); returns the path."""
+        buffer = io.BytesIO()
+        module.operation.write_bytecode(buffer)
+        clone = ir.Module.parse(buffer.getvalue(), context=module.context)
+        self._compiler.compile(clone, pipeline, enable_verifier=enable_verifier)
+        return self._save_ir(clone, label)
 
     def build_module(self, module: ir.Module, function_name: str) -> ir.Module:
         """
@@ -1473,6 +2019,17 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
         self._verify_module(module)
         return module
+
+    def _verify_module(self, module: ir.Module) -> None:
+        """Verify the finished ``module``, last in :meth:`build_module`: the
+        MLIR verifier, a failure being an ``IR verification failed``
+        ``DSLRuntimeError``. A DSL with invariants of its own on the traced
+        module (an attribute it forbids, an op its lowering cannot take)
+        checks them here, around ``super()``'s."""
+        try:
+            module.operation.verify()
+        except Exception as e:
+            raise DSLRuntimeError("IR verification failed", cause=e) from e
 
     # ===------------------------------------------------------------------===
     # Return values
@@ -1567,11 +2124,14 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         no_cache: bool = False,
         pipeline: str = "",
         extra_link_libs: tuple[str, ...] = (),
+        trace_hooks: Sequence[Callable[..., Any]] = (),
     ) -> tuple[ir.Module, str | None, Any, _ResultSpec | None]:
         """Trace ``func`` into the op the decorator plugin ``entry`` builds, in
         a fresh module. This runs with the DSL active (``run``), so a decorated
         function called inside the body is launched into this trace, not
-        called.
+        called. ``trace_hooks`` are the call's ``trace_hooks=`` callables,
+        ``hook(dsl, module, function_name)``, run on the finished module
+        after the adapters added to it and before it is hashed.
 
         :return: The verified module, its hash (None under ``no_cache``), the
             trace's Python result and the result slot description
@@ -1636,6 +2196,10 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 plugin.attach_to_module(
                     self, module, function_name, sig, args, kwonlyargs
                 )
+            # The call's hooks see the finished module last, outside the
+            # module's insertion point; what they add is hashed too.
+            for hook in trace_hooks:
+                hook(self, module, function_name)
             module_hash = None
             if not no_cache:
                 module_hash = self.get_module_hash(
@@ -1662,6 +2226,55 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         """
         return self.profiler(fn) if self.envar.jit_time_profiling else fn
 
+    def prepare_compile(
+        self,
+        module: ir.Module,
+        module_hash: str | None,
+        function_name: str,
+        pipeline: str,
+        sig: inspect.Signature,
+        no_cache: bool,
+        *,
+        result_spec: _ResultSpec | None = None,
+        extra_link_libs: tuple[str, ...] = (),
+        func: Callable[..., Any] | None = None,
+        func_type: Any = None,
+        build_engine: bool = True,
+        post_processors: Sequence[Callable[[Any], None]] = (),
+    ) -> CompileStep:
+        """The compile step of ``module`` (:class:`CompileStep`), ready to run;
+        :meth:`compile_and_cache` is ``prepare_compile(...).run()``. The DSL's
+        :meth:`_compile_options` are evaluated here, under the caller's
+        scope, so a step run later or on another thread compiles with the
+        settings of the call that prepared it.
+
+        :param module_hash: The compile cache key, None under ``no_cache``
+        :param func: The decorated function whose lifetime the cache entry
+            follows
+        :param func_type: The compiled-function class the plugin's ``load``
+            builds, its default when None
+        :param build_engine: False lowers without an engine (see
+            :class:`CompileStep`)
+        :param post_processors: Callables run on the compiled function after
+            the plugins wrapped it, once per compile
+        """
+        return self._compile_step_class(
+            dsl=self,
+            module=module,
+            module_hash=module_hash,
+            function_name=function_name,
+            pipeline=pipeline,
+            sig=sig,
+            no_cache=no_cache,
+            result_spec=result_spec,
+            extra_link_libs=tuple(extra_link_libs),
+            func=func,
+            func_type=func_type,
+            build_engine=build_engine,
+            compile_options=dict(self._compile_options()),
+            post_processors=list(post_processors),
+        )
+
     def compile_and_cache(
         self,
         module: ir.Module,
@@ -1675,7 +2288,8 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         extra_link_libs: tuple[str, ...] = (),
         func: Callable[..., Any] | None = None,
     ) -> Any:
-        """Compile ``module`` and cache the callable the compiler plugin loads.
+        """Compile ``module`` and cache the callable the compiler plugin loads:
+        the step :meth:`prepare_compile` builds, run now.
 
         The lowered module goes into an ``ExecutionEngine`` over
         ``get_shared_libs``; the entry is the packed ``_mlir_<name>`` wrapper.
@@ -1685,80 +2299,24 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         miss, dumped there after the pipeline ran (bytecode + CRC32), so a later
         process skips the pass pipeline and only builds the engine.
         """
-        file_cache_enabled = (
-            not no_cache
-            and module_hash is not None
-            and not self.envar.disable_file_caching
-        )
-        load_from_file_cache = False
-        if file_cache_enabled:
-            cached_module = load_cache_from_path(
-                self.name,
-                module_hash,
-                path=get_default_generated_ir_path(self.name),
-                bytecode_reader=read_bytecode_and_check_crc32,
-            )
-            if cached_module is not None:
-                self.file_cache_hits += 1
-                log().info(
-                    "JIT cache hit IN-FILE function=[%s] module_hash=[%s]",
-                    function_name,
-                    module_hash,
-                )
-                module = cached_module
-                load_from_file_cache = True
-        if not load_from_file_cache:
-            self.cache_misses += 1
-            log().info(
-                "JIT cache miss function=[%s] module_hash=[%s]",
-                function_name,
-                module_hash,
-            )
-        shared_libs = self.get_shared_libs(extra_link_libs)
-        if load_from_file_cache:
-            engine = self._maybe_profile(self.jit_lowered_module)(
-                module, shared_libs, function_name
-            )
-        else:
-            engine = self._maybe_profile(self.compile_and_jit)(
-                module, pipeline, shared_libs, function_name
-            )
-        # Binding the entry materializes the JIT'd code (ORC compiles lazily),
-        # so it belongs to the jit phase together with engine construction.
-        load = profiler.timed("jit")(self._maybe_profile(self._compiler.load))
-        jit_function = load(
+        return self.prepare_compile(
             module,
-            engine,
+            module_hash,
             function_name,
+            pipeline,
             sig,
-            jit_time_profiling=self.envar.jit_time_profiling,
-            result_ctype=result_spec.slot if result_spec is not None else None,
-        )
-        jit_function.result_spec = result_spec  # type: ignore[attr-defined]
-        execution_args = getattr(jit_function, "execution_args", None)
-        if execution_args is not None:
-            execution_args.set_adapter_scope(self._jit_arg_adapter_scope)
-        # Decorator plugins record what the trace did; adapters then wrap the
-        # function for another ABI (their symbols are in the engine now).
-        for plugin in self.plugins.decorators:
-            plugin.finish_compiled_function(self, jit_function)
-        for plugin in self.plugins.adapters:
-            jit_function = plugin.wrap_compiled_function(self, jit_function)
+            no_cache,
+            result_spec=result_spec,
+            extra_link_libs=extra_link_libs,
+            func=func,
+        ).run()
 
-        if not no_cache:
-            # The entry lives as long as the decorated function does.
-            self.jit_cache.set(module_hash, jit_function, func)
-        if file_cache_enabled and not load_from_file_cache:
-            dump_cache_to_path(
-                self.name,
-                jit_function,
-                module_hash,
-                path=get_default_generated_ir_path(self.name),
-                bytecode_writer=lambda f: write_bytecode_with_crc32(
-                    f, jit_function.ir_module
-                ),
-            )
-        return jit_function
+    def _load_options(self, step: CompileStep) -> dict[str, Any]:
+        """Further keywords of the compiler plugin's ``load`` for ``step``.
+        ``CompileStep.build`` passes the profiling flag, the result slot,
+        ``func_type`` and the ``<PREFIX>_LIBS`` name itself; what a DSL
+        returns here wins over them. The default adds nothing."""
+        return {}
 
     def post_compilation_cleanup(self) -> None:
         """Clean up some internal state after one compilation is completed."""
@@ -1778,20 +2336,50 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         compile_only: bool,
         location: DSLLocation | None = None,
         extra_link_libs: tuple[str, ...] = (),
+        trace_hooks: Sequence[Callable[..., Any]] = (),
+        *,
+        setup: "BaseDSL._CompilationSetup | None" = None,
     ) -> Any:
         """Trace ``func`` into the op the decorator plugin ``entry`` builds in
         an MLIR module, compile it through the compiler plugin (or take the
         cached function) and run it.
 
+        The call's hooks run in this order: :meth:`_configure_compilation` is
+        entered around the trace and the compile, :meth:`after_trace_result`
+        sees the finished trace, :meth:`emit_artifact` may end the call with
+        a value of its own or a :class:`PendingCompile`, and
+        :meth:`invoke_compiled` runs the compiled function and builds the
+        result through :meth:`_call_result`. ``setup`` is the call's
+        ``_CompilationSetup`` (:meth:`run` passes it); a direct caller may
+        leave it out, and one without options is built from the arguments.
+
         :return: The trace's Python result under ``<PREFIX>_DRYRUN`` or on a
             DSL without a compiler, the compiled function under
-            ``compile_only``, else the call's result
+            ``compile_only``, what :meth:`emit_artifact` returned when it
+            returned something, else the call's result
         """
+        if setup is None:
+            setup = self._CompilationSetup(
+                function_name=function_name,
+                pipeline=pipeline,
+                container_attrs=container_attrs,
+                no_cache=no_cache,
+                extra_link_libs=tuple(extra_link_libs),
+                compile_only=compile_only,
+                canonicalized_args=args,
+                canonicalized_kwargs=kwonlyargs,
+                sig=sig,
+                location=location,
+                trace_hooks=tuple(trace_hooks),
+            )
         # The remark session owns the context's remark engine for the whole
         # call, so trace-time remarks and the passes' remarks share one stream.
-        with ir.Context() as ctx, self.get_ir_location(location), self._remark_session(
-            ctx
-        ) as remark_session:
+        # The stack holds the context, the location and the session, so a
+        # deferred step (``PendingCompile``) can take them over.
+        with ExitStack() as scope:
+            ctx = scope.enter_context(ir.Context())
+            scope.enter_context(self.get_ir_location(location))
+            remark_session = scope.enter_context(self._remark_session(ctx))
             # Each MLIR context keeps a thread pool alive; cached compilations
             # keep their context, so threading is disabled to bound the count.
             ctx.enable_multithreading(False)
@@ -1804,88 +2392,75 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
             profiler.begin_compile()
             try:
-                # Convert input arguments to MLIR arguments
-                mlir_func_args = self.generate_mlir_function_types(
-                    func,
-                    function_name,
-                    args,
-                    kwonlyargs,
-                    sig,
-                    compile_only=compile_only,
-                )
-                exe_args = mlir_func_args.values
-                adapted_args = mlir_func_args.adapted_python_args
-                # The body is traced with the adapted values, so an adapter runs once.
-                n_positional = len(args)
-                trace_args = tuple(
-                    original if adapted is None else adapted
-                    for original, adapted in zip(args, adapted_args[:n_positional])
-                )
-                trace_kwargs = {
-                    name: (original if adapted is None else adapted)
-                    for (name, original), adapted in zip(
-                        kwonlyargs.items(), adapted_args[n_positional:]
-                    )
-                }
-                pipeline = self._get_pipeline(pipeline)
-
-                # Generate original ir module and its hash value.
-                module, module_hash, result, result_spec = self.generate_original_ir(
-                    entry,
-                    func,
-                    function_name,
-                    mlir_func_args.types,
-                    mlir_func_args.attributes,
-                    container_attrs,
-                    trace_args,
-                    trace_kwargs,
-                    sig,
-                    location=location,
-                    no_cache=no_cache,
-                    pipeline=pipeline,
-                    extra_link_libs=extra_link_libs,
-                )
-                for plugin in self.plugins.decorators:
-                    plugin.check_arguments(
-                        self, sig, args, kwonlyargs, adapted_args, function_name
-                    )
-
-                # A dry run generates the IR and stops; so does a call on a DSL
-                # without a compiler plugin (trace-only: the IR is the product).
-                # An explicit ``compile()`` on such a DSL falls through to the
-                # missing-compiler error below.
-                if self.envar.dryrun or (
-                    self.plugins.compiler is None and not compile_only
-                ):
-                    return result
-
-                cached_jit_func = None if no_cache else self.jit_cache.get(module_hash)
-
-                if (
-                    no_cache
-                    or cached_jit_func is None
-                    or cached_jit_func.capi_func is None
-                ):
-                    # no cache or cache miss, do ir generation/compilation/jit engine
-                    jit_function = self.compile_and_cache(
-                        module,
-                        module_hash,
+                with self._configure_compilation(setup):
+                    trace = self._trace_call(
+                        entry,
+                        func,
                         function_name,
-                        pipeline,
+                        container_attrs,
+                        args,
+                        kwonlyargs,
                         sig,
-                        no_cache,
-                        result_spec=result_spec,
+                        pipeline,
+                        location=location,
+                        no_cache=no_cache,
                         extra_link_libs=extra_link_libs,
-                        func=func,
+                        trace_hooks=trace_hooks,
+                        compile_only=compile_only,
                     )
-                else:
-                    self.cache_hits += 1
-                    log().info(
-                        "JIT cache hit IN-MEMORY function=[%s] module_hash=[%s]",
-                        function_name,
-                        module_hash,
+                    self.after_trace_result(trace, setup)
+
+                    # A dry run generates the IR and stops; so does a call on a
+                    # DSL without a compiler plugin (trace-only: the IR is the
+                    # product). An explicit ``compile()`` on such a DSL falls
+                    # through to the missing-compiler error below.
+                    if self.envar.dryrun or (
+                        self.plugins.compiler is None and not compile_only
+                    ):
+                        return trace.result
+
+                    # A DSL may end the call here with an artifact of its own,
+                    # or hand the compile back as a step to run once the call
+                    # scope is left; the step takes the context over.
+                    artifact = self.emit_artifact(trace, setup)
+                    if artifact is not None:
+                        if (
+                            isinstance(artifact, PendingCompile)
+                            and artifact.scope is None
+                        ):
+                            artifact.scope = scope.pop_all()
+                        return artifact
+
+                    module_hash = trace.module_hash
+                    cached_jit_func = (
+                        None if no_cache else self.jit_cache.get(module_hash)
                     )
-                    jit_function = cached_jit_func
+
+                    if (
+                        no_cache
+                        or cached_jit_func is None
+                        or cached_jit_func.capi_func is None
+                    ):
+                        # no cache or cache miss, do ir generation/compilation/jit engine
+                        jit_function = self.compile_and_cache(
+                            trace.module,
+                            module_hash,
+                            function_name,
+                            trace.pipeline,
+                            sig,
+                            no_cache,
+                            result_spec=trace.result_spec,
+                            extra_link_libs=extra_link_libs,
+                            func=func,
+                        )
+                    else:
+                        self.cache_hits += 1
+                        log().info(
+                            "JIT cache hit IN-MEMORY function=[%s] module_hash=[%s]",
+                            function_name,
+                            module_hash,
+                        )
+                        jit_function = cached_jit_func
 
             finally:
                 if loc_tracebacks is not None:
@@ -1914,17 +2489,107 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 execution_args.set_shapes(
                     {
                         param.name: self._compiled_argument_shape(arg, param.annotation)
-                        for param, arg in zip(sig.parameters.values(), trace_args)
+                        for param, arg in zip(sig.parameters.values(), trace.trace_args)
                     }
                 )
             return jit_function
 
-        # Run the compiled program. A function that prefers the Python
-        # arguments is called with them; the packed entry takes the marshalled
-        # ``exe_args``.
+        return self.invoke_compiled(jit_function, trace)
+
+    def _trace_call(
+        self,
+        entry: DecoratorPlugin,
+        func: Callable[..., Any],
+        function_name: str,
+        container_attrs: dict[str, Any],
+        args: tuple[Any, ...],
+        kwonlyargs: dict[str, Any],
+        sig: inspect.Signature,
+        pipeline: str | None,
+        *,
+        location: DSLLocation | None,
+        no_cache: bool,
+        extra_link_libs: tuple[str, ...],
+        trace_hooks: Sequence[Callable[..., Any]],
+        compile_only: bool = False,
+    ) -> _TraceResult:
+        """The trace half of :meth:`generate_mlir`, inside the call's context:
+        translate the arguments (``compile_only`` reaches the boundary as an
+        option), trace the body into the entry's module, check the arguments
+        and describe what the trace produced."""
+        # Convert input arguments to MLIR arguments
+        mlir_func_args = self.generate_mlir_function_types(
+            func, function_name, args, kwonlyargs, sig, compile_only=compile_only
+        )
+        exe_args = mlir_func_args.values
+        adapted_args = mlir_func_args.adapted_python_args
+        # The body is traced with the adapted values, so an adapter runs once.
+        n_positional = len(args)
+        trace_args = tuple(
+            original if adapted is None else adapted
+            for original, adapted in zip(args, adapted_args[:n_positional])
+        )
+        trace_kwargs = {
+            name: (original if adapted is None else adapted)
+            for (name, original), adapted in zip(
+                kwonlyargs.items(), adapted_args[n_positional:]
+            )
+        }
+        pipeline = self._get_pipeline(pipeline)
+
+        # Generate original ir module and its hash value.
+        module, module_hash, result, result_spec = self.generate_original_ir(
+            entry,
+            func,
+            function_name,
+            mlir_func_args.types,
+            mlir_func_args.attributes,
+            container_attrs,
+            trace_args,
+            trace_kwargs,
+            sig,
+            location=location,
+            no_cache=no_cache,
+            pipeline=pipeline,
+            extra_link_libs=extra_link_libs,
+            trace_hooks=trace_hooks,
+        )
+        for plugin in self.plugins.decorators:
+            plugin.check_arguments(
+                self, sig, args, kwonlyargs, adapted_args, function_name
+            )
+        return _TraceResult(
+            module=module,
+            module_hash=module_hash,
+            result=result,
+            result_spec=result_spec,
+            function_name=function_name,
+            pipeline=pipeline,
+            sig=sig,
+            args=args,
+            kwonlyargs=kwonlyargs,
+            trace_args=trace_args,
+            exe_args=exe_args,
+            extra_link_libs=tuple(extra_link_libs),
+        )
+
+    def invoke_compiled(self, jit_function: Any, trace: _TraceResult) -> Any:
+        """Run the compiled ``jit_function`` for the call ``trace`` describes
+        and build the call's result (:meth:`_call_result`). A function that
+        prefers the Python arguments is called with them; the packed entry
+        takes the marshalled ``exe_args``. A DSL's deferred step (:class:`PendingCompile`) calls
+        this once its compile is done."""
         if getattr(jit_function, "prefers_python_args", False):
-            return jit_function(*args, **kwonlyargs)
-        raw = jit_function.run_compiled_program(exe_args)
+            return jit_function(*trace.args, **trace.kwonlyargs)
+        raw = jit_function.run_compiled_program(trace.exe_args)
+        return self._call_result(jit_function, raw, trace)
+
+    def _call_result(self, jit_function: Any, raw: Any, trace: _TraceResult) -> Any:
+        """The call's result from ``raw``, what the packed entry stored in the
+        result slot: rebuilt through the slot description the compiled
+        function carries (``result_spec``), None for a function without one.
+        A DSL whose calls return something else (a status word it checks,
+        the traced value itself) overrides this."""
         result_spec = getattr(jit_function, "result_spec", None)
         if result_spec is None:
             return None
@@ -2128,7 +2793,10 @@ class BaseDSL(metaclass=DSLSingletonMeta):
 
     @dataclass
     class _CompilationSetup:
-        """Shared pre-IR-generation state of a host compilation."""
+        """Shared pre-IR-generation state of a host compilation: what
+        :meth:`_prepare_compilation` made of the call, handed to every hook
+        of the call. ``options`` is what :meth:`_pop_call_keywords` took out
+        of the call's keywords, the core's and the DSL's own."""
 
         function_name: str
         pipeline: str | None
@@ -2140,6 +2808,47 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         canonicalized_kwargs: dict[str, Any]
         sig: inspect.Signature
         location: DSLLocation | None
+        trace_hooks: tuple[Callable[..., Any], ...]
+        options: dict[str, Any] = field(default_factory=dict)
+
+    def _pop_call_keywords(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Take the DSL's keywords out of a call's ``kwargs`` and return them:
+        ``pipeline``, ``container_attrs``, ``no_cache``, ``extra_link_libs``,
+        ``compile_only`` and ``trace_hooks``, each at its default when
+        absent. They are the DSL's, not the function's: a reserved name
+        shadows a parameter of the same name. A DSL with call keywords of its
+        own pops them here after ``super()``'s and adds them to the dict,
+        which reaches every hook of the call as ``setup.options``."""
+        return {
+            "pipeline": kwargs.pop("pipeline", None),
+            "container_attrs": kwargs.pop("container_attrs", {}),
+            "no_cache": kwargs.pop("no_cache", False),
+            "extra_link_libs": kwargs.pop("extra_link_libs", ()),
+            "compile_only": kwargs.pop("compile_only", False),
+            "trace_hooks": kwargs.pop("trace_hooks", None),
+        }
+
+    def _resolve_function_name(
+        self,
+        func: Callable[..., Any],
+        args: tuple[Any, ...],
+        sig: inspect.Signature,
+        options: dict[str, Any],
+    ) -> str:
+        """The symbol name of this call's entry: :meth:`mangle_name` of the
+        function's name over the canonical ``args`` by default. A DSL that
+        names its entries from a call keyword of its own (``options``) or by
+        another scheme does it here."""
+        return self.mangle_name(func.__name__, args, sig)
+
+    def _disable_cache_reason(self, options: dict[str, Any]) -> str | None:
+        """Why this call must not use the compile cache, or None when it may:
+        by default a call that compiles only (``compile_only``) is compiled
+        afresh and not cached. A DSL adds its own reasons (a setting that
+        dumps the IR of every compile, for one); the reason is logged."""
+        if options.get("compile_only"):
+            return "the call compiles only (`compile_only=True`)"
+        return None
 
     def _prepare_compilation(
         self, func: Callable[..., Any], *args: Any, **kwargs: Any
@@ -2147,26 +2856,42 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         """Extract kwargs, canonicalize args and mangle the name.
 
         The call keywords ``pipeline``, ``container_attrs``, ``no_cache``,
-        ``extra_link_libs`` and ``compile_only`` are the DSL's, popped before
-        the remaining arguments bind to the function's signature.
+        ``extra_link_libs``, ``compile_only`` and ``trace_hooks`` are the
+        DSL's (:meth:`_pop_call_keywords`), popped before the remaining
+        arguments bind to the function's signature. ``trace_hooks`` are
+        callables ``hook(dsl, module, function_name)`` run on this call's
+        traced module once it is complete. The entry is named by
+        :meth:`_resolve_function_name`; :meth:`_disable_cache_reason` may
+        turn the cache off for the call.
         """
         function_name = func.__name__
         self.traced_function = func
 
-        pipeline = kwargs.pop("pipeline", None)
-        container_attrs = kwargs.pop("container_attrs", {})
-        no_cache = kwargs.pop("no_cache", False) or self.envar.no_cache
-        extra_link_libs_arg = kwargs.pop("extra_link_libs", ())
+        options = self._pop_call_keywords(kwargs)
+        pipeline = options.get("pipeline")
+        container_attrs = options.get("container_attrs", {})
+        no_cache = options.get("no_cache", False) or self.envar.no_cache
+        extra_link_libs_arg = options.get("extra_link_libs", ())
         if isinstance(extra_link_libs_arg, (str, bytes, os.PathLike)):
             extra_link_libs_arg = (extra_link_libs_arg,)
         extra_link_libs = _normalize_shared_library_paths(
             os.fspath(lib) for lib in extra_link_libs_arg
         )
-        compile_only = kwargs.pop("compile_only", False)
+        compile_only = options.get("compile_only", False)
+        trace_hooks = tuple(options.get("trace_hooks") or ())
+        for hook in trace_hooks:
+            if not callable(hook):
+                raise self.user_error(
+                    DiagId.CALL_ARGUMENTS,
+                    function_name=function_name,
+                    detail=f"`trace_hooks` takes callables, not a `{type(hook).__name__}`",
+                )
 
-        if not no_cache and compile_only:
-            no_cache = True
-            log().info("Cache is disabled as user wants to compile only.")
+        if not no_cache:
+            reason = self._disable_cache_reason(options)
+            if reason:
+                no_cache = True
+                log().info("Cache is disabled: %s", reason)
 
         # Get signature of the function
         sig = self._get_signature(func)
@@ -2185,7 +2910,9 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             sig = self._expand_varargs_varkw(
                 canonicalized_args, canonicalized_kwargs, sig
             )
-        function_name = self.mangle_name(function_name, canonicalized_args, sig)
+        function_name = self._resolve_function_name(
+            func, canonicalized_args, sig, options
+        )
 
         if not self.envar.debuginfo:
             self.decorator_location = None
@@ -2201,7 +2928,36 @@ class BaseDSL(metaclass=DSLSingletonMeta):
             canonicalized_kwargs=canonicalized_kwargs,
             sig=sig,
             location=self.decorator_location,
+            trace_hooks=trace_hooks,
+            options=options,
         )
+
+    def _configure_compilation(self, setup: "_CompilationSetup") -> Any:
+        """The context the trace and the compile of a call run in, inside the
+        call's MLIR context: ``nullcontext()`` by default. A DSL that applies
+        per-call settings, checks the call's options against its pipeline or
+        installs a trace-time filter opens them here. A deferred step
+        (:class:`PendingCompile`) runs after it was left."""
+        return nullcontext()
+
+    def after_trace_result(
+        self, trace: _TraceResult, setup: "_CompilationSetup"
+    ) -> None:
+        """Runs once the trace is complete and its arguments checked, before
+        anything is compiled or the cache consulted: a DSL reads what the
+        trace produced (its module, its cache key, what the body returned)
+        and prepares its compile from it. No-op by default."""
+
+    def emit_artifact(self, trace: _TraceResult, setup: "_CompilationSetup") -> Any:
+        """A DSL's exit from the call after the trace, before the compile
+        cache is consulted. None, the default, continues to compile and
+        invoke; any other value is the call's result, with no compile and no
+        ``load`` (the module's text, a handle on an artifact the DSL built
+        itself); a :class:`PendingCompile` is a compile step the DSL defines
+        itself, run by the decorated function's wrapper once the call scope
+        is left (a DSL whose entry has no host symbol compiles its container
+        and never loads, for one). Not reached under ``<PREFIX>_DRYRUN``."""
+        return None
 
     def run(
         self,
@@ -2219,11 +2975,14 @@ class BaseDSL(metaclass=DSLSingletonMeta):
         2. Compiles and JITs the MLIR module through the compiler role (cached);
            a DSL without one, or a dry run, returns the trace result here
         3. Invokes the compiled function and rebuilds its result
+
+        The call's keywords, name and cache policy come from
+        :meth:`_prepare_compilation`; the hooks around the trace and the
+        compile are :meth:`generate_mlir`'s.
         """
         # The DSL is active for the whole call: its types emit, its settings
         # are read, and a decorated function called inside the trace sees an
         # open trace (``in_trace``) and is launched into it.
-        self.traced_function = func
         with active_dsl(self):
             setup = self._prepare_compilation(func, *args, **kwargs)
 
@@ -2241,6 +3000,8 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 setup.compile_only,
                 location=setup.location,
                 extra_link_libs=setup.extra_link_libs,
+                trace_hooks=setup.trace_hooks,
+                setup=setup,
             )
 
     # ===------------------------------------------------------------------===
@@ -2370,237 +3131,3 @@ class BaseDSL(metaclass=DSLSingletonMeta):
                 self.on_trace_name_error(func, name_error, err_filename, err_lineno)
                 raise
         return func_op, entry_block, result
-
-    def _is_meta_at_boundary(
-        self, arg: Any, spec: Any, name: str, idx: int, func: Any
-    ) -> bool:
-        """Whether the argument ``arg`` of the parameter ``name`` (annotated
-        ``spec``, at position ``idx`` of ``func``) is a Python value the trace
-        specialises on, the alternative being a runtime value the compiled
-        function takes. The default is :func:`is_argument_meta`: decided by
-        the annotation and the (adapted) value alone, a value the DSL has no
-        leaf for being a Python value. A DSL with another policy (every
-        unannotated argument a runtime value, a class of its own speaking a
-        protocol the core does not know) decides here, and pairs the verdict
-        with :meth:`_flatten_jit_arg` and :meth:`_restore_argument` for the
-        values the core cannot flatten or rebuild itself."""
-        return is_argument_meta(arg, spec, name, idx, func)
-
-    def _restore_argument(
-        self, arg: Any, spec: Any, block_args: Sequence[Any], start: int
-    ) -> tuple[Any, int]:
-        """Rebuild the value the traced body receives for the runtime argument
-        ``arg`` (annotated ``spec``) from the entry's ``block_args``, starting
-        at index ``start``; returns the value and the number of block arguments
-        it consumed. The default wraps one block argument in the annotated
-        dtype when the value is not of it yet (a Python number cast at the
-        boundary, ``compile()``'s type-only placeholder; an abstract annotation
-        takes the dtype of the block argument), and rebuilds any other value
-        leaf by leaf in its Python shape. A DSL restores the values its
-        :meth:`_flatten_jit_arg` flattened itself here."""
-        base_spec = get_args(spec)[0] if get_origin(spec) is Annotated else spec
-        if isinstance(base_spec, t.NumericMeta) and not isinstance(arg, base_spec):
-            # Numeric type coercion for a staged argument: the block arg
-            # already has the target MLIR type. Wrap it directly instead of
-            # casting the caller's value, which would emit casts referencing
-            # SSA values from an outer region. An abstract annotation
-            # (``Numeric``) is no type to wrap in: the block argument's type,
-            # fixed at the boundary, names the dtype (a kernel is traced with
-            # the raw call arguments, so the Python number is still here).
-            block_arg = block_args[start]
-            dtype = (
-                t.Numeric.from_mlir_type(block_arg.type)
-                if base_spec.is_abstract
-                else base_spec
-            )
-            return dtype(block_arg), 1
-        _, _, treedef = tree_utils.tree_flatten(arg, return_ir_values=False)
-        n_args = sum(
-            len(tree_utils.leaf_ir_types(leaf))
-            for _, leaf in tree_utils.tree_leaves(treedef)
-        )
-        restored = self._restore_from_block_args(
-            treedef, block_args[start : start + n_args]
-        )
-        return restored, n_args
-
-    def _mangle_folds(self, arg: Any, annotation: Any) -> bool:
-        """Whether :meth:`mangle_name` folds ``arg`` (passed to a parameter
-        annotated ``annotation``) into the symbol: by default the Meta
-        arguments, the values the trace specialises on. A DSL that wants one
-        symbol per value of an annotated scalar too folds those as well."""
-        return self._is_meta_argument(arg, annotation)
-
-    def _mangle_render(self, arg: Any, annotation: Any) -> str:
-        """The spelling of a folded ``arg`` in the symbol, before the unwanted
-        characters are stripped: a type by its name, a sequence element by
-        element, anything else through ``str``. A DSL spells its own kinds of
-        values here (an instance by its class name, say)."""
-        if isinstance(arg, type):
-            return arg.__name__
-        if isinstance(arg, (list, tuple)):
-            return "_".join(map(str, arg))
-        return str(arg)
-
-    @classmethod
-    def user_error(cls, diag_id: Any, **fields: Any) -> DSLUserCodeError:
-        """The error this DSL raises for ``diag_id``: an instance of
-        :attr:`user_error_class` carrying the id :attr:`diag_id_aliases` maps
-        ``diag_id`` to, with ``fields`` as ``DSLUserCodeError`` takes them.
-        The core's raise sites call it on the DSL (or DSL class) in hand;
-        ``common._user_error`` is the same for the active DSL."""
-        return _user_error(diag_id, cls, **fields)
-
-    def on_trace_name_error(
-        self,
-        func: Callable[..., Any],
-        error: NameError,
-        filename: str | None,
-        lineno: int | None,
-    ) -> NoReturn:
-        """What a ``NameError`` met while tracing ``func`` becomes.
-
-        ``trace_body`` calls it with the error and the user's line that raised
-        it (the innermost frame of its traceback). The default reports
-        ``SCOPE_UNBOUND_NAME_IN_TRACE`` there through :meth:`user_error`: a
-        name read on a path that never set it, the usual cause once the
-        rewrite has outlined a branch. A DSL whose rewrite introduces names of
-        its own overrides this to tell its unbound reads apart; a hook that
-        returns lets the ``NameError`` propagate as it is."""
-        raise self.user_error(
-            DiagId.SCOPE_UNBOUND_NAME_IN_TRACE,
-            filename=filename,
-            lineno=lineno,
-            cause=error,
-            var=getattr(error, "name", None) or f"<in {func.__name__}>",
-            function_name=func.__name__,
-        ) from error
-
-    @staticmethod
-    def _filter_call_traceback(func: Any, exc: BaseException) -> None:
-        """Drop the DSL's frames from the traceback of ``exc``, raised by a
-        call of the decorated ``func`` (:func:`filter_traceback`), when the
-        DSL filters stack traces (``<PREFIX>_FILTER_STACKTRACE``, on unless
-        ``DEBUG`` or ``SHOW_STACKTRACE`` asks for everything). The region
-        functions the AST preprocessor plugin generates
-        (``generated_frame_names``) are collapsed into the user's frame. A
-        function whose DSL instance does not exist yet (its construction is
-        what failed) is left alone."""
-        dsl = getattr(func, "_dsl_object", None)
-        if dsl is None or not dsl.envar.filter_stacktrace:
-            return
-        preprocessor = dsl.plugins.ast_preprocessor
-        filter_traceback(
-            exc, generated_names=getattr(preprocessor, "generated_frame_names", ())
-        )
-
-    @staticmethod
-    def _is_type_placeholder(arg: Any, spec: Any) -> bool:
-        """Whether ``arg`` is a concrete dtype class passed for a parameter
-        whose annotation is a numeric DSL type it belongs to: ``compile()``'s
-        type-only placeholder, a type with no execution value (the function is
-        compiled for the type and called with values later)."""
-        if get_origin(spec) is Annotated:
-            spec = get_args(spec)[0]
-        return (
-            isinstance(arg, t.NumericMeta)
-            and not arg.is_abstract
-            and isinstance(spec, t.NumericMeta)
-            and issubclass(arg, spec)
-        )
-
-    def _compiled_argument_shape(self, arg: Any, spec: Any) -> Any:
-        """The host shape a compiled function remembers for the argument
-        ``arg`` (``ExecutionArgs.set_shapes``): its flattened tree; a type-only
-        placeholder stands for a value of its dtype."""
-        if self._is_type_placeholder(arg, spec):
-            arg = arg(0)
-        return tree_utils.tree_flatten(arg, return_ir_values=False)[2]
-
-    def preprocess_key(self, func: Any) -> Hashable:
-        """What the rewrite of ``func`` depends on: the preprocessor's class
-        and the helpers module it imports. A decorated function is rewritten
-        once per key (:meth:`_preprocess_and_replace_code`), so a DSL whose
-        rewrite has modes (another preprocessor swapped in for a block of
-        code) returns a key that changes with them, and the function is
-        rewritten again, from its original code, the next time it is called."""
-        ast_preprocessor = self.plugins.ast_preprocessor
-        helpers_module = (
-            None if ast_preprocessor is None else ast_preprocessor.helpers_module
-        )
-        return (type(self.preprocessor), helpers_module)
-
-    def _cache_key_extra(self) -> bytes:
-        """Bytes :meth:`get_module_hash` adds to the compile cache key of
-        every module, after the environment's ``affects_compile`` settings:
-        whatever else the compiled artifact depends on in this DSL (compile
-        options of its own, the options of its pipeline). The default adds
-        nothing."""
-        return b""
-
-    def _keep_ir_stages(self) -> tuple[str, ...]:
-        """The IR dumps ``<PREFIX>_KEEP_IR`` asks :meth:`build_module` for:
-        ``1``/``true`` is the raw module alone (``("raw",)``), otherwise the
-        comma-separated stages ``raw``, ``clean`` (canonicalize and cse),
-        ``after-<pass>`` and ``after-passes`` (the DSL's pipeline), every
-        stage but the raw one taken on a clone. Empty when the setting is
-        unset; an unknown stage is ``CONFIG_INVALID``."""
-        raw = (self.envar.keep_ir or "").strip()
-        lowered = raw.lower()
-        if not lowered or lowered in ("0", "false", "no", "off"):
-            return ()
-        if lowered in ("1", "true", "yes", "on"):
-            return ("raw",)
-        stages = tuple(token.strip() for token in raw.split(",") if token.strip())
-        for stage in stages:
-            if stage not in ("raw", "clean", "after-passes") and not (
-                stage.startswith("after-") and len(stage) > len("after-")
-            ):
-                raise DSLUserCodeValueError(
-                    DiagId.CONFIG_INVALID,
-                    var=f"{self.name}_KEEP_IR",
-                    detail=f"`{stage}` is not a stage; expected `1`, or a "
-                    "comma-separated list of `raw`, `clean`, `after-<pass>` and "
-                    "`after-passes`",
-                )
-        return stages
-
-    def _compile_clone_and_save(
-        self,
-        module: ir.Module,
-        pipeline: str,
-        label: str,
-        *,
-        enable_verifier: bool = True,
-    ) -> str:
-        """Run ``pipeline`` on a clone of ``module`` (a bytecode round trip, so
-        the module itself, and what is cached under its hash, stays untouched)
-        through the compiler plugin and save the result as the dump ``label``
-        (:meth:`_save_ir`); returns the path."""
-        buffer = io.BytesIO()
-        module.operation.write_bytecode(buffer)
-        clone = ir.Module.parse(buffer.getvalue(), context=module.context)
-        self._compiler.compile(clone, pipeline, enable_verifier=enable_verifier)
-        return self._save_ir(clone, label)
-
-    def _verify_module(self, module: ir.Module) -> None:
-        """Verify the finished ``module``, last in :meth:`build_module`: the
-        MLIR verifier, a failure being an ``IR verification failed``
-        ``DSLRuntimeError``. A DSL with invariants of its own on the traced
-        module (an attribute it forbids, an op its lowering cannot take)
-        checks them here, around ``super()``'s."""
-        try:
-            module.operation.verify()
-        except Exception as e:
-            raise DSLRuntimeError("IR verification failed", cause=e) from e
-
-    def _remark_options(self) -> dict[str, Any]:
-        """The session options of a compile, handed to the compiler plugin's
-        ``remark_session`` (directly, and through ``compile``): the
-        ``REMARKS``, ``REMARKS_POLICY`` and ``REMARKS_OUTPUT`` settings. A DSL
-        whose compiler plugin takes other options overrides this."""
-        return {
-            "remark_filter": self.envar.remarks,
-            "remark_policy": self._remarks_policy,
-            "remark_output": self.envar.remarks_output,
-        }

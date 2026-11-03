@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "JitCacheDict",
+    "ModuleLocks",
     "dump_cache_to_path",
     "framework_identity",
     "get_default_generated_ir_path",
@@ -225,8 +226,80 @@ class JitCacheDict:
         # ``displaced`` keeps the values alive until here, past the lock.
 
 
+class _KeyedLock:
+    """One key's lock and the number of threads holding or waiting for it."""
+
+    __slots__ = ("lock", "users")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.users = 0
 
 
+class ModuleLocks:
+    """Single flight per module hash: the thread that compiles a module holds
+    its key, and a thread arriving with the same key waits for it instead of
+    compiling the same module again (``CompileStep.run`` re-checks the
+    in-memory cache once it holds the key and takes the first thread's
+    function). The locks of several keys are taken in sorted order, so two
+    threads holding overlapping key sets never deadlock; a key's entry is
+    dropped once no thread holds or waits for it.
+    """
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._entries: dict[str, _KeyedLock] = {}
+
+    def users(self, key: str) -> int:
+        """The number of threads holding or waiting for ``key``, 0 when
+        nobody does."""
+        with self._guard:
+            entry = self._entries.get(key)
+            return 0 if entry is None else entry.users
+
+    def _register(self, key: str) -> tuple[_KeyedLock, bool]:
+        """Count this thread as a user of ``key``; also whether another
+        thread already was one (holding the key or waiting for it)."""
+        with self._guard:
+            entry = self._entries.get(key)
+            if entry is None:
+                entry = self._entries[key] = _KeyedLock()
+            contended = entry.users > 0
+            entry.users += 1
+            return entry, contended
+
+    def _unregister(self, key: str, entry: _KeyedLock) -> None:
+        with self._guard:
+            entry.users -= 1
+            if entry.users == 0 and self._entries.get(key) is entry:
+                del self._entries[key]
+
+    @contextlib.contextmanager
+    def hold(self, keys: Sequence[str]) -> Iterator[bool]:
+        """Hold the locks of ``keys`` for the block (none for an empty
+        sequence), taken in sorted order and released in reverse. The block
+        is given whether this thread had to wait: True when another thread
+        was holding one of the keys, or waiting for it, when this one asked,
+        so what that thread published may now serve. A thread counts as a
+        user of a key from the moment it asks for the lock, so :meth:`users`
+        sees the waiters too."""
+        held: list[tuple[str, _KeyedLock]] = []
+        waited = False
+        try:
+            for key in sorted(set(keys)):
+                entry, contended = self._register(key)
+                waited = waited or contended
+                try:
+                    entry.lock.acquire()
+                except BaseException:
+                    self._unregister(key, entry)
+                    raise
+                held.append((key, entry))
+            yield waited
+        finally:
+            for key, entry in reversed(held):
+                entry.lock.release()
+                self._unregister(key, entry)
 
 
 # =============================================================================

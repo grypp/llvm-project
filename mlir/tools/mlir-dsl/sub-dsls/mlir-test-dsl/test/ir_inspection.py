@@ -100,7 +100,7 @@ dsl.envar.keep_ir = saved
 
 # --- the verification hook ---------------------------------------------------
 # `_verify_module` runs last in `build_module`, after the dumps and the trace
-# callbacks added to the module; this DSL refuses a module carrying `test.marker`
+# hooks added to the module; this DSL refuses a module carrying `test.marker`
 # on top of the verifier's own checks.
 class StrictVerifyDSL(m.MlirTestDSL):
     def _verify_module(self, module):
@@ -120,10 +120,7 @@ def verified(n: m.Int32) -> m.Int32:
 
 print("VERIFIED:", verified(1))
 try:
-    with ir.Context(), ir.Location.unknown():
-        module = ir.Module.create()
-        mark(None, module, "verified")
-        StrictVerifyDSL()._verify_module(module)
+    verified(1, trace_hooks=[mark])
     print("MARKED: accepted (unexpected)")
 except m.DSLRuntimeError as e:
     print("MARKED:", e.message)

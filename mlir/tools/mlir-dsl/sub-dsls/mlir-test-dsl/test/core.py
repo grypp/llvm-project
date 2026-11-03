@@ -2,13 +2,16 @@
 # RUN: %if host-supports-jit %{ rm -rf %t.cache && env MLIR_DSL_CACHE_DIR=%t.cache %PYTHON %s 2>&1 | FileCheck %s --check-prefix=EXEC %}
 # RUN: %if host-supports-jit %{ env MLIR_DSL_REMARKS=".*" %PYTHON %s 2>&1 | FileCheck %s --check-prefix=REMARKS %}
 # BaseDSL: the `@jit`/`@kernel` decorators and the
-# singleton DSL instance; Meta specialisation and `mangle_name`; the host
+# singleton DSL instance (abstract bases included); the decorator hooks
+# (`decorate`/`wrap`, `call_scope`, the rewrite key, the trace hooks); Meta
+# specialisation and `mangle_name`; the host
 # boundary (arguments restored in their Python shape, results packed into one
 # `!llvm.struct` and unpacked again); `m.compile`; the `func.func` host entry; the
 # `Plugins` record and the `Plugin` hooks; the in-memory cache counters and
 # `collected_remarks`. Every error path is a DSL diagnostic. The EXEC line
 # starts from an empty file cache so the counters are deterministic; the third
 # RUN line turns the remark engine on for the `collected_remarks` checks.
+import contextlib
 import dataclasses
 import gc
 import inspect
@@ -85,6 +88,34 @@ print(
 # EXEC:  NO_PREPROCESS: 3 True
 
 
+# An abstract base (`abstract=True`) is never instantiated itself: calling it
+# returns the instance of one of its concrete subclasses (never its parent's
+# or a sibling's), and before any exists it is an error.
+class Family(m.MlirTestDSL, abstract=True):
+    pass
+
+
+class Concrete(Family):
+    pass
+
+
+try:
+    Family()
+    print("ABSTRACT_FIRST: instance (unexpected)")
+except m.DSLRuntimeError as e:
+    print("ABSTRACT_FIRST:", e.message)
+concrete = Concrete()
+print(
+    "ABSTRACT:",
+    Family() is concrete,
+    Family() is not dsl,
+    Family._abstract_dsl_base,
+    Concrete._abstract_dsl_base,
+)
+# CHECK: ABSTRACT_FIRST: `Family` is an abstract DSL base: initialize a concrete subclass of it first
+# CHECK: ABSTRACT: True True True False
+
+
 # Only a plain Python function can be decorated; `@kernel` is inherited from
 # MlirTestDSL, but using it needs the kernels decorator plugin in the record.
 class JitOnlyDSL(m.MlirTestDSL):
@@ -143,6 +174,187 @@ except m.DSLRuntimeError as e:
 # CHECK: NOT_A_RECORD: `NotARecord.plugins` must be a `Plugins` record, not a `list`
 
 
+# --- decorator options and the wrapper ---------------------------------------
+# The options of a decorator are its plugin's: `decorate` takes them once the
+# core stamped the function (the default takes none), and `wrap` sees the
+# wrapper the user gets and may give it an API. The wrapper closes over the
+# DSL class and the function only, no bound method, and looks the plugin up
+# at call time.
+class OptJit(func.Jit):
+    def decorate(self, func, *, label=None):
+        func._label = label
+        return func
+
+    def wrap(self, func, wrapper):
+        def rename(prefix):
+            func._symbol_prefix = prefix
+            return wrapper
+
+        wrapper.rename = rename
+        return wrapper
+
+
+class OptDSL(m.MlirTestDSL):
+    plugins = dataclasses.replace(m.MlirTestDSL.plugins, decorators=[OptJit()])
+
+    def mangle_name(self, function_name, args, sig):
+        prefix = getattr(self.traced_function, "_symbol_prefix", "")
+        return super().mangle_name(prefix + function_name, args, sig)
+
+
+@OptDSL.jit(label="renamed")
+def f(n: m.Int32) -> m.Int32:
+    return n + 1
+
+
+def plain_option(n):
+    pass
+
+
+closure = inspect.getclosurevars(f).nonlocals
+print(
+    "OPTIONS:",
+    f.__wrapped__._label,
+    sorted(closure),
+    any(map(inspect.ismethod, closure.values())),
+)
+print("RENAMED:", f.rename("renamed_")(1))
+print(str(report("UNKNOWN_OPTION", m.jit(bogus=1), plain_option)))
+# CHECK:       OPTIONS: renamed ['cls', 'func'] False
+# CHECK-LABEL: func.func @renamed_f(
+# CHECK:       RENAMED: ?
+# CHECK:       UNKNOWN_OPTION ERROR: CALL_ARGUMENTS
+# CHECK:       error[CALL_ARGUMENTS]:{{.*}}The call to `@jit` does not match its parameters: no option is named `bogus`.
+# EXEC:        RENAMED: 2
+
+
+# `call_scope` is the DSL's context around a call made outside any trace: the
+# rewrite, the trace, the compile and the run happen inside it. A decorated
+# function called inside the trace is launched into it and enters no scope of
+# its own.
+class ScopedDSL(m.MlirTestDSL):
+    @classmethod
+    @contextlib.contextmanager
+    def call_scope(cls, func):
+        print("SCOPE: enter", func.__name__)
+        try:
+            yield
+        finally:
+            print("SCOPE: exit", func.__name__)
+
+
+@ScopedDSL.jit
+def scoped_inner(n: m.Int32) -> m.Int32:
+    return n * 2
+
+
+@ScopedDSL.jit
+def scoped_outer(n: m.Int32) -> m.Int32:
+    return scoped_inner(n) + 1
+
+
+# CHECK:       SCOPE: enter scoped_outer
+# CHECK-NOT:   SCOPE:
+# CHECK-LABEL: func.func @scoped_outer(
+# CHECK-NOT:   SCOPE: enter
+# CHECK:       SCOPE: exit scoped_outer
+# CHECK-NEXT:  SCOPED: ?
+# EXEC:        SCOPED: 7
+print("SCOPED:", scoped_outer(3))
+
+
+# A function is rewritten once per `preprocess_key`: a DSL whose rewrite has
+# modes returns a key that changes with them, and the function is rewritten
+# again from its original code; the same key leaves the code object alone.
+REWRITE_MODE = ["a"]
+
+
+class KeyedDSL(m.MlirTestDSL):
+    def preprocess_key(self, func):
+        return (super().preprocess_key(func), REWRITE_MODE[0])
+
+
+@KeyedDSL.jit
+def keyed(n: m.Int32) -> m.Int32:
+    acc = m.Int32(0)
+    for i in range(n):
+        acc += i
+    return acc
+
+
+original_code = keyed.__wrapped__.__code__
+keyed(3)
+first_rewrite = keyed.__wrapped__.__code__
+keyed(3)
+same_key = keyed.__wrapped__.__code__
+REWRITE_MODE[0] = "b"
+keyed(3)
+second_rewrite = keyed.__wrapped__.__code__
+print(
+    "REWRITE_KEY:",
+    first_rewrite is not original_code,
+    same_key is first_rewrite,
+    second_rewrite is not first_rewrite,
+    keyed.__wrapped__._original_code is original_code,
+)
+# CHECK: REWRITE_KEY: True True True True
+
+
+# --- the trace hooks ------------------------------------------------------
+# An entry with a `body_scope` wraps the traced body (arguments bound, the
+# insertion point in the entry block); `_return_values` and `after_trace` know
+# the function they finish; a call's `trace_hooks=` run on the finished module
+# after the adapters added to it, outside the module's insertion point, and
+# what they add is part of the hashed module.
+class ScopedJit(func.Jit):
+    @contextlib.contextmanager
+    def body_scope(self, dsl, func, *, signature):
+        print("BODY: enter", func.__name__, list(signature.parameters))
+        yield
+        print("BODY: exit", func.__name__)
+
+    def after_trace(self, dsl, module, function_name):
+        print("AFTER_TRACE:", function_name)
+
+
+class TraceHooksDSL(m.MlirTestDSL):
+    plugins = dataclasses.replace(m.MlirTestDSL.plugins, decorators=[ScopedJit()])
+
+    def _return_values(self, entry, result, sig, loc, *, func):
+        print("RETURN_OF:", func.__name__, type(result).__name__)
+        return super()._return_values(entry, result, sig, loc, func=func)
+
+
+@TraceHooksDSL.jit
+def hooked(n, k: m.Int32) -> m.Int32:
+    print("BODY: run")
+    return k + n
+
+
+def stamp(dsl, module, function_name):
+    try:
+        ir.InsertionPoint.current
+        print("STAMP: inside an insertion point (unexpected)")
+    except ValueError:
+        print("STAMP:", function_name, "outside the insertion point")
+    module.operation.attributes["test.traced"] = ir.StringAttr.get(function_name)
+
+
+# CHECK:       BODY: enter hooked ['n', 'k']
+# CHECK-NEXT:  BODY: run
+# CHECK-NEXT:  BODY: exit hooked
+# CHECK-NEXT:  RETURN_OF: hooked Int32
+# CHECK-NEXT:  AFTER_TRACE: hooked_3
+# CHECK-NEXT:  STAMP: hooked_3 outside the insertion point
+# CHECK:       module attributes {test.traced = "hooked_3"}
+# CHECK-LABEL: func.func @hooked_3(
+# CHECK:       HOOKED: ?
+# CHECK:       BAD_HOOK ERROR: CALL_ARGUMENTS
+# EXEC:        HOOKED: 8
+print("HOOKED:", hooked(3, 5, trace_hooks=[stamp]))
+print(str(report("BAD_HOOK", hooked, 3, 5, trace_hooks=[1])))
+
+
 # --- Meta specialisation and `mangle_name` -----------------------
 # Only the Meta arguments are folded into the symbol (a Python value under no
 # DSL annotation, a default, a type by its name, a sequence element-wise); a
@@ -161,6 +373,22 @@ class PrefixedDSL(m.MlirTestDSL):
     _name_mangling_prefix = "pfx"
 
 
+class Knob:
+    pass
+
+
+class FoldAllDSL(m.MlirTestDSL):
+    # Every argument names the symbol, annotated scalars included (`_mangle_folds`),
+    # and an instance of a user class is spelled by its class name (`_mangle_render`).
+    def _mangle_folds(self, arg, annotation):
+        return True
+
+    def _mangle_render(self, arg, annotation):
+        if isinstance(arg, Knob):
+            return type(arg).__name__
+        return super()._mangle_render(arg, annotation)
+
+
 ONE = inspect.signature(one)
 meta = [4, "hi there", (1, (2, 3)), m.Float32, None, True, 2.5]
 print("META:", [dsl.mangle_name("one", (v,), ONE) for v in meta])
@@ -172,11 +400,32 @@ print("CHARS:", dsl.mangle_name("one", (messy,), ONE), end=" ")
 capped = len(dsl.mangle_name("one", ("x" * 500,), ONE))
 print(dsl.mangle_name("one", (object(),), ONE), capped)
 print("PREFIX:", PrefixedDSL().mangle_name("one", (7,), ONE))
+fold_all = FoldAllDSL()
+print(
+    "FOLD_ALL:",
+    fold_all.mangle_name("two", (4, 3), inspect.signature(two)),
+    fold_all.mangle_name("one", (Knob(),), ONE),
+)
 # CHECK:      META: ['one_4', 'one_hi_there', 'one_1_2_3', 'one_Float32', 'one_None', 'one_True', 'one_25']
 # CHECK-NEXT: STAGED: ['one', 'one', 'one']
 # CHECK-NEXT: ANNOTATED: two_4
 # CHECK-NEXT: CHARS: one_abcdefghijklmnopqrst_u one_object_object_at_ 180
 # CHECK-NEXT: PREFIX: pfx_one_7
+# CHECK-NEXT: FOLD_ALL: two_4_3 one_Knob
+
+
+# The symbol of a traced entry follows the DSL's folding rule: the staged
+# scalar `v` keeps its block argument and still names the specialisation.
+@FoldAllDSL.jit
+def folded(v: m.Int32, knob) -> m.Int32:
+    return v + 1
+
+
+# CHECK-LABEL: func.func @folded_5_Knob(
+# CHECK-SAME:    %{{[^:]+}}: i32) -> i32
+# CHECK:         FOLDED: ?
+# EXEC:          FOLDED: 6
+print("FOLDED:", folded(5, Knob()))
 
 
 # The traced entries follow the same rules (a default is a Meta argument too):
@@ -358,6 +607,73 @@ print(str(report("STRICT", strict, 4)))
 # CHECK: STRICT RESULT: 1
 
 
+# --- the host boundary: hooks ------------------------------------
+# A DSL with a policy of its own overrides three hooks together:
+# `_is_meta_at_boundary` says whether an argument is a Python value or a
+# runtime value (the default: the annotation and the value decide; the symbol
+# follows the verdict, so a runtime value is not folded into the name),
+# `_flatten_jit_arg` gives a runtime value its SSA types and execution values,
+# `_restore_argument` rebuilds it from the entry's block arguments. This DSL
+# makes an unannotated `int` a runtime `i32` and knows `Span`, a class of the
+# user's the core has no leaf for, as two `i32`s.
+class Span:
+    def __init__(self, lo, hi):
+        self.lo, self.hi = lo, hi
+
+
+class RuntimeByDefaultDSL(m.MlirTestDSL):
+    def _is_meta_at_boundary(self, arg, spec, name, idx, func):
+        if isinstance(arg, Span) or (
+            type(arg) is int and spec is inspect.Parameter.empty
+        ):
+            return False
+        return super()._is_meta_at_boundary(arg, spec, name, idx, func)
+
+    def _flatten_jit_arg(self, arg, arg_name, arg_index, function_name, *, is_host):
+        if isinstance(arg, Span):
+            arg = (m.Int32(arg.lo), m.Int32(arg.hi))
+        elif type(arg) is int:
+            arg = m.Int32(arg)
+        return super()._flatten_jit_arg(
+            arg, arg_name, arg_index, function_name, is_host=is_host
+        )
+
+    def _restore_argument(self, arg, spec, block_args, start):
+        if isinstance(arg, Span):
+            return Span(m.Int32(block_args[start]), m.Int32(block_args[start + 1])), 2
+        if type(arg) is int:
+            return m.Int32(block_args[start]), 1
+        return super()._restore_argument(arg, spec, block_args, start)
+
+
+@RuntimeByDefaultDSL.jit
+def runtime_int(n):
+    return n + 1
+
+
+@RuntimeByDefaultDSL.jit
+def span_len(s: Span, k):
+    print("SPAN_TRACE:", type(s).__name__, type(s.lo).__name__, type(k).__name__)
+    return s.hi - s.lo + k
+
+
+# CHECK-LABEL: func.func @runtime_int(
+# CHECK-SAME:    %[[N:[^:]+]]: i32) -> i32
+# CHECK:         arith.addi %[[N]], %{{.+}} : i32
+# CHECK:         RUNTIME_INT: ?
+# CHECK:         SPAN_TRACE: Span Int32 Int32
+# CHECK-LABEL: func.func @span_len(
+# CHECK-SAME:    %[[LO:[^:]+]]: i32, %[[HI:[^:]+]]: i32, %[[K:[^:]+]]: i32) -> i32
+# CHECK:         %[[D:.+]] = arith.subi %[[HI]], %[[LO]] : i32
+# CHECK:         arith.addi %[[D]], %[[K]] : i32
+# CHECK:         SPAN: ?
+# EXEC:          RUNTIME_INT: 4
+# EXEC-NEXT:     SPAN_TRACE: Span Int32 Int32
+# EXEC-NEXT:     SPAN: 107
+print("RUNTIME_INT:", runtime_int(3))
+print("SPAN:", span_len(Span(3, 10), 100))
+
+
 # --- the host boundary: results ----------------------------------
 # Several leaves (a tuple, a `@struct`, a nest of them) are packed into one
 # `!llvm.struct` (`llvm.mlir.undef` + `llvm.insertvalue`) and unpacked into the
@@ -487,6 +803,33 @@ if not dsl.envar.dryrun:
 # EXEC-NEXT: ABSTRACT_OTHER ERROR: ARG_ANNOTATION_MISMATCH
 # EXEC-NEXT: ABSTRACT_FLOAT ERROR: ARG_ANNOTATION_MISMATCH
 
+# A dtype class for a staged numeric parameter is `compile()`'s type-only
+# placeholder: the function is compiled for the type, no value is marshalled,
+# and it is called with values later (an abstract annotation is pinned to the
+# class). The class must belong to the annotation, and outside `compile()` a
+# class is a mismatched argument like any other value.
+fn = m.compile(twice, m.Int32)
+gen16 = m.compile(generic, m.Int16)
+if dsl.envar.dryrun:
+    print("PLACEHOLDER: ?")
+else:
+    print("PLACEHOLDER:", fn.function_name, fn(21), gen16(m.Int16(2)), gen16(3))
+    report("PLACEHOLDER_OTHER", gen16, m.Int32(1))
+print(str(report("PLACEHOLDER_MISMATCH", m.compile, twice, m.Float32)))
+report("PLACEHOLDER_CALL", twice, m.Int32)
+# CHECK-LABEL: func.func @twice(
+# CHECK-SAME:    %{{[^:]+}}: i32) -> i32
+# CHECK-LABEL: func.func @generic(
+# CHECK-SAME:    %{{[^:]+}}: i16) -> i16
+# CHECK:       PLACEHOLDER: ?
+# CHECK:       PLACEHOLDER_MISMATCH ERROR: ARG_ANNOTATION_MISMATCH
+# CHECK:       error[ARG_ANNOTATION_MISMATCH]:{{.*}}Argument #1 `n` must be a `Int32`, but got a `FloatMeta`.
+# CHECK:       PLACEHOLDER_CALL ERROR: ARG_ANNOTATION_MISMATCH
+# EXEC:        PLACEHOLDER: twice 42 4 6
+# EXEC-NEXT:   PLACEHOLDER_OTHER ERROR: ARG_ANNOTATION_MISMATCH
+# EXEC-NEXT:   PLACEHOLDER_MISMATCH ERROR: ARG_ANNOTATION_MISMATCH
+# EXEC:        PLACEHOLDER_CALL ERROR: ARG_ANNOTATION_MISMATCH
+
 
 # --- the host entry ------------------------------------------
 # The host entry is `func.Jit`'s `func.func` with `llvm.emit_c_interface`;
@@ -514,7 +857,7 @@ print("FUNC_ENTRY:", cumsum_func(10))
 # plugins in the `Plugins` record (an add-on is a decorator or adapter plugin);
 # `attach_to_module` edits the
 # traced module before it is hashed; `after_lowering` sees the lowered module
-# before the engine is built; `wrap_compiled_function` replaces the
+# of the named entry before the engine is built; `wrap_compiled_function` replaces the
 # compiled function, and a replacement that `prefers_python_args` is called
 # with the Python arguments, also on a cache hit and from `compile()`. The
 # engine's libraries (`<PREFIX>_LIBS`, the plugins' `shared_libs()`, the call's
@@ -545,7 +888,7 @@ class Recorder(m.AdapterPlugin):
 
     def after_lowering(self, dsl, module, function_name):
         ops = sorted({op.operation.name for op in module.body.operations})
-        calls.append(("lowered", ops))
+        calls.append(("lowered", function_name, ops))
 
     def wrap_compiled_function(self, dsl, jit_function):
         calls.append(("wrap", type(jit_function).__name__))
@@ -594,7 +937,7 @@ def plugged_twice(n: m.Int32) -> m.Int32:
 # CHECK-LABEL: func.func @plugged_twice(
 # CHECK:         HOOKS: ? [('attach', 'plugged_twice', ['n'])]
 # EXEC:          WRAPPER_CALL: (21,) {}
-# EXEC-NEXT:     HOOKS: 42 [('attach', 'plugged_twice', ['n']), ('lowered', ['llvm.func']), ('wrap', 'JitCompiledFunction')]
+# EXEC-NEXT:     HOOKS: 42 [('attach', 'plugged_twice', ['n']), ('lowered', 'plugged_twice', ['llvm.func']), ('wrap', 'JitCompiledFunction')]
 print("HOOKS:", plugged_twice(21), calls)
 del calls[:]
 # EXEC:      WRAPPER_CALL: (4,) {}
