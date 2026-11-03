@@ -26,10 +26,11 @@ from __future__ import annotations
 from types import ModuleType
 from typing import Any
 
+from .... import ir
 from ...core.common import DSLUserCodeError
 from ...core.diagnostics import DiagId
 from ...core.plugin import TypeOpsPlugin
-from ...types.typing import Float, Float32, Integer, as_numeric
+from ...types.typing import Float, Integer, _ieee_float, as_numeric
 
 __all__ = ["UpstreamDialectTypeOps"]
 
@@ -96,13 +97,19 @@ class UpstreamDialectTypeOps(TypeOpsPlugin):
         is ``Boolean``, an ``int`` ``Int32`` (``Int64`` when it does not fit),
         a ``float`` ``Float32``. Under ``Float`` every number is ``Float32``;
         under ``Integer`` a ``float`` gets no dtype (None), since no integer
-        holds its fraction. A type hook: it holds without a ``scalars`` module."""
+        holds its fraction. The dtypes are the registry's (a re-declared
+        ``Float32`` is the one answered). A type hook: it holds without a
+        ``scalars`` module."""
         if issubclass(family, Float):
-            return Float32
+            return _ieee_float(32)
         dtype = as_numeric(value).dtype
         if issubclass(family, Integer) and not dtype.is_integer:
             return None
         return dtype
+
+
+
+
 
     # -- scalar ops ----------------------------------------------------------
 
@@ -154,6 +161,7 @@ class UpstreamDialectTypeOps(TypeOpsPlugin):
     def cmp(self, *args: Any, **kwargs: Any) -> Any:
         return self._part("scalars", "cmp").cmp(*args, **kwargs)
 
+
     def cast(self, *args: Any, **kwargs: Any) -> Any:
         return self._part("scalars", "cast").cast(*args, **kwargs)
 
@@ -174,3 +182,11 @@ class UpstreamDialectTypeOps(TypeOpsPlugin):
 
     def minmax(self, *args: Any, **kwargs: Any) -> Any:
         return self._part("scalars", "max/min").minmax(*args, **kwargs)
+
+    # -- vector ops ----------------------------------------------------------
+
+
+
+
+
+    # -- memory ops ----------------------------------------------------------

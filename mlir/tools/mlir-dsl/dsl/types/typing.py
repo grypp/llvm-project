@@ -21,6 +21,7 @@ import builtins
 import ctypes
 import functools
 import dataclasses
+import inspect
 import math
 import operator
 import struct as _pystruct
@@ -30,6 +31,7 @@ from typing import (
     Any,
     Callable,
     ClassVar,
+    Literal,
     Optional,
     Type,
     Union,
@@ -40,12 +42,7 @@ from typing import (
 
 from ... import ir
 from ...extras import types as T
-from ..core.common import (
-    DSLRuntimeError,
-    DSLUserCodeError,
-    get_current_dsl,
-    report_warning,
-)
+from ..core.common import DSLRuntimeError, DSLUserCodeError, get_current_dsl, report_warning
 from ..core.diagnostics import DiagId, WarnId
 from ..core.mlir_op import current_emitter as _emitter
 from ..core.user_op import dsl_user_op
@@ -56,18 +53,22 @@ from ..core.user_op import dsl_user_op
 # =============================================================================
 
 
-def _make_owning_c_pointer(c_value: Any) -> ctypes.c_void_p:
+def make_owning_c_pointer(c_value: Any) -> ctypes.c_void_p:
     """Return a pointer that keeps its backing ctypes value alive.
 
     ``ctypes.cast(ctypes.pointer(c_value), ctypes.c_void_p)`` makes the
     intermediate pointer reference itself through its ``_objects`` dictionary,
     and those cycles accumulate when cyclic garbage collection is disabled. A
     direct address creates no cycle; the private keep-alive attribute preserves
-    the backing value for the lifetime of the returned pointer.
+    the backing value for the lifetime of the returned pointer. A sub-DSL's
+    host marshalling of its own types uses it the same way.
     """
     c_pointer = ctypes.c_void_p(ctypes.addressof(c_value))
     c_pointer._keepalive = c_value  # type: ignore[attr-defined]
     return c_pointer
+
+
+_make_owning_c_pointer = make_owning_c_pointer
 
 
 def _in_trace() -> bool:
@@ -116,22 +117,147 @@ class DslType(type):
 # Every concrete dtype registers itself here when its class is created
 # (``NumericMeta.__new__``), so a sub-DSL's ``class MyFloat(Float, ...)`` is
 # found by ``dtype()``, ``from_numpy_dtype()`` and ``Numeric.from_mlir_type()``.
-ALL_DTYPES: set = set()
+# The registry is ordered by registration and process-global: a dtype declared
+# again under a registered class name replaces the earlier class everywhere
+# (the last registration wins), and the anchors of promotion and of the
+# literal rule (``_int_dtype``, ``_ieee_float``) resolve through it, so a
+# sub-DSL that re-declares ``Int32`` makes its class the one a ``5`` becomes.
+ALL_DTYPES: dict = {}
 _NAME_TO_DTYPE: dict = {}
 _NP_NAME_TO_DTYPE: dict = {}
 # MLIR type spelling (``"i32"``, ``"ui8"``, ``"f8E4M3FN"``) -> dtype. Type
 # spellings do not depend on the context, so the index is built once and
 # cleared whenever a dtype registers.
 _MLIR_NAME_TO_DTYPE: dict = {}
+# Dtype shape -> dtype, over the dtypes that claim an MLIR type: ``(width,
+# signed)`` for the integers (``(1, True)`` is the boolean) and the width for
+# the floats of the IEEE binary16/32/64 formats. Filled on first use from
+# ``ALL_DTYPES`` in registration order (a later dtype of the same shape wins)
+# and cleared whenever a dtype registers.
+_INT_BY_SHAPE: dict = {}
+_IEEE_FLOAT_BY_WIDTH: dict = {}
+_IEEE_FORMATS: dict = {16: (5, 10), 32: (8, 23), 64: (11, 52)}
 
 
-def _register_dtype(cls: "NumericMeta") -> None:
-    """Index a concrete dtype by class name and NumPy name; drop the MLIR index."""
-    ALL_DTYPES.add(cls)
+def _register_dtype(cls: "NumericMeta", *, claims_mlir_type: bool = True) -> None:
+    """Index a concrete dtype by class name and NumPy name; drop the indexes
+    derived from the registry.
+
+    A dtype registered under the name of an earlier one supersedes it: the
+    earlier class leaves ``ALL_DTYPES`` and every index. With
+    ``claims_mlir_type`` False (``register="name"``) the dtype is listed by
+    name only: it takes part in no MLIR type, NumPy or shape lookup.
+    """
+    earlier = _NAME_TO_DTYPE.get(cls.__name__)
+    if earlier is not None and earlier is not cls:
+        ALL_DTYPES.pop(earlier, None)
+        for np_name in [k for k, v in _NP_NAME_TO_DTYPE.items() if v is earlier]:
+            del _NP_NAME_TO_DTYPE[np_name]
+    ALL_DTYPES[cls] = None
     _NAME_TO_DTYPE[cls.__name__] = cls
-    if cls._np_dtype_name is not None:
+    cls._claims_mlir_type = claims_mlir_type
+    if claims_mlir_type and cls._np_dtype_name is not None:
         _NP_NAME_TO_DTYPE[cls._np_dtype_name] = cls
     _MLIR_NAME_TO_DTYPE.clear()
+    _INT_BY_SHAPE.clear()
+    _IEEE_FLOAT_BY_WIDTH.clear()
+
+
+def _shape_index() -> None:
+    """Fill the shape maps from ``ALL_DTYPES`` once a registration emptied them.
+
+    The maps are filled here, after class creation, because the metaclasses
+    set ``signed`` and the float format on the class after registering it.
+    """
+    if _INT_BY_SHAPE or _IEEE_FLOAT_BY_WIDTH:
+        return
+    for dt in ALL_DTYPES:
+        if not dt._claims_mlir_type:
+            continue
+        if dt.is_integer:
+            _INT_BY_SHAPE[(dt.width, dt.signed)] = dt
+        elif _IEEE_FORMATS.get(dt.width) == (
+            getattr(dt, "_exponent_width", None),
+            getattr(dt, "_mantissa_width", None),
+        ):
+            _IEEE_FLOAT_BY_WIDTH[dt.width] = dt
+
+
+def _int_dtype(width: int, signed: bool = True) -> "IntegerMeta":
+    """The registered integer dtype of ``width`` bits and signedness ``signed``."""
+    _shape_index()
+    dt = _INT_BY_SHAPE.get((width, signed))
+    if dt is None:
+        raise DSLRuntimeError(f"Unsupported integer width: {width}")
+    return dt
+
+
+def _bool_dtype() -> "IntegerMeta":
+    """The registered boolean dtype: the signed integer of width 1."""
+    return _int_dtype(1)
+
+
+def _ieee_float(width: int) -> "FloatMeta":
+    """The registered dtype of the IEEE float format of ``width`` bits (16, 32, 64)."""
+    _shape_index()
+    dt = _IEEE_FLOAT_BY_WIDTH.get(width)
+    if dt is None:
+        raise DSLRuntimeError(f"Unsupported float width: {width}")
+    return dt
+
+
+def _value_slot_provided(bases: tuple) -> bool:
+    """True when a base already stores the payload: it declares the ``value``
+    slot itself, or its instances carry a ``__dict__``."""
+    for base in bases:
+        if base.__dictoffset__ != 0:
+            return True
+        if any("value" in getattr(k, "__slots__", ()) for k in base.__mro__):
+            return True
+    return False
+
+
+# The operator methods of ``Numeric`` and ``Integer`` that ``Numeric.user_op``
+# wraps; a class body that sets ``user_op`` has its inherited ones re-wrapped.
+_OPERATOR_NAMES = (
+    "__add__",
+    "__sub__",
+    "__mul__",
+    "__floordiv__",
+    "__truediv__",
+    "__mod__",
+    "__radd__",
+    "__rsub__",
+    "__rmul__",
+    "__rfloordiv__",
+    "__rtruediv__",
+    "__rmod__",
+    "__eq__",
+    "__ne__",
+    "__lt__",
+    "__le__",
+    "__gt__",
+    "__ge__",
+    "__pow__",
+    "__rpow__",
+    "__invert__",
+    "__lshift__",
+    "__rshift__",
+    "__and__",
+    "__or__",
+    "__xor__",
+)
+
+
+def _inherited_dtype_method(bases: tuple, name: str) -> Optional[Callable[..., Any]]:
+    """The ``name`` method a class body inherits from its dtype bases, looked
+    up in the dtype classes of their MROs only, so a name no dtype defines is
+    not taken from the metaclass (``type.__or__``) or from ``object``."""
+    for base in bases:
+        for klass in base.__mro__:
+            if isinstance(klass, NumericMeta) and name in vars(klass):
+                return vars(klass)[name]
+    return None
 
 
 class NumericMeta(DslType):
@@ -149,6 +275,11 @@ class NumericMeta(DslType):
     :param ctype: The ctypes representative used to pass a value of this type
         to a compiled function, or None when the type is staged-only
     :type ctype: type, optional
+    :param register: Whether a concrete dtype enters the registry: True (the
+        default) registers it by name, NumPy name and MLIR type, ``"name"``
+        lists it by class name only (a view of another dtype's MLIR type), and
+        False keeps it out of every lookup
+    :type register: bool | Literal["name"], optional
     """
 
     width: int
@@ -156,6 +287,7 @@ class NumericMeta(DslType):
     ctype: Optional[type]
     _mlir_type: Optional[Callable[[], ir.Type]]
     _np_dtype_name: Optional[str]
+    _claims_mlir_type: bool
 
     def __new__(
         cls,
@@ -167,10 +299,31 @@ class NumericMeta(DslType):
         mlir_type: Optional[Callable[[], ir.Type]] = None,
         is_abstract: bool = False,
         ctype: Optional[type] = None,
+        register: Union[bool, Literal["name"]] = True,
         **kwargs: Any,
     ) -> Any:
-        # Instances carry their payload in the one slot ``Numeric`` declares.
-        attrs.setdefault("__slots__", ())
+        # Storage: the abstract bases carry no slot; a concrete dtype declares
+        # the one ``value`` slot unless a base already provides it or a base's
+        # instances carry a ``__dict__`` (a dict-backed sub-DSL root keeps its
+        # attribute dictionary and gets no dead slot).
+        attrs.setdefault(
+            "__slots__",
+            () if is_abstract or _value_slot_provided(bases) else ("value",),
+        )
+        # A class body that names its own ``user_op`` applies it to every
+        # operator it inherits, in place of the wrapper the base applied.
+        user_op = attrs.get("user_op")
+        if user_op is not None:
+            wrap = getattr(user_op, "__func__", user_op)
+            body_defines_eq = "__eq__" in attrs
+            for op_name in _OPERATOR_NAMES:
+                inherited = _inherited_dtype_method(bases, op_name)
+                if op_name not in attrs and inherited is not None:
+                    attrs[op_name] = wrap(inspect.unwrap(inherited))
+            # Python drops the hash of a body that defines ``__eq__`` alone;
+            # an injected ``__eq__`` keeps the inherited hash.
+            if not body_defines_eq and "__eq__" in attrs and "__hash__" not in attrs:
+                attrs["__hash__"] = _inherited_dtype_method(bases, "__hash__")
         new_cls = super().__new__(cls, name, bases, attrs, is_abstract=is_abstract)
 
         new_cls._mlir_type = staticmethod(mlir_type) if mlir_type is not None else None
@@ -178,8 +331,9 @@ class NumericMeta(DslType):
         new_cls.bytes = max(1, (width + 7) // 8)
         new_cls.ctype = ctype
         new_cls._np_dtype_name = np_dtype_name
-        if not is_abstract:
-            _register_dtype(new_cls)
+        new_cls._claims_mlir_type = False
+        if not is_abstract and register:
+            _register_dtype(new_cls, claims_mlir_type=register is True)
         return new_cls
 
     def n_bytes(cls, n_elements: int) -> int:
@@ -202,18 +356,15 @@ class NumericMeta(DslType):
 
     @property
     @abstractmethod
-    def is_integer(cls) -> bool:
-        ...
+    def is_integer(cls) -> bool: ...
 
     @property
     @abstractmethod
-    def is_float(cls) -> bool:
-        ...
+    def is_float(cls) -> bool: ...
 
     @property
     @abstractmethod
-    def zero(cls) -> Union[int, float]:
-        ...
+    def zero(cls) -> Union[int, float]: ...
 
     def is_same_kind(cls, other: Type) -> bool:
         """True when ``other`` is an integer dtype like this one, or a float one."""
@@ -360,6 +511,7 @@ class IntegerMeta(NumericMeta):
         signed: bool = True,
         mlir_type: Optional[Callable[[], ir.Type]] = None,
         is_abstract: bool = False,
+        register: Union[bool, Literal["name"]] = True,
     ) -> Any:
         np_dtype_name = (
             "bool_" if width == 1 else _INTEGER_DTYPE_NAMES.get((width, signed))
@@ -381,6 +533,7 @@ class IntegerMeta(NumericMeta):
             mlir_type,
             is_abstract,
             ctype=ctype,
+            register=register,
         )
         new_cls.signed = signed
         # Precomputed once per type so ``Integer.__init__`` can range-check
@@ -424,17 +577,8 @@ class IntegerMeta(NumericMeta):
             return 2**cls.width - 1
 
     def recast_width(cls, width: int) -> Type["Integer"]:
-        """Return the signed integer dtype of ``width`` bits."""
-        type_map = {
-            8: Int8,
-            16: Int16,
-            32: Int32,
-            64: Int64,
-            128: Int128,
-        }
-        if width not in type_map:
-            raise DSLRuntimeError(f"Unsupported integer width: {width}")
-        return type_map[width]
+        """Return the registered signed integer dtype of ``width`` bits."""
+        return _int_dtype(width)
 
 
 class FloatMeta(NumericMeta):
@@ -472,6 +616,7 @@ class FloatMeta(NumericMeta):
         mantissa_width: Optional[int] = None,
         np_dtype_name: Optional[str] = None,
         ctype: Optional[type] = None,
+        register: Union[bool, Literal["name"]] = True,
     ) -> Any:
         new_cls = super().__new__(
             cls,
@@ -483,6 +628,7 @@ class FloatMeta(NumericMeta):
             mlir_type,
             is_abstract,
             ctype=ctype,
+            register=register,
         )
         if exponent_width is not None:
             new_cls._exponent_width = exponent_width
@@ -514,19 +660,12 @@ class FloatMeta(NumericMeta):
         return cls._mantissa_width
 
     def recast_width(cls, width: int) -> Type["Float"]:
-        """Return the IEEE float dtype of ``width`` bits (16, 32 or 64).
+        """Return the registered IEEE float dtype of ``width`` bits (16, 32 or 64).
 
         Used by ``_promote_float`` to move an integer operand into the float
         family at the wider of the two operand widths.
         """
-        type_map = {
-            16: Float16,
-            32: Float32,
-            64: Float64,
-        }
-        if width not in type_map:
-            raise DSLRuntimeError(f"Unsupported float width: {width}")
-        return type_map[width]
+        return _ieee_float(width)
 
 
 # =============================================================================
@@ -571,9 +710,10 @@ def _binary_op_type_promote(
     """
     a_type = a.dtype
     b_type = b.dtype
+    boolean = _bool_dtype()
 
     # Early return for same types (except when they're bools that need promotion)
-    if a_type == b_type and not (promote_bool and a_type is Boolean):
+    if a_type == b_type and not (promote_bool and a_type is boolean):
         return a, b, a_type
 
     # Handle floating point promotions
@@ -582,10 +722,11 @@ def _binary_op_type_promote(
 
     # Handle bool promotion for arithmetic operations
     if promote_bool:
-        if a_type is Boolean and b_type is Boolean:
-            # Only promote to Int32 when both are bool
-            a = a.to(Int32)
-            b = b.to(Int32)
+        if a_type is boolean and b_type is boolean:
+            # Only promote to the 32-bit integer when both are bool
+            int32 = _int_dtype(32)
+            a = a.to(int32)
+            b = b.to(int32)
             a_type = b_type = a.dtype
 
     # Same type, no promotion needed (also covers both-bool -> Int32 above)
@@ -626,14 +767,17 @@ def _promote_float(
             op=op_name,
         )
 
-    # If one type is integer, convert it to the float type
+    # If one type is integer, convert it to the IEEE float type of the wider
+    # width; the registry must have that format.
+    _shape_index()
     if a_type.is_float != b_type.is_float:
-        if max(a_width, b_width) not in (16, 32, 64):
+        width = max(a_width, b_width)
+        if width not in _IEEE_FLOAT_BY_WIDTH:
             raise unsupported()
         if a_type.is_float:
-            b_type = a_type.recast_width(max(a_width, b_width))  # type: ignore[attr-defined]
+            b_type = a_type.recast_width(width)  # type: ignore[attr-defined]
         else:
-            a_type = b_type.recast_width(max(a_width, b_width))  # type: ignore[attr-defined]
+            a_type = b_type.recast_width(width)  # type: ignore[attr-defined]
 
     # Both are float types - handle precision promotion
     if a_width > b_width and a_width >= 16:
@@ -641,13 +785,11 @@ def _promote_float(
     elif b_width > a_width and b_width >= 16:
         res_type = b_type
     elif a_width == b_width:
-        # Same bitwidth - handle special cases like TFloat32 -> Float32 and BFloat16 -> Float16
-        if a_type is Float64 or b_type is Float64:
-            res_type = Float64
-        elif a_type is Float32 or b_type is Float32:
-            res_type = Float32
-        elif a_type is Float16 or b_type is Float16:
-            res_type = Float16
+        # Same bitwidth: the IEEE format of that width wins over the other
+        # formats (Float32 over TFloat32, Float16 over BFloat16).
+        ieee = _IEEE_FLOAT_BY_WIDTH.get(a_width)
+        if ieee is not None and (a_type is ieee or b_type is ieee):
+            res_type = ieee
         else:
             raise unsupported()
     else:
@@ -785,12 +927,13 @@ def _binary_op(
         else:
             rhs = ty(rhs)  # type: ignore[arg-type]
 
+        boolean = _bool_dtype()
         if op in _COMPARISON_OPS:
-            res_type = Boolean
+            res_type = boolean
         elif op is operator.truediv and isinstance(lhs, Integer):
-            res_type = Float32
-        elif promote_bool and orig_lhs_type is Boolean and orig_rhs_type is Boolean:
-            res_type = Boolean
+            res_type = _ieee_float(32)
+        elif promote_bool and orig_lhs_type is boolean and orig_rhs_type is boolean:
+            res_type = boolean
 
         lhs_val = lhs.value
         rhs_val = rhs.value
@@ -823,8 +966,8 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
 
     This class provides the foundation for both Integer and Float types,
     implementing basic arithmetic operations. Instances are immutable value
-    objects: the one slot ``value`` holds a Python scalar (a compile-time
-    value) or an ``ir.Value`` (a staged value).
+    objects: the one slot ``value``, declared by the concrete dtypes, holds a
+    Python scalar (a compile-time value) or an ``ir.Value`` (a staged value).
 
     :param value: The value to store in the numeric type
     :type value: Union[bool, int, float, ir.Value, Numeric]
@@ -833,7 +976,15 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
     :vartype value: Union[bool, int, float, ir.Value]
     """
 
-    __slots__ = ("value",)
+    __slots__ = ()
+
+    # The driver behind every binary operator and the wrapper applied to each
+    # operator method. A sub-DSL's root class replaces either by assignment in
+    # its class body: ``_binary_op`` is resolved per call through ``self``,
+    # and ``NumericMeta`` re-wraps the inherited operators with the body's
+    # ``user_op`` (see ``_OPERATOR_NAMES``).
+    _binary_op: ClassVar[Callable[..., Any]] = staticmethod(_binary_op)
+    user_op: ClassVar[Callable[..., Any]] = staticmethod(dsl_user_op)
 
     # Injected by NumericMeta.__new__ on every concrete subclass.
     width: ClassVar[int]
@@ -985,7 +1136,13 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
                 arg_type=cls.__name__,
                 detail=": this dtype has no host representation",
             )
-        return _make_owning_c_pointer(cls._to_ctype(value))
+        return make_owning_c_pointer(cls._to_ctype(value))
+
+    # -- Executor contract ---------------------------------------------------
+
+
+
+
 
     def __bool__(self) -> bool:
         if isinstance(self.value, (int, float, bool)):
@@ -1041,22 +1198,25 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
     ) -> "Numeric":
         """Wrap a Python literal in the dtype the literal rule assigns.
 
-        ``bool`` -> ``Boolean``; ``int`` -> ``Int32``, or ``Int64`` when it
-        does not fit in 32 bits; ``float`` -> ``Float32``; an ``ir.Value``
-        takes the dtype that claims its MLIR type; a ``Numeric`` is returned
-        as is.
+        ``bool`` -> the boolean dtype; ``int`` -> the signed 32-bit integer,
+        or the 64-bit one when it does not fit in 32 bits; ``float`` -> the
+        IEEE 32-bit float, each the registered dtype of that shape (``Boolean``,
+        ``Int32``, ``Int64``, ``Float32`` as shipped); a NumPy scalar takes the
+        rule of its Python value; an ``ir.Value`` takes the dtype that claims
+        its MLIR type; a ``Numeric`` is returned as is.
         """
         if isinstance(value, Numeric):
             return value
+        if getattr(value, "shape", None) == () and hasattr(value, "item"):
+            # A NumPy scalar (or a 0-d array): the literal rule of its value.
+            value = value.item()
 
         if isinstance(value, bool):
-            res_type: Type["Numeric"] = Boolean
+            res_type: Type["Numeric"] = _bool_dtype()
         elif isinstance(value, int):
-            res_type = (
-                Int32 if (value <= 2147483647) and (value >= -2147483648) else Int64
-            )
+            res_type = _int_dtype(32 if -2147483648 <= value <= 2147483647 else 64)
         elif isinstance(value, float):
-            res_type = Float32
+            res_type = _ieee_float(32)
         elif isinstance(value, ir.Value):
             res_type = Numeric.from_mlir_type(value.type)
         else:
@@ -1077,7 +1237,9 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Numeric":
-        return _binary_op(operator.add, promote_bool=True)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.add, promote_bool=True)(
+            self, other, loc=loc, ip=ip
+        )
 
     @dsl_user_op
     def __sub__(
@@ -1087,7 +1249,9 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Numeric":
-        return _binary_op(operator.sub, promote_bool=True)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.sub, promote_bool=True)(
+            self, other, loc=loc, ip=ip
+        )
 
     @dsl_user_op
     def __mul__(
@@ -1097,7 +1261,9 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Numeric":
-        return _binary_op(operator.mul, promote_bool=True)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.mul, promote_bool=True)(
+            self, other, loc=loc, ip=ip
+        )
 
     @dsl_user_op
     def __floordiv__(
@@ -1107,7 +1273,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Numeric":
-        return _binary_op(operator.floordiv, promote_bool=True)(
+        return self._binary_op(operator.floordiv, promote_bool=True)(
             self, other, loc=loc, ip=ip
         )
 
@@ -1119,7 +1285,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Numeric":
-        return _binary_op(operator.truediv, promote_bool=True)(
+        return self._binary_op(operator.truediv, promote_bool=True)(
             self, other, loc=loc, ip=ip
         )
 
@@ -1131,7 +1297,9 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Numeric":
-        return _binary_op(operator.mod, promote_bool=True)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.mod, promote_bool=True)(
+            self, other, loc=loc, ip=ip
+        )
 
     @dsl_user_op
     def __radd__(
@@ -1151,7 +1319,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Numeric":
-        return _binary_op(operator.sub, promote_bool=True, flip=True)(
+        return self._binary_op(operator.sub, promote_bool=True, flip=True)(
             self, other, loc=loc, ip=ip
         )
 
@@ -1173,7 +1341,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Numeric":
-        return _binary_op(operator.floordiv, promote_bool=True, flip=True)(
+        return self._binary_op(operator.floordiv, promote_bool=True, flip=True)(
             self, other, loc=loc, ip=ip
         )
 
@@ -1185,7 +1353,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Numeric":
-        return _binary_op(operator.truediv, promote_bool=True, flip=True)(
+        return self._binary_op(operator.truediv, promote_bool=True, flip=True)(
             self, other, loc=loc, ip=ip
         )
 
@@ -1197,7 +1365,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Numeric":
-        return _binary_op(operator.mod, promote_bool=True, flip=True)(
+        return self._binary_op(operator.mod, promote_bool=True, flip=True)(
             self, other, loc=loc, ip=ip
         )
 
@@ -1209,7 +1377,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Boolean":
-        return _binary_op(operator.eq)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.eq)(self, other, loc=loc, ip=ip)
 
     @dsl_user_op
     def __ne__(  # type: ignore[override]
@@ -1219,7 +1387,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Boolean":
-        return _binary_op(operator.ne)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.ne)(self, other, loc=loc, ip=ip)
 
     @dsl_user_op
     def __lt__(
@@ -1229,7 +1397,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Boolean":
-        return _binary_op(operator.lt)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.lt)(self, other, loc=loc, ip=ip)
 
     @dsl_user_op
     def __le__(
@@ -1239,7 +1407,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Boolean":
-        return _binary_op(operator.le)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.le)(self, other, loc=loc, ip=ip)
 
     @dsl_user_op
     def __gt__(
@@ -1249,7 +1417,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Boolean":
-        return _binary_op(operator.gt)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.gt)(self, other, loc=loc, ip=ip)
 
     @dsl_user_op
     def __ge__(
@@ -1259,7 +1427,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Boolean":
-        return _binary_op(operator.ge)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.ge)(self, other, loc=loc, ip=ip)
 
     @dsl_user_op
     def __pow__(
@@ -1273,7 +1441,7 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         if mod is not None:
             # No staged modular-exponentiation form.
             return NotImplemented
-        return _binary_op(operator.pow)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.pow)(self, other, loc=loc, ip=ip)
 
     @dsl_user_op
     def __rpow__(
@@ -1283,14 +1451,16 @@ class Numeric(metaclass=NumericMeta, is_abstract=True):
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Numeric":
-        return _binary_op(operator.pow, flip=True)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.pow, flip=True)(self, other, loc=loc, ip=ip)
 
     @staticmethod
     def from_mlir_type(mlir_type: ir.Type) -> Type["Numeric"]:
         """Return the dtype whose MLIR type is ``mlir_type``.
 
         Signless and signed integer types map to the signed dtype of that
-        width, unsigned ones to the unsigned dtype.
+        width, unsigned ones to the unsigned dtype. Inside a trace
+        ``mlir_type`` is an SSA type of the tracing DSL's ``type_ops`` plugin;
+        outside one it is a scalar type, matched on its spelling.
         """
         dt = _lookup_mlir_type(mlir_type)
         if dt is None:
@@ -1321,12 +1491,13 @@ def as_numeric(obj: Union[bool, int, float, ir.Value, Numeric]) -> Numeric:
     return Numeric._from_python_value(obj)
 
 
-def _wrap_to_exact_range(value: int, exact_range: tuple) -> int:
+def wrap_to_exact_range(value: int, exact_range: tuple) -> int:
     """Wrap ``value`` into ``exact_range`` the way a C integer cast would.
 
     Keeps the low ``width`` bits and reinterprets them with the range's
     signedness, e.g. ``Int32(1 << 34) -> 0``. ``(0, 1)`` is the boolean range,
-    where every nonzero value folds to 1 instead of wrapping.
+    where every nonzero value folds to 1 instead of wrapping. A sub-DSL's
+    integer constructor applies the same narrowing through this function.
     """
     if exact_range == (0, 1):
         return int(bool(value))
@@ -1334,9 +1505,12 @@ def _wrap_to_exact_range(value: int, exact_range: tuple) -> int:
     return (value - lo) % (hi - lo + 1) + lo
 
 
+_wrap_to_exact_range = wrap_to_exact_range
+
+
 def _float_to_int(x: float, exact_range: tuple) -> int:
     """Narrow ``x`` to the integer range with a deterministic two's-complement wrap."""
-    return _wrap_to_exact_range(int(x), exact_range)
+    return wrap_to_exact_range(int(x), exact_range)
 
 
 # =============================================================================
@@ -1424,7 +1598,6 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
                     if isinstance(x, float):
                         report_warning(
                             WarnId.TYPE_FLOAT_TO_INT_OUT_OF_RANGE,
-
                             value=x,
                             type=ty.__name__,
                             min=ty.min,
@@ -1434,7 +1607,6 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
                     else:
                         report_warning(
                             WarnId.TYPE_INT_LITERAL_OUT_OF_RANGE,
-
                             value=int_val,
                             type=ty.__name__,
                             min=ty.min,
@@ -1505,7 +1677,7 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Numeric":
-        return _binary_op(operator.lshift)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.lshift)(self, other, loc=loc, ip=ip)
 
     def __rlshift__(
         self,
@@ -1527,7 +1699,7 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Numeric":
-        return _binary_op(operator.rshift)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.rshift)(self, other, loc=loc, ip=ip)
 
     def __rrshift__(
         self,
@@ -1549,7 +1721,7 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Numeric":
-        return _binary_op(operator.and_)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.and_)(self, other, loc=loc, ip=ip)
 
     def __rand__(
         self,
@@ -1568,7 +1740,7 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Numeric":
-        return _binary_op(operator.or_)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.or_)(self, other, loc=loc, ip=ip)
 
     def __ror__(
         self,
@@ -1587,7 +1759,7 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
         loc: Optional[ir.Location] = None,
         ip: Optional[ir.InsertionPoint] = None,
     ) -> "Numeric":
-        return _binary_op(operator.xor)(self, other, loc=loc, ip=ip)
+        return self._binary_op(operator.xor)(self, other, loc=loc, ip=ip)
 
     def __rxor__(
         self,
@@ -1605,11 +1777,13 @@ class Integer(Numeric, metaclass=IntegerMeta, mlir_type=T.i32, is_abstract=True)
 # +/-inf or underflows to 0 in the target type -- numpy-free, via exact
 # ``struct`` round-trips. Only these standard formats are probed; non-IEEE /
 # narrow types (bf16, tf32, fp8, fp6, fp4) are absent and narrow later in IR.
-_IEEE_FLOAT_PROBE: dict = {
+# A sub-DSL's float constructor probes its literals with the same table.
+IEEE_FLOAT_PROBE: dict = {
     "Float16": ("e", 65504.0, 2.0**-24),
     "Float32": ("f", 3.4028234663852886e38, 2.0**-149),
     "Float64": ("d", 1.7976931348623157e308, 2.0**-1074),
 }
+_IEEE_FLOAT_PROBE = IEEE_FLOAT_PROBE
 
 
 class Float(Numeric, metaclass=FloatMeta, mlir_type=T.f32, is_abstract=True):
@@ -1649,7 +1823,7 @@ class Float(Numeric, metaclass=FloatMeta, mlir_type=T.f32, is_abstract=True):
             # that catastrophic loss, but NOT ordinary rounding loss, which is
             # inherent to every float literal. The full-precision Python
             # double is kept; the probe only detects the collapse.
-            struct_code, max_finite, min_subnormal = _IEEE_FLOAT_PROBE.get(
+            struct_code, max_finite, min_subnormal = IEEE_FLOAT_PROBE.get(
                 ty.__name__, (None, None, None)
             )
             if struct_code is not None and fx != 0.0 and math.isfinite(fx):
@@ -1663,7 +1837,6 @@ class Float(Numeric, metaclass=FloatMeta, mlir_type=T.f32, is_abstract=True):
                 if math.isinf(narrowed):
                     report_warning(
                         WarnId.TYPE_FLOAT_LITERAL_OVERFLOW,
-
                         value=fx,
                         type=ty.__name__,
                         max=max_finite,
@@ -1672,7 +1845,6 @@ class Float(Numeric, metaclass=FloatMeta, mlir_type=T.f32, is_abstract=True):
                 elif narrowed == 0.0:
                     report_warning(
                         WarnId.TYPE_FLOAT_LITERAL_UNDERFLOW,
-
                         value=fx,
                         type=ty.__name__,
                         tiny=min_subnormal,
@@ -1789,8 +1961,7 @@ class Int2(
     width=2,
     signed=True,
     mlir_type=lambda: T.i(2),
-):
-    ...
+): ...
 
 
 class Int4(
@@ -1799,52 +1970,47 @@ class Int4(
     width=4,
     signed=True,
     mlir_type=lambda: T.i(4),
-):
-    ...
+): ...
 
 
-class Int8(Integer, metaclass=IntegerMeta, width=8, signed=True, mlir_type=T.i8):
-    ...
+class Int8(Integer, metaclass=IntegerMeta, width=8, signed=True, mlir_type=T.i8): ...
 
 
-class Int16(Integer, metaclass=IntegerMeta, width=16, signed=True, mlir_type=T.i16):
-    ...
+class Int16(Integer, metaclass=IntegerMeta, width=16, signed=True, mlir_type=T.i16): ...
 
 
-class Int32(Integer, metaclass=IntegerMeta, width=32, signed=True, mlir_type=T.i32):
-    ...
+class Int32(Integer, metaclass=IntegerMeta, width=32, signed=True, mlir_type=T.i32): ...
 
 
-class Int64(Integer, metaclass=IntegerMeta, width=64, signed=True, mlir_type=T.i64):
-    ...
+class Int64(Integer, metaclass=IntegerMeta, width=64, signed=True, mlir_type=T.i64): ...
 
 
 class Int128(
     Integer, metaclass=IntegerMeta, width=128, signed=True, mlir_type=lambda: T.i(128)
-):
-    ...
+): ...
 
 
-class Uint8(Integer, metaclass=IntegerMeta, width=8, signed=False, mlir_type=T.i8):
-    ...
+class Uint8(Integer, metaclass=IntegerMeta, width=8, signed=False, mlir_type=T.i8): ...
 
 
-class Uint16(Integer, metaclass=IntegerMeta, width=16, signed=False, mlir_type=T.i16):
-    ...
+class Uint16(
+    Integer, metaclass=IntegerMeta, width=16, signed=False, mlir_type=T.i16
+): ...
 
 
-class Uint32(Integer, metaclass=IntegerMeta, width=32, signed=False, mlir_type=T.i32):
-    ...
+class Uint32(
+    Integer, metaclass=IntegerMeta, width=32, signed=False, mlir_type=T.i32
+): ...
 
 
-class Uint64(Integer, metaclass=IntegerMeta, width=64, signed=False, mlir_type=T.i64):
-    ...
+class Uint64(
+    Integer, metaclass=IntegerMeta, width=64, signed=False, mlir_type=T.i64
+): ...
 
 
 class Uint128(
     Integer, metaclass=IntegerMeta, width=128, signed=False, mlir_type=lambda: T.i(128)
-):
-    ...
+): ...
 
 
 class Float64(
@@ -1856,8 +2022,7 @@ class Float64(
     mantissa_width=52,
     np_dtype_name="float64",
     ctype=ctypes.c_double,
-):
-    ...
+): ...
 
 
 class Float32(
@@ -1869,8 +2034,7 @@ class Float32(
     mantissa_width=23,
     np_dtype_name="float32",
     ctype=ctypes.c_float,
-):
-    ...
+): ...
 
 
 class TFloat32(
@@ -1880,8 +2044,7 @@ class TFloat32(
     mlir_type=T.tf32,
     exponent_width=8,
     mantissa_width=10,
-):
-    ...
+): ...
 
 
 class Float16(
@@ -1950,8 +2113,7 @@ class Float8E5M2(
     mlir_type=T.f8E5M2,
     exponent_width=5,
     mantissa_width=2,
-):
-    ...
+): ...
 
 
 class Float8E4M3(
@@ -1961,8 +2123,7 @@ class Float8E4M3(
     mlir_type=T.f8E4M3,
     exponent_width=4,
     mantissa_width=3,
-):
-    ...
+): ...
 
 
 class Float8E4M3FN(
@@ -1972,8 +2133,7 @@ class Float8E4M3FN(
     mlir_type=T.f8E4M3FN,
     exponent_width=4,
     mantissa_width=3,
-):
-    ...
+): ...
 
 
 class Float8E4M3B11FNUZ(
@@ -1983,8 +2143,7 @@ class Float8E4M3B11FNUZ(
     mlir_type=T.f8E4M3B11FNUZ,
     exponent_width=4,
     mantissa_width=3,
-):
-    ...
+): ...
 
 
 class Float8E3M4(
@@ -1994,8 +2153,7 @@ class Float8E3M4(
     mlir_type=T.f8E3M4,
     exponent_width=3,
     mantissa_width=4,
-):
-    ...
+): ...
 
 
 class Float8E8M0FNU(
@@ -2005,8 +2163,7 @@ class Float8E8M0FNU(
     mlir_type=T.f8E8M0FNU,
     exponent_width=8,
     mantissa_width=0,
-):
-    ...
+): ...
 
 
 class Float8E5M3FNU(
@@ -2016,8 +2173,7 @@ class Float8E5M3FNU(
     mlir_type=T.f8E5M3FNU,
     exponent_width=5,
     mantissa_width=3,
-):
-    ...
+): ...
 
 
 class Float8E5M2FNUZ(
@@ -2027,8 +2183,7 @@ class Float8E5M2FNUZ(
     mlir_type=ir.Float8E5M2FNUZType.get,
     exponent_width=5,
     mantissa_width=2,
-):
-    ...
+): ...
 
 
 class Float8E4M3FNUZ(
@@ -2038,8 +2193,7 @@ class Float8E4M3FNUZ(
     mlir_type=ir.Float8E4M3FNUZType.get,
     exponent_width=4,
     mantissa_width=3,
-):
-    ...
+): ...
 
 
 class Float4E2M1FN(
@@ -2049,8 +2203,7 @@ class Float4E2M1FN(
     mlir_type=T.f4E2M1FN,
     exponent_width=2,
     mantissa_width=1,
-):
-    ...
+): ...
 
 
 class Float6E3M2FN(
@@ -2060,8 +2213,7 @@ class Float6E3M2FN(
     mlir_type=T.f6E3M2FN,
     exponent_width=3,
     mantissa_width=2,
-):
-    ...
+): ...
 
 
 class Float6E2M3FN(
@@ -2071,8 +2223,7 @@ class Float6E2M3FN(
     mlir_type=T.f6E2M3FN,
     exponent_width=2,
     mantissa_width=3,
-):
-    ...
+): ...
 
 
 # =============================================================================
@@ -2105,9 +2256,17 @@ def from_numpy_dtype(name: Any) -> Type[Numeric]:
 
 
 def _mlir_type_index() -> dict:
-    """The MLIR type spelling -> dtype index, built on first use in a context."""
+    """The MLIR type spelling -> dtype index, built on first use in a context.
+
+    Built over ``ALL_DTYPES`` in registration order, so a later dtype claiming
+    a spelling wins it; a ``register="name"`` dtype claims none. The keys are
+    the scalar spellings (``scalar_mlir_type``), which need only a context,
+    not the SSA types of a tracing DSL.
+    """
     if not _MLIR_NAME_TO_DTYPE:
         for dt in ALL_DTYPES:
+            if not dt._claims_mlir_type:
+                continue
             if dt.is_integer:
                 width = dt.width
                 if dt.signed:
@@ -2116,7 +2275,7 @@ def _mlir_type_index() -> dict:
                 else:
                     _MLIR_NAME_TO_DTYPE[f"ui{width}"] = dt
             else:
-                _MLIR_NAME_TO_DTYPE[str(dt.mlir_type)] = dt
+                _MLIR_NAME_TO_DTYPE[str(dt.scalar_mlir_type)] = dt
     return _MLIR_NAME_TO_DTYPE
 
 
@@ -2129,7 +2288,13 @@ def _lookup_scalar_type(scalar: ir.Type) -> Optional[Type[Numeric]]:
 
 def _lookup_mlir_type(mlir_type: ir.Type) -> Optional[Type[Numeric]]:
     """Return the dtype whose SSA type ``mlir_type`` is under the active
-    type_ops plugin, or None when no dtype claims it."""
+    type_ops plugin, or None when no dtype claims it. With no DSL tracing
+    the builtin scalar rule applies (the ``OpEmitter`` default): a scalar type
+    is its own scalar, a shaped type is no dtype's."""
+    if get_current_dsl() is None:
+        if isinstance(mlir_type, ir.ShapedType):
+            return None
+        return _lookup_scalar_type(mlir_type)
     scalar = _emitter().scalar_type(mlir_type)
     if scalar is None:
         return None
@@ -2189,6 +2354,23 @@ def max_(*args: Any, loc: Any = None, ip: Any = None) -> Any:
 def min_(*args: Any, loc: Any = None, ip: Any = None) -> Any:
     """The DSL's ``min``: the result type follows the operand types, not the values."""
     return _minmax(True, *args, loc=loc, ip=ip)
+
+
+
+
+# =============================================================================
+# Pointer
+# =============================================================================
+
+
+
+
+
+
+
+
+
+
 
 
 # =============================================================================
@@ -2482,6 +2664,13 @@ def make_struct(name: str, **fields: Any) -> type:
     return struct(cls)
 
 
+# =============================================================================
+# Dialect-call downcast
+# =============================================================================
+
+
+
+
 __all__ = [
     "DslType",
     "Numeric",
@@ -2528,4 +2717,7 @@ __all__ = [
     "Struct",
     "struct",
     "make_struct",
+    "wrap_to_exact_range",
+    "IEEE_FLOAT_PROBE",
+    "make_owning_c_pointer",
 ]

@@ -79,3 +79,60 @@ except ValueError as e:
 # CHECK: ATTR KIND: ARG_REJECTED_BY_OP True True
 # CHECK: ATTR VALUE: ARG_REJECTED_BY_OP True True
 # CHECK: UNCHANGED: True not a binding error
+# A sub-DSL's root class replaces the wrapper of every operator and the driver
+# behind the binary ones through two class attributes: a class body that sets
+# `user_op` has its inherited operators re-wrapped with it at class creation,
+# and `_binary_op` is resolved per call through the instance. The shipped
+# `Int32` keeps the shipped wrapper and driver.
+counts = {"user_op": 0, "ops": []}
+
+
+def counting_op(fn):
+    wrapped = dsl_user_op(fn)
+
+    @functools.wraps(wrapped)
+    def counted(*args, **kwargs):
+        counts["user_op"] += 1
+        return wrapped(*args, **kwargs)
+
+    return counted
+
+
+def recording_binary_op(op, *args, **kwargs):
+    counts["ops"].append(op.__name__)
+    return m.Numeric._binary_op(op, *args, **kwargs)
+
+
+class Counting(m.Numeric, is_abstract=True):
+    user_op = staticmethod(counting_op)
+    _binary_op = staticmethod(recording_binary_op)
+
+
+class CInt32(
+    Counting,
+    m.Integer,
+    metaclass=m.IntegerMeta,
+    width=32,
+    signed=True,
+    mlir_type=T.i32,
+    register=False,
+): ...
+
+
+print("BINOP:", repr(CInt32(1) + 2), repr(CInt32(3) < 4), *counts["ops"])
+print("USER_OP calls:", counts["user_op"])
+m.Int32(1) + 2
+print("SHIPPED untouched:", counts["user_op"], len(counts["ops"]))
+# CHECK:      BINOP: CInt32(3) Boolean(True) add lt
+# CHECK-NEXT: USER_OP calls: 2
+# CHECK-NEXT: SHIPPED untouched: 2 2
+# The re-wrap takes an operator from the dtype classes only (`__or__` is
+# `Integer`'s, not the metaclass's `type.__or__`), and the class keeps
+# `Numeric.__hash__` although `__eq__` was injected into its body.
+print(
+    "OR/HASH:",
+    repr(CInt32(6) | 3),
+    repr(3 | CInt32(6)),
+    hash(CInt32(1)) == hash(CInt32(1)),
+)
+# CHECK-NEXT: OR/HASH: CInt32(7) CInt32(7) True

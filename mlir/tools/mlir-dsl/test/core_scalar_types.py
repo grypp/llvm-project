@@ -381,5 +381,63 @@ print("\n".join(text))
 # CHECK: STR AS NUMERIC: ARG_NOT_NUMERIC | Argument `value` expects a numeric value, but this call passes a value of type `str`.
 
 
+# -- the dtype registry: `register=False` keeps a dtype out of every lookup
+# (it is still a working type), a dict-backed abstract base gets no `value`
+# slot (the payload lives in its `__dict__`), and a dtype re-declared under a
+# registered name supersedes the shipped one as the anchor the literal rule and
+# promotion resolve. Last in the file: the supersession is process-global.
+class Int8View(
+    Integer, metaclass=IntegerMeta, width=8, signed=True, mlir_type=T.i8, register=False
+): ...
+
+
+with ir.Context():
+    print(
+        "UNREGISTERED:",
+        Int8View in ALL_DTYPES,
+        Numeric.from_mlir_type(T.i8()) is Int8,
+        repr(Int8View(3) + Int8View(4)),
+    )
+# CHECK: UNREGISTERED: False True Int8View(7)
+
+
+class Scalar(Numeric, is_abstract=True):
+    __slots__ = ("__dict__",)
+
+
+class Int24(
+    Scalar,
+    Integer,
+    metaclass=IntegerMeta,
+    width=24,
+    signed=True,
+    mlir_type=lambda: ir.IntegerType.get_signless(24),
+): ...
+
+
+x = Int24(5)
+x.note = 1
+print(
+    "SLOTS:",
+    Int24.__slots__,
+    [k.__name__ for k in Int24.__mro__ if "value" in getattr(k, "__slots__", ())],
+    x.note == 1 and x.value == 5,
+    Int32.__slots__,
+)
+# CHECK: SLOTS: () [] True ('value',)
+
+
+class Int32(Integer, metaclass=IntegerMeta, width=32, signed=True, mlir_type=T.i32): ...
+
+
+print(
+    "ANCHORS:",
+    as_numeric(5).dtype is Int32,
+    Int8.recast_width(32) is Int32,
+    (Int16(1) + Int32(2)).dtype is Int32,
+    type(Int8(7) / 2) is Float32,
+    repr(Boolean(True) + Boolean(False)),
+)
+# CHECK: ANCHORS: True True True True Boolean(True)
 print("S3_TYPES", "OK")
 # CHECK: S3_TYPES OK
