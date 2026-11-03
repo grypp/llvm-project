@@ -535,6 +535,100 @@ for dt in (m.Int4, m.Int128, TF32, FP8):
 # CHECK: marshal TFloat32: ARG_UNSUPPORTED_TYPE
 # CHECK: marshal Float8E4M3FN: ARG_UNSUPPORTED_TYPE
 
+# --- The helpers a sub-DSL's own constructors and marshalling reuse are
+# exported: the C-cast wrap of an integer literal, the IEEE literal probe and
+# the owning pointer of a ctypes value.
+show(
+    "EXPORTS",
+    m.wrap_to_exact_range(256, (-128, 127)),
+    m.wrap_to_exact_range(2, (0, 1)),
+    sorted(m.IEEE_FLOAT_PROBE),
+    m.make_owning_c_pointer(ctypes.c_int32(5))._keepalive.value,
+)
+# CHECK: EXPORTS: 0 1 ['Float16', 'Float32', 'Float64'] 5
+
+
+# --- The registry is open: `register="name"` lists a dtype by class name
+# without claiming an MLIR spelling or a NumPy name (a view of another dtype's
+# type), a later claimant of an MLIR spelling wins the reverse lookup, and a
+# dtype re-declared under a registered name replaces the earlier class and
+# becomes the anchor the literal rule and promotion resolve. Outside any DSL
+# the reverse lookup applies the builtin scalar rule. Last in the file: the
+# supersession is process-global.
+class Int8View(
+    m.Integer,
+    metaclass=m.IntegerMeta,
+    width=8,
+    signed=True,
+    mlir_type=T.i8,
+    register="name",
+): ...
+
+
+class MyF8(
+    m.Float,
+    metaclass=m.FloatMeta,
+    width=8,
+    mlir_type=T.f8E5M2,
+    exponent_width=5,
+    mantissa_width=2,
+): ...
+
+
+with ir.Context(), active_dsl(m.MlirTestDSL()):
+    show("NAMED", m.dtype("Int8View") is Int8View, Int8View in m.ALL_DTYPES)
+    show("NAMED claims", back(T.i8()) is I8, npd("int8") is I8, Int8View(3) + 1)
+    show("SPELLING", back(T.f8E5M2()) is MyF8, m.dtype("Float8E5M2") is m.Float8E5M2)
+with ir.Context():
+    show("HOST_LOOKUP", back(T.i32()) is I32, back(T.f32()) is F32, back(T.bool()) is B)
+# CHECK: NAMED: True True
+# CHECK: NAMED claims: True True Int32(4)
+# CHECK: SPELLING: True True
+# CHECK: HOST_LOOKUP: True True True
+
+n_before = len(m.ALL_DTYPES)
+
+
+class Int32(
+    m.Integer, metaclass=m.IntegerMeta, width=32, signed=True, mlir_type=T.i32
+): ...
+
+
+show(
+    "SUPERSEDE",
+    m.dtype("Int32") is Int32,
+    I32 in m.ALL_DTYPES,
+    len(m.ALL_DTYPES) == n_before,
+)
+show("ANCHORS", lit(5).dtype is Int32, lit(np.int16(3)), I8.recast_width(32) is Int32)
+show(
+    "ANCHORS mixed",
+    (I16(1) + Int32(2)).dtype is Int32,
+    type(I8(7) / 2) is F32,
+    B(True) + B(False),
+)
+with ir.Context():
+    show("SUPERSEDE lookup", back(T.i32()) is Int32, npd("int32") is Int32)
+# CHECK: SUPERSEDE: True False True
+# CHECK: ANCHORS: True Int32(3) True
+# CHECK: ANCHORS mixed: True True Boolean(True)
+# CHECK: SUPERSEDE lookup: True True
+
+
+@m.jit
+def superseded(a: I16, b: Int32) -> Int32:
+    return a + b + 5
+
+
+# CHECK-LABEL: func.func @superseded(
+# CHECK-SAME:    %[[A:[^:]+]]: i16, %[[B:[^:]+]]: i32) -> i32
+# CHECK:         %[[AW:.+]] = arith.extsi %[[A]] : i16 to i32
+# CHECK:         %[[S:.+]] = arith.addi %[[AW]], %[[B]] : i32
+# CHECK:         %[[C5:.+]] = arith.constant 5 : i32
+# CHECK:         arith.addi %[[S]], %[[C5]] : i32
+# EXEC:          RESULT: 8
+print("RESULT:", superseded(1, 2))
+
 # Known defects, reported separately and not asserted here: widening a signed
 # staged integer to a wider unsigned dtype emits `extui` instead of `extsi`;
 # `ARG_UNSUPPORTED_TYPE` for a staged-only `@jit` parameter names `value`

@@ -63,6 +63,9 @@ from .types.typing import (
     Struct,
     struct,
     make_struct,
+    wrap_to_exact_range,
+    IEEE_FLOAT_PROBE,
+    make_owning_c_pointer,
 )
 from .types.typing import max_ as max, min_ as min
 
@@ -133,6 +136,9 @@ __all__ = [
     "Struct",
     "struct",
     "make_struct",
+    "wrap_to_exact_range",
+    "IEEE_FLOAT_PROBE",
+    "make_owning_c_pointer",
     "max",
     "min",
     "BaseDSL",
