@@ -157,6 +157,10 @@ class MLIRBuilder(MLIRTypeBuilder):
         """``lhs == rhs`` as an ``i1``."""
         return llvm.icmp(llvm.ICmpPredicate.eq, lhs, rhs)
 
+    def not_equal(self, lhs: ir.Value, rhs: ir.Value) -> ir.Value:
+        """``lhs != rhs`` as an ``i1``."""
+        return llvm.icmp(llvm.ICmpPredicate.ne, lhs, rhs)
+
     def or_(self, lhs: ir.Value, rhs: ir.Value) -> ir.Value:
         """Bitwise ``lhs | rhs`` (logical OR on ``i1``)."""
         return llvm.or_(lhs, rhs)
@@ -394,11 +398,18 @@ class MLIRBuilder(MLIRTypeBuilder):
                 llvm.store(value, field_ptr)
         return (struct_type, alloca)
 
+    @staticmethod
     def find_func_in_module(
-        self, module: ir.Module, name: str
+        module: ir.Module, name: str, op_names: Sequence[str] = ("llvm.func",)
     ) -> Optional[ir.Operation]:
-        """The ``llvm.func`` named ``name`` in ``module``, or None."""
+        """The function named ``name`` among the top-level operations of
+        ``module`` of a kind in ``op_names`` (``llvm.func`` by default; add
+        ``"func.func"`` for an entry the func dialect declares), or None."""
         for op in module.body:
-            if op.name == "llvm.func" and self._symbol_name(op) == name:
-                return op
+            operation = op.operation
+            if (
+                operation.name in op_names
+                and MLIRBuilder._symbol_name(operation) == name
+            ):
+                return operation
         return None

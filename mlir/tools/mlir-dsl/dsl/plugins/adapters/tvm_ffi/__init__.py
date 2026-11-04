@@ -21,10 +21,14 @@ from .call_provider import (
     NopCallProvider,
 )
 from .plugin import (
+    ExportPlan,
+    NotExportable,
     NumericToTVMFFIDtype,
     TvmFfiJitCompiledFunction,
     TvmFfiPlugin,
     available,
+    kwargs_wrapper_available,
+    make_kwargs_wrapper,
     tvm_ffi_symbol,
 )
 from .spec import Param, Var
@@ -40,10 +44,14 @@ from .tvm_ffi_builder import (
 
 __all__ = [
     "TvmFfiDiagId",
+    "ExportPlan",
+    "NotExportable",
     "NumericToTVMFFIDtype",
     "TvmFfiJitCompiledFunction",
     "TvmFfiPlugin",
     "available",
+    "kwargs_wrapper_available",
+    "make_kwargs_wrapper",
     "tvm_ffi_symbol",
     "CallContext",
     "CallProvider",

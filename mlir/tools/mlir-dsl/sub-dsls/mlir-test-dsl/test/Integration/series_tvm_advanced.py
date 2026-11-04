@@ -5,6 +5,8 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 """Exercise nested tuple decoding, packed calls and stream constraints."""
+import ctypes
+
 import tvm_ffi
 from tvm_ffi import libinfo
 from mlir import execution_engine, ir
@@ -59,6 +61,59 @@ with ir.Context(), ir.Location.unknown():
     assert packed.operation.verify()
     assert "llvm.alloca" in str(packed)
     assert "llvm.call @target" in str(packed)
+
+    # A handle whose pointee the callee takes by value: `pass_pointee_as`
+    # names the aggregate's type and the packing provider forwards the handle
+    # itself, loaded as that aggregate under `struct_call`, instead of packing
+    # the pointer into a stack slot.
+    pointee = ir.Module.parse(
+        """
+        module {
+          llvm.func @sum_pair(%p: !llvm.struct<(i32, i32)>, %out: !llvm.ptr) {
+            %x = llvm.extractvalue %p[0] : !llvm.struct<(i32, i32)>
+            %y = llvm.extractvalue %p[1] : !llvm.struct<(i32, i32)>
+            %s = llvm.add %x, %y : i32
+            llvm.store %s, %out : i32, !llvm.ptr
+            llvm.return
+          }
+        }
+        """
+    )
+    attach_ffi_func(
+        pointee,
+        "sum_pair",
+        [
+            spec.Var(
+                "pair",
+                "handle",
+                pass_pointee_as=lambda b: b.struct_type(
+                    fields=[b.i32_type, b.i32_type]
+                ),
+            ),
+            spec.Var("out", "handle"),
+        ],
+        DynamicParamPackCallProvider("sum_pair", struct_call=True),
+    )
+    assert pointee.operation.verify()
+    assert "!llvm.ptr -> !llvm.struct<(i32, i32)>" in str(pointee), str(pointee)
+    assert "llvm.call @sum_pair" in str(pointee)
+    engine = execution_engine.ExecutionEngine(
+        pointee, shared_libs=[libinfo.find_libtvm_ffi()]
+    )
+    sum_pair = tvm_ffi.Function.__from_mlir_packed_safe_call__(
+        engine.raw_lookup("__tvm_ffi_sum_pair"), keep_alive_object=engine
+    )
+
+    class Pair(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_int32), ("y", ctypes.c_int32)]
+
+    pair_value = Pair(7, 11)
+    out = ctypes.c_int32(0)
+    sum_pair(
+        ctypes.c_void_p(ctypes.addressof(pair_value)),
+        ctypes.c_void_p(ctypes.addressof(out)),
+    )
+    assert out.value == 18, out.value
 
     handles = ir.Module.create()
     attach_ffi_func(

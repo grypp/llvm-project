@@ -86,7 +86,9 @@ class DynamicParamPackCallProvider(CallProvider, TVMFFIBuilder):
         struct_call: bool = False,
         flatten_tuple_params: bool = True,
     ) -> None:
-        TVMFFIBuilder.__init__(self)
+        # Cooperative: a builder a DSL mixes into the provider gets its
+        # ``__init__`` run too (``CallProvider`` defines none).
+        super().__init__()
         self.target_func = target_func
         self.include_num_args = include_num_args
         self.struct_call = struct_call
@@ -163,10 +165,18 @@ class DynamicParamPackCallProvider(CallProvider, TVMFFIBuilder):
     ) -> tuple[ir.Type, ir.Value]:
         """Pack a scalar or handle as a one-field struct.
 
+        A handle with ``pass_pointee_as`` is not packed: the callee takes the
+        pointee by value, so the handle itself is forwarded with the pointee's
+        type (``struct_call`` loads the aggregate from it; the ``void**``
+        array holds the aggregate's address).
+
         :return: The value's type (or the ``alternate_ir_type_fetch_func``
-            type) and the ``alloca``
+            type) and the ``alloca``; for ``pass_pointee_as`` the pointee's
+            type and the handle
         """
         value: ir.Value = context.matched_var_binding[param]
+        if param.pass_pointee_as is not None:
+            return (param.pass_pointee_as(self), value)
         _, alloca = self.pack_values_to_alloca(
             current_block, context.entry_block, [value]
         )
@@ -325,7 +335,7 @@ class DirectCallProvider(CallProvider, TVMFFIBuilder):
         result_signed: bool = True,
         callee_kind: str = "llvm",
     ) -> None:
-        TVMFFIBuilder.__init__(self)
+        super().__init__()
         self.target_func = target_func
         self.result_type = result_type
         self.result_signed = result_signed

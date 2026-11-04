@@ -112,12 +112,18 @@ class Var(Param):
     :param divisibility: Assert that the integer value is a multiple of this
     :param alternate_ir_type_fetch_func: Returns the IR type a packing call
         provider forwards the value as when it is not the value's own type
+    :param pass_pointee_as: For a ``"handle"`` whose pointee the callee takes
+        by value: returns the IR type of that aggregate. A packing call
+        provider then forwards the handle itself under that type (the
+        aggregate loaded from it, or its address in the ``void**`` array)
+        instead of packing the pointer into a stack slot
     """
 
     name: str
     dtype: "tvm_ffi.dtype"
     divisibility: Optional[int]
     alternate_ir_type_fetch_func: Optional[Callable[["MLIRBuilder"], "ir.Type"]] = None
+    pass_pointee_as: Optional[Callable[["MLIRBuilder"], "ir.Type"]] = None
 
     def __init__(
         self,
@@ -128,11 +134,13 @@ class Var(Param):
         alternate_ir_type_fetch_func: Optional[
             Callable[["MLIRBuilder"], "ir.Type"]
         ] = None,
+        pass_pointee_as: Optional[Callable[["MLIRBuilder"], "ir.Type"]] = None,
     ) -> None:
         self.name = name
         self.dtype = tvm_ffi.dtype(dtype)
         self.divisibility = divisibility
         self.alternate_ir_type_fetch_func = alternate_ir_type_fetch_func
+        self.pass_pointee_as = pass_pointee_as
 
 
 class Shape(Param):

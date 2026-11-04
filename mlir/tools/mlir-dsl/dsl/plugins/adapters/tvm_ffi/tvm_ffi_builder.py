@@ -22,7 +22,7 @@ parameters. The ``tvm_ffi`` package is imported lazily (through
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Callable, Literal, Optional, Union
+from typing import Callable, ClassVar, Literal, Optional, Union
 
 from ..... import ir
 from .....dialects import llvm
@@ -466,7 +466,7 @@ class TVMFFIBuilder(MLIRBuilder):
         """
         overflow_flags = llvm.IntegerOverflowFlags.none
         if _is_bool_dtype(target_dtype):
-            return llvm.icmp(llvm.ICmpPredicate.ne, v_int64, self.i64(0))
+            return self.not_equal(v_int64, self.i64(0))
         if target_dtype.bits == 64:
             return v_int64
         if target_dtype.bits == 32:
@@ -482,7 +482,7 @@ class TVMFFIBuilder(MLIRBuilder):
                 res=self.i8_type, arg=v_int64, overflow_flags=overflow_flags
             )
         if target_dtype.bits == 1:
-            return llvm.icmp(llvm.ICmpPredicate.ne, v_int64, self.i64(0))
+            return self.not_equal(v_int64, self.i64(0))
         raise DSLUserCodeError(
             TvmFfiDiagId.UNSUP_PARAM, detail=f"Unsupported Var dtype: {target_dtype}"
         )
@@ -746,6 +746,10 @@ class TVMFFIFunctionBuilder(TVMFFIBuilder):
 
     :param module: The module the wrapper is added to
     """
+
+    # What the mismatch message calls a compile-time constant; a DSL that
+    # names them differently sets it on its own builder subclass.
+    const_value_noun: ClassVar[str] = "Meta value"
 
     module: ir.Module
     current_fn_signature: str
@@ -1063,7 +1067,7 @@ class TVMFFIFunctionBuilder(TVMFFIBuilder):
             lambda: value_ok,
             "ValueError",
             self._arg_err(
-                "Mismatched Meta value ",
+                f"Mismatched {self.const_value_noun} ",
                 arg_context,
                 f", expected {expected_repr}",
             ),
@@ -2040,6 +2044,8 @@ def attach_ffi_func(
     params: Sequence[spec.Param],
     call_provider: CallProvider,
     fn_display_name: Optional[str] = None,
+    *,
+    builder_class: type[TVMFFIFunctionBuilder] = TVMFFIFunctionBuilder,
 ) -> None:
     """Add ``llvm.func @__tvm_ffi_<symbol_name>`` with the TVM-FFI ABI to ``module``.
 
@@ -2053,8 +2059,10 @@ def attach_ffi_func(
     :param call_provider: The calling convention towards the callee
     :param fn_display_name: The name shown in error messages (defaults to
         ``symbol_name``)
+    :param builder_class: The function builder to emit with; a DSL passes its
+        own :class:`TVMFFIFunctionBuilder` subclass
     """
-    builder = TVMFFIFunctionBuilder(module)
+    builder = builder_class(module)
     builder.attach_ffi_func(symbol_name, params, call_provider, fn_display_name)
 
 
